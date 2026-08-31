@@ -79,9 +79,12 @@ type System interface {
 	FileStream(ctx context.Context, path string) (io.ReadCloser, error)
 }
 
-// Android is the real implementation. The agent is started by the Magisk
-// service.sh, so it already runs as root and never needs to shell out to su.
+// Android is the real implementation. The agent is started as root — by the
+// Magisk service.sh on a box, by an init service inside a Redroid container —
+// so it never needs to shell out to su.
 type Android struct {
+	// Reported instead of ro.serialno when set. See config.Config.Serial.
+	serialOverride string
 	// CPU time is a counter, not a gauge: a percentage only exists between two
 	// readings. These carry the previous one from beat to beat.
 	cpuMu   sync.Mutex
@@ -98,7 +101,9 @@ type cpuReading struct {
 	at    time.Time
 }
 
-func NewAndroid() *Android { return &Android{} }
+func NewAndroid(serialOverride string) *Android {
+	return &Android{serialOverride: serialOverride}
+}
 
 func (a *Android) Exec(ctx context.Context, name string, args ...string) (string, error) {
 	cmd := exec.CommandContext(ctx, name, args...)
@@ -456,7 +461,20 @@ func (a *Android) UptimeSeconds() int64 {
 	if err != nil {
 		return 0
 	}
-	fields := strings.Fields(out)
+	return uptimeSeconds(out, readProc("/proc/1/stat"))
+}
+
+// uptimeSeconds is how long *this* Android has been up, which is not the same
+// as how long the kernel has.
+//
+// A container shares the host's kernel, so /proc/uptime inside one reports the
+// host's uptime — N boxes on a server would all report the same climbing
+// number. What did start when this Android started is its pid 1, so subtracting
+// how long ago that happened gives the real answer. On a box with its own
+// kernel init starts at boot, the subtraction is ~0, and this is the plain
+// reading it always was; no container detection needed either way.
+func uptimeSeconds(uptime, pid1Stat string) int64 {
+	fields := strings.Fields(uptime)
 	if len(fields) == 0 {
 		return 0
 	}
@@ -464,7 +482,36 @@ func (a *Android) UptimeSeconds() int64 {
 	if err != nil {
 		return 0
 	}
+	if start, ok := procStartTicks(pid1Stat); ok {
+		secs -= float64(start) / clockTicksPerSecond
+	}
+	if secs < 0 {
+		return 0
+	}
 	return int64(secs)
+}
+
+// procStartTicks is field 22 of a /proc/<pid>/stat line: when the process
+// started, in clock ticks since the kernel booted.
+//
+// Split from the right like procCPUTicks, for the same reason: field 2 is the
+// executable name in parentheses and may contain spaces. Everything after the
+// closing parenthesis begins at field 3, so field 22 is the 20th of that
+// remainder.
+func procStartTicks(line string) (uint64, bool) {
+	end := strings.LastIndexByte(line, ')')
+	if end < 0 {
+		return 0, false
+	}
+	fields := strings.Fields(line[end+1:])
+	if len(fields) < 20 {
+		return 0, false
+	}
+	ticks, err := strconv.ParseUint(fields[19], 10, 64)
+	if err != nil {
+		return 0, false
+	}
+	return ticks, true
 }
 
 // procField pulls one whitespace-separated field out of a /proc file. These
@@ -478,6 +525,9 @@ func readProc(path string) string {
 	return string(data)
 }
 
+// LoadAvg is the whole machine's, deliberately. Linux has no per-container load
+// average — there is nothing to scope it to — so boxes sharing a host all
+// report the same figure, and reading it as one box's own load is a mistake.
 func (a *Android) LoadAvg() (float64, float64, float64) {
 	fields := strings.Fields(readProc("/proc/loadavg"))
 	if len(fields) < 3 {
@@ -490,8 +540,38 @@ func (a *Android) LoadAvg() (float64, float64, float64) {
 }
 
 func (a *Android) Memory() (uint64, uint64) {
+	// /proc/meminfo inside a container is the host's, so a memory-limited box
+	// would report the whole server's RAM. The cgroup knows the real ceiling.
+	if total, available, ok := cgroupMemory(
+		readProc("/sys/fs/cgroup/memory.max"),
+		readProc("/sys/fs/cgroup/memory.current"),
+	); ok {
+		return total, available
+	}
+	return meminfoMemory(readProc("/proc/meminfo"))
+}
+
+// cgroupMemory reads the cgroup v2 limit and usage. Not ok when there is no
+// cgroup at all, or when it is unlimited — `memory.max` reads "max" then, and
+// the host's own total is the honest answer, which is what a real box gives.
+func cgroupMemory(max, current string) (uint64, uint64, bool) {
+	limit, err := strconv.ParseUint(strings.TrimSpace(max), 10, 64)
+	if err != nil || limit == 0 {
+		return 0, 0, false
+	}
+	used, err := strconv.ParseUint(strings.TrimSpace(current), 10, 64)
+	if err != nil {
+		return 0, 0, false
+	}
+	if used > limit {
+		used = limit
+	}
+	return limit, limit - used, true
+}
+
+func meminfoMemory(meminfo string) (uint64, uint64) {
 	var total, available uint64
-	scanner := bufio.NewScanner(strings.NewReader(readProc("/proc/meminfo")))
+	scanner := bufio.NewScanner(strings.NewReader(meminfo))
 	for scanner.Scan() {
 		fields := strings.Fields(scanner.Text())
 		if len(fields) < 2 {
@@ -881,7 +961,12 @@ func (a *Android) DeviceInfo(ctx context.Context) proto.DeviceInfo {
 	sdk, _ := strconv.Atoi(a.Prop(ctx, "ro.build.version.sdk"))
 	density, _ := strconv.Atoi(a.Prop(ctx, "ro.sf.lcd_density"))
 
-	serial := a.Prop(ctx, "ro.serialno")
+	// An explicit serial wins over anything the box reports. A container has no
+	// stable one of its own, and the hub keys a device on this string alone.
+	serial := a.serialOverride
+	if serial == "" {
+		serial = a.Prop(ctx, "ro.serialno")
+	}
 	if serial == "" {
 		serial = a.Prop(ctx, "ro.boot.serialno")
 	}

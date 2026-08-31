@@ -22,7 +22,8 @@ import (
 	"magnemite/agent/internal/sys"
 )
 
-// Where service.sh keeps the agent's own log.
+// Where the agent's own log is kept: the Magisk service.sh writes it on a box,
+// magnemite-start.sh inside a Redroid container. The agent only ever reads it.
 const (
 	dataDir     = "/data/adb/magnemite"
 	agentLog    = dataDir + "/agent.log"

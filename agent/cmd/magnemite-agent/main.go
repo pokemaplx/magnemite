@@ -1,9 +1,10 @@
 // Command magnemite-agent runs on each rooted Android TV box. It holds a
 // WebSocket open to the hub and installs the .apkm updates the hub sends it.
 //
-// On a real box it is started as root by the Magisk module's service.sh.
-// With -fake-root it simulates a box, which is how the fleet is load-tested
-// without hardware.
+// On a real box it is started as root by the Magisk module's service.sh, and
+// inside a Redroid container by an init service — either way it is already root
+// and never shells out to su. With -fake-root it simulates a box, which is how
+// the fleet is load-tested without hardware.
 package main
 
 import (
@@ -33,6 +34,8 @@ func main() {
 		enrollToken = flag.String("enroll-token", "", "enrollment token, used once on first run")
 		name        = flag.String("name", "", "friendly name for this box")
 		workDir     = flag.String("work-dir", "", "scratch directory (default "+config.DefaultWorkDir+")")
+		serial      = flag.String("serial", "", "serial to report instead of ro.serialno")
+		rebootCmd   = flag.String("reboot-command", "", "what a reboot from the hub runs (default \"reboot\")")
 		fakeRoot    = flag.Bool("fake-root", false, "simulate an Android box instead of touching a real one")
 		fakeSerial  = flag.String("fake-serial", "", "serial to report in -fake-root mode")
 		showVersion = flag.Bool("version", false, "print the agent version and exit")
@@ -76,6 +79,12 @@ func main() {
 	if *workDir != "" {
 		cfg.WorkDir = *workDir
 	}
+	if *serial != "" {
+		cfg.Serial = *serial
+	}
+	if *rebootCmd != "" {
+		cfg.RebootCommand = *rebootCmd
+	}
 	if cfg.ServerURL == "" {
 		log.Fatalf("no server URL: pass -server or put serverUrl in %s", path)
 	}
@@ -93,7 +102,7 @@ func main() {
 		log.SetPrefix("[" + serial + "] ")
 		log.Printf("running in fake-root mode — no real device is touched")
 	} else {
-		system = sys.NewAndroid()
+		system = sys.NewAndroid(cfg.Serial)
 		if servers := netfix.Install(); len(servers) > 0 {
 			// Android has no /etc/resolv.conf; without this every lookup fails.
 			log.Printf("using dns servers from system properties: %v", servers)

@@ -1,0 +1,8 @@
+# The scripts that ship to a device are read by Android's sh, which treats a
+# trailing \r as part of the command and fails in a way that reads like the file
+# is missing. A Windows checkout with core.autocrlf=true would produce exactly
+# that, so pin them.
+*.sh text eol=lf
+agent/magisk/module.prop text eol=lf
+agent/redroid/magnemite.rc text eol=lf
+Makefile text eol=lf

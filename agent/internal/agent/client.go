@@ -422,13 +422,21 @@ func (a *Agent) handle(ctx context.Context, data []byte) {
 		a.cancelJob(msg.JobID)
 
 	case "reboot":
-		log.Printf("reboot requested by hub")
+		// A box with its own kernel reboots. A container has none to restart —
+		// it shares the host's, and the kernel refuses reboot(2) without
+		// CAP_SYS_BOOT — so it points this at a framework restart instead. Same
+		// intent either way: everything the box was running comes back up.
+		cmd := a.Cfg.RebootCommand
+		if cmd == "" {
+			cmd = "reboot"
+		}
+		log.Printf("reboot requested by hub: %s", cmd)
 		go func() {
 			rctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 			defer cancel()
 			// Give the frame a moment to reach the hub before the box drops.
 			time.Sleep(2 * time.Second)
-			_, _ = a.Sys.Exec(rctx, "reboot")
+			_, _ = a.Sys.Shell(rctx, cmd)
 		}()
 
 	case "agent_update":

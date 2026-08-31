@@ -99,16 +99,18 @@ Optional; see [Rotom](/docs/fleet/rotom).
 
 Per-box, in `/data/adb/magnemite/config.json` or as flags:
 
-| Flag            | Config key        | What it is                                                                             |
-| --------------- | ----------------- | -------------------------------------------------------------------------------------- |
-| `-server`       | `serverUrl`       | The **hub** URL — `MAGNEMITE_PUBLIC_URL`, never the dashboard's.                       |
-| `-enroll-token` | `enrollmentToken` | Used once on first run, then deleted from the config.                                  |
-| `-name`         | `name`            | Friendly name for the box.                                                             |
-| `-config`       | —                 | Path to `config.json`.                                                                 |
-| `-work-dir`     | —                 | Scratch directory for downloads and extraction.                                        |
-| `-fake-root`    | —                 | Simulate an Android box. See [testing without hardware](/docs/development/fake-fleet). |
-| `-fake-serial`  | —                 | Serial to report in `-fake-root` mode.                                                 |
-| `-version`      | —                 | Print the agent version and exit.                                                      |
+| Flag              | Config key        | What it is                                                                             |
+| ----------------- | ----------------- | -------------------------------------------------------------------------------------- |
+| `-server`         | `serverUrl`       | The **hub** URL — `MAGNEMITE_PUBLIC_URL`, never the dashboard's.                       |
+| `-enroll-token`   | `enrollmentToken` | Used once on first run, then deleted from the config.                                  |
+| `-name`           | `name`            | Friendly name for the box.                                                             |
+| `-config`         | —                 | Path to `config.json`.                                                                 |
+| `-work-dir`       | —                 | Scratch directory for downloads and extraction.                                        |
+| `-serial`         | `serial`          | Report this serial instead of `ro.serialno`. Needed on [Redroid](/docs/fleet/redroid). |
+| `-reboot-command` | `rebootCommand`   | What a reboot from the hub runs. Default `reboot`.                                     |
+| `-fake-root`      | —                 | Simulate an Android box. See [testing without hardware](/docs/development/fake-fleet). |
+| `-fake-serial`    | —                 | Serial to report in `-fake-root` mode.                                                 |
+| `-version`        | —                 | Print the agent version and exit.                                                      |
 
 ## Not env vars
 

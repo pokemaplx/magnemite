@@ -1,0 +1,159 @@
+---
+title: Boxes in containers
+description: Run boxes as Redroid containers instead of hardware. The image is the install, so there is no zip to flash...
+icon: Container
+---
+
+[Redroid](https://github.com/remote-android/redroid-doc) is Android running as a
+Docker container on a Linux host. Magnemite treats one container as one box: it
+enrolls, heartbeats, takes rollouts and installs real APKs, all through the same
+agent and the same protocol as a TV box on a shelf.
+
+This is not the [fake fleet](/docs/development/fake-fleet). A fake box is a Go
+process on your laptop wearing an Android costume, with `pm` and `dumpsys`
+stubbed out. A Redroid box is Android — `pm install-create` genuinely installs.
+
+## What Magisk was actually for
+
+Nothing in the agent binary needs Magisk. It never shells out to `su` and never
+checks whether it is root; it assumes it was started as root and would fail at
+the first `pm` call if it were not. Magisk supplies exactly three things, all of
+them in `service.sh`: start the agent as root, wait for `sys.boot_completed`,
+restart it when it exits.
+
+Android's own `init` does all three. So the container equivalent of the module
+zip is an init service — `agent/redroid/magnemite.rc` — and a start script that
+does what `customize.sh` did at flash time.
+
+## Host requirements
+
+- **arm64.** The fleet's bundles carry an `arm64-v8a` split and the agent
+  matches the ABI exactly, refusing to install the wrong native libraries. An
+  x86_64 Redroid needs ARM translation and a different split policy; it is not
+  a supported target.
+- **The binder kernel module**, with the device names Android expects:
+
+```sh
+sudo modprobe binder_linux devices="binder,hwbinder,vndbinder"
+# kernels older than 5.18 also want:
+sudo modprobe ashmem_linux
+```
+
+## Build the image
+
+```sh
+make redroid
+# → magnemite/redroid:1.0.0
+```
+
+Unlike `make module`, this takes no `SERVER` and no `TOKEN`. **The image holds
+no secret**, so one image serves every fleet — the hub URL and the enrollment
+token are properties passed to each container at run time.
+
+The base image is `REDROID_BASE`, default
+`redroid/redroid:13.0.0_64only-latest`.
+
+## Run the boxes
+
+Set two values in `.env`:
+
+```sh title=".env"
+REDROID_HUB_URL=https://magnemite.example.com
+REDROID_ENROLL_TOKEN=…
+```
+
+```sh
+docker compose --env-file .env -f deploy/redroid.compose.yml up -d
+```
+
+<Callout type="warn">
+  `REDROID_HUB_URL` is the **hub** URL, never the dashboard's — the same rule, and the same failure,
+  as `SERVER` when [flashing a module](/docs/fleet/agent#build-the-module).
+</Callout>
+
+Each box is one service. The shipped file has two; a third is that block copied
+with a new name, a new volume and a new serial.
+
+| Property                    | What it does                                             |
+| --------------------------- | -------------------------------------------------------- |
+| `ro.serialno`               | The box's identity. **Must differ per box** — see below. |
+| `ro.magnemite.server`       | The hub URL.                                             |
+| `ro.magnemite.enroll_token` | Traded once for a device token, then dropped.            |
+| `ro.magnemite.reboot_cmd`   | What a reboot from the hub runs.                         |
+| `ro.magnemite.serial`       | Overrides the serial without touching `ro.serialno`.     |
+
+## The serial is the whole identity
+
+The hub keys a device on its serial string and nothing else. A box that reports
+a new serial is a new box, with a new row, a new name and no history.
+
+A container has no `ro.serialno` of its own, and the agent's fallback is the
+first MAC it finds — which Docker reassigns every time the container is
+recreated. Left alone, every `docker compose up --force-recreate` would fill
+the Devices table with duplicates.
+
+<Callout type="warn">
+  Give every box an explicit `ro.serialno`, unique across the fleet. Two boxes sharing one serial
+  are one box as far as the hub is concerned, and they will fight over it.
+</Callout>
+
+## Reboot means something different
+
+A container has no kernel of its own to restart — it shares the host's, and the
+kernel refuses `reboot(2)` without `CAP_SYS_BOOT`. Killing pid 1 from inside
+does not work either: the kernel ignores signals a process in its own PID
+namespace sends to its pid 1.
+
+So `ro.magnemite.reboot_cmd=stop && start` restarts the **framework** instead:
+zygote and every app come back, `init` and the kernel do not move. That is what
+a monitoring rule with a `REBOOT` action actually wants — the scanner and the
+game running again.
+
+The hub's reboot button and every `REBOOT` rule run this command. It is a
+property, so a fleet whose image handles reboots differently changes it without
+rebuilding anything.
+
+## Which metrics are real
+
+| Reading      | In a container                                                                                                                                           |
+| ------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Storage      | The box's own. `/data` is its volume.                                                                                                                    |
+| Uptime       | The box's own — how long _this_ Android has been up, not the host.                                                                                       |
+| Memory       | The box's own **if you set `mem_limit`**, from its cgroup. Without a limit it reads the host's total, and every box on the machine reports the same RAM. |
+| CPU count    | Respects `cpuset`, not the `cpus` quota.                                                                                                                 |
+| Load average | **The host's.** Linux has no per-container load average.                                                                                                 |
+| Temperature  | **The host's.** A container has no thermal sensor.                                                                                                       |
+
+Boxes sharing a host therefore show identical load and temperature. That is
+correct, not a bug — but do not write a monitoring rule that reads either as one
+box's own state.
+
+## Self-updates still work
+
+Exactly as on hardware: the hub sends `agent_update`, the box downloads with its
+own device token, verifies the sha256, keeps `.old` and re-execs.
+
+The agent runs from `/data/adb/magnemite/magnemite-agent`, not from
+`/system/bin` — `/system` is read-only at runtime, so an agent running from
+there could never replace itself. The image ships a seed copy in `/system/bin`,
+and `magnemite-start.sh` copies it across on first boot.
+
+A version marker keeps the two from fighting: an over-the-air update survives a
+`docker restart`, and rebuilding the image raises the floor for every box.
+
+<Callout type="info">
+  Rebuilding the image is only needed for a new agent floor, or when `magnemite.rc` or
+  `magnemite-start.sh` themselves change — the container equivalent of [when the module is needed
+  again](/docs/fleet/agent#when-the-module-is-needed-again).
+</Callout>
+
+## When a box does not appear
+
+1. **Did the service start?** `adb connect <host>:5555`, then
+   `adb shell 'ps -A | grep magnemite-agent'`. It should be there, as root.
+2. **What did it say?** `adb shell logcat -b all | grep -i magnemite`, and
+   `adb shell cat /data/adb/magnemite/agent.log`.
+3. **SELinux.** Redroid normally runs permissive, and `magnemite.rc` sets no
+   `seclabel` for that reason. An image that enforces will deny the service; the
+   denial is in `logcat`.
+4. **A duplicate row per restart** is the serial. See above.

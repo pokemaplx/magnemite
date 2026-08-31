@@ -3,6 +3,7 @@
   "icon": "Smartphone",
   "pages": [
     "agent",
+    "redroid",
     "enrollment",
     "rollouts",
     "update",

@@ -65,6 +65,18 @@ module: agent ## Package the Magisk module zip into dist/
 	@rm -rf dist/module
 	@echo "Module: dist/magnemite-agent-$(VERSION).zip"
 
+# Redroid boxes: Android in a container instead of on a shelf. The image is the
+# install, so unlike the Magisk zip it takes no SERVER or TOKEN — those are
+# properties on the docker command line, and the image stays free of secrets.
+REDROID_BASE ?= redroid/redroid:13.0.0_64only-latest
+REDROID_TAG  ?= magnemite/redroid:$(VERSION)
+
+.PHONY: redroid
+redroid: agent ## Build the Redroid image with the agent baked in (arm64 host)
+	docker build -f agent/redroid/Dockerfile --build-arg REDROID=$(REDROID_BASE) \
+		-t $(REDROID_TAG) agent
+	@echo "Image: $(REDROID_TAG)"
+
 # Narrow every compose target to one service: `make build up SERVICE=web`
 # rebuilds and restarts the dashboard alone, leaving the hub -- and the device
 # sockets it holds -- untouched.

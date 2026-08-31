@@ -113,9 +113,11 @@ I know the feeling, such a headache. Check the following:
 | Token still valid?     | A revoked enrollment token blocks _new_ enrollments; a revoked device is disconnected. |
 | DNS?                   | See [DNS on Android](/docs/operations/troubleshooting#dns-on-android) above.           |
 
-When the table settles nothing, read the agent's own log. It is written by the
-Magisk service to `/data/adb/magnemite/agent.log`, rotated to `agent.log.1` at
-2 MB, and it is where enrollment and connection failures actually print:
+When the table settles nothing, read the agent's own log. It is written to
+`/data/adb/magnemite/agent.log` — by the Magisk service on a box, by
+`magnemite-start.sh` in a [Redroid container](/docs/fleet/redroid) — rotated to
+`agent.log.1` at 2 MB, and it is where enrollment and connection failures
+actually print:
 
 ```sh
 # the whole log, and the rotated previous one
@@ -144,6 +146,31 @@ adb shell su -c 'ls -l /data/adb/modules/magnemite-agent/'
 adb shell su -c 'ps -A | grep magnemite'
 adb logcat -d | grep -i magnemite
 ```
+
+## Redroid boxes
+
+Three failures particular to [containers](/docs/fleet/redroid):
+
+**A new device row on every restart** is the serial. A container has no
+`ro.serialno` of its own, so the agent falls back to a MAC that Docker
+reassigns on recreate, and the hub — which keys a device on its serial alone —
+sees a box it has never met. Give each container an explicit, unique
+`ro.serialno`.
+
+**No agent process** means `init` never started the service. Redroid normally
+runs SELinux permissive and `magnemite.rc` sets no `seclabel` for that reason;
+an image that enforces denies the service, and the denial is in `logcat`:
+
+```sh
+adb shell 'ps -A | grep magnemite-agent'
+adb shell logcat -b all | grep -i magnemite
+adb shell 'ls -l /system/etc/init/magnemite.rc /data/adb/magnemite/'
+```
+
+**Identical load and temperature across boxes** is correct. Linux has no
+per-container load average and a container has no thermal sensor, so both are
+the host's. Uptime and storage are the box's own; memory is too, but only when
+the container has a `mem_limit`.
 
 ## Downloads 401 at the edge
 

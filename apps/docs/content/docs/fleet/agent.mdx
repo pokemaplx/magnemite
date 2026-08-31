@@ -79,6 +79,12 @@ reference](/docs/deployment/environment#the-agents-own-configuration).
 and picks at install time; the other two are for a [fake
 fleet](/docs/development/fake-fleet).
 
+<Callout type="info">
+  A box does not have to be hardware. The same binary runs in a [Redroid
+  container](/docs/fleet/redroid), started by Android's own `init` instead of Magisk — no zip, no
+  flashing, one service per box.
+</Callout>
+
 ## The agent updates itself, oh yeah!
 
 Thank god. Nothing is flashed again. The hub image cross-compiles the agent during its own

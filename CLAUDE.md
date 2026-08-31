@@ -1,7 +1,10 @@
 # Working on Magnemite
 
 A fleet manager for rooted Android TV boxes: a Go agent on each box, a Node hub
-holding their sockets, a Next dashboard, Postgres or MariaDB behind both.
+holding their sockets, a Next dashboard, Postgres or MariaDB behind both. A box
+can also be a Redroid container rather than hardware — same agent, same
+protocol, started by Android's own `init` instead of Magisk
+(`fleet/redroid.mdx`).
 
 **The real documentation is in `apps/docs/content/docs/`** and it is good — read
 it rather than re-deriving. `development/local.mdx` is the setup, and
