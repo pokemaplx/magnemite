@@ -577,7 +577,16 @@ export async function readNamesFromBoxes(
 function nameKeyIn(template: string): string[] | null {
   let parsed: unknown;
   try {
-    parsed = JSON.parse(template.replace(/\{\{[^{}]*\}\}/g, (token) => JSON.stringify(token)));
+    // Tokens sit in two places: inside a string ("deviceName": "{{device.name}}"),
+    // where the template is already valid JSON, and bare where a number or a
+    // boolean goes ("workers": {{device.workers}}), where it is not. Only the
+    // bare ones need quoting — quoting one that is already quoted doubles the
+    // quotes and the parse fails, which used to read as "no such field".
+    parsed = JSON.parse(
+      template.replace(/"(?:[^"\\]|\\.)*"|\{\{[^{}]*\}\}/g, (match) =>
+        match.startsWith('"') ? match : JSON.stringify(match),
+      ),
+    );
   } catch {
     return null;
   }
