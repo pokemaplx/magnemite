@@ -1,3 +1,4 @@
+import type { MonitorChannel } from "@magnemite/db";
 import {
   AppWindow,
   Ban,
@@ -300,6 +301,31 @@ export const LEVEL_OPTIONS = [
   { value: "WARN", label: "Warning" },
   { value: "CRITICAL", label: "Critical" },
 ];
+
+/**
+ * The notification channels, for the browser.
+ *
+ * `@magnemite/db` owns the ids — it is what reads and writes the column — but
+ * importing the *values* from there drags Prisma and `node:crypto` into a
+ * client bundle, which fails the build with an unhandled `node:` scheme
+ * rather than anything that names the real problem. So the ids are restated
+ * here and tied back with two type-level checks that cost nothing at runtime:
+ * `satisfies` rejects an id that is not a channel, and the `Record` below
+ * rejects a channel that is missing from it. A channel added or renamed in the
+ * database package fails to compile here rather than quietly disappearing from
+ * the picker.
+ */
+export const CHANNEL_IDS = [
+  "discord",
+  "ntfy",
+  "webPush",
+] as const satisfies readonly MonitorChannel[];
+
+export const CHANNEL_LABELS: Record<MonitorChannel, string> = {
+  discord: "Discord",
+  ntfy: "ntfy",
+  webPush: "Web push",
+};
 
 export const PROBE_OPTIONS = [
   { value: "none", label: "No probe" },

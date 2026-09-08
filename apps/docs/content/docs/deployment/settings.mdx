@@ -54,43 +54,67 @@ Stored under a `monitor.` prefix and read by the evaluation pass. Most are
 ceilings rather than features — [monitoring](/docs/fleet/monitoring) has the
 why for each.
 
-| Setting                      | Default   | Min        | What it does                                                                                                                                                                                                                              |
-| ---------------------------- | --------- | ---------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **Enabled**                  | `off`     | —          | The master switch. Off, so upgrading a fleet never starts remediating by itself.                                                                                                                                                          |
-| **Ask Rotom every**          | `10s`     | `5`        | Resolution of everything Rotom-shaped, at one request per interval for the whole fleet. It floors **Metric history → Scanner (Rotom) → Sample every**, which is what decides how much is kept. Ignored when the Rotom integration is off. |
-| **Rotom stale after**        | `600s`    | `2 × sync` | Silence from Rotom before a box counts as disconnected. Measured against the sync interval above.                                                                                                                                         |
-| **After a reboot**           | `600s`    | `60`       | No action on a box for this long after we rebooted it, so a slow boot is not rebooted again.                                                                                                                                              |
-| **After a hub restart**      | `180s`    | `0`        | Nothing acts for this long after the hub starts, while the whole fleet reconnects.                                                                                                                                                        |
-| **Actions per box per hour** | `4`       | `1`        | Circuit breaker. Past it, the box is alerted about and left alone.                                                                                                                                                                        |
-| **Reboots per box per day**  | `6`       | `1`        | The same, for the expensive half of the ladder.                                                                                                                                                                                           |
-| **Repeat an alert after**    | `30 min`  | `0`        | The same signal on the same box is not re-announced inside this.                                                                                                                                                                          |
-| **Keep history for**         | `30 days` | `0`        | Monitor history retention. `0` keeps it forever.                                                                                                                                                                                          |
-| **Discord webhook**          | empty     | —          | Empty turns notifications off while leaving remediation running.                                                                                                                                                                          |
-| **Announce from**            | `WARN`    | —          | `INFO`, `WARN` or `CRITICAL`. Below it, a signal is acted on but not announced.                                                                                                                                                           |
-| **Mention role**             | empty     | —          | Pinged on `CRITICAL` only. Empty pings nobody.                                                                                                                                                                                            |
+| Setting                      | Default           | Min        | What it does                                                                                                                                                                                                                              |
+| ---------------------------- | ----------------- | ---------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Enabled**                  | `off`             | —          | The master switch. Off, so upgrading a fleet never starts remediating by itself.                                                                                                                                                          |
+| **Ask Rotom every**          | `10s`             | `5`        | Resolution of everything Rotom-shaped, at one request per interval for the whole fleet. It floors **Metric history → Scanner (Rotom) → Sample every**, which is what decides how much is kept. Ignored when the Rotom integration is off. |
+| **Rotom stale after**        | `600s`            | `2 × sync` | Silence from Rotom before a box counts as disconnected. Measured against the sync interval above.                                                                                                                                         |
+| **After a reboot**           | `600s`            | `60`       | No action on a box for this long after we rebooted it, so a slow boot is not rebooted again.                                                                                                                                              |
+| **After a hub restart**      | `180s`            | `0`        | Nothing acts for this long after the hub starts, while the whole fleet reconnects.                                                                                                                                                        |
+| **Actions per box per hour** | `4`               | `1`        | Circuit breaker. Past it, the box is alerted about and left alone.                                                                                                                                                                        |
+| **Reboots per box per day**  | `6`               | `1`        | The same, for the expensive half of the ladder.                                                                                                                                                                                           |
+| **Repeat an alert after**    | `30 min`          | `0`        | The same signal on the same box is not re-announced inside this.                                                                                                                                                                          |
+| **Keep history for**         | `30 days`         | `0`        | Monitor history retention. `0` keeps it forever.                                                                                                                                                                                          |
+| **Discord webhook**          | empty             | —          | Empty turns notifications off while leaving remediation running.                                                                                                                                                                          |
+| **Mention role**             | empty             | —          | Pinged on `CRITICAL` only. Empty pings nobody.                                                                                                                                                                                            |
+| **ntfy server**              | `https://ntfy.sh` | —          | The public ntfy, or your own. The topic beside it is what decides whether ntfy is used at all.                                                                                                                                            |
+| **ntfy topic**               | empty             | —          | Empty turns ntfy off. On ntfy.sh anyone who guesses the topic reads your alerts, so pick a name nobody would.                                                                                                                             |
+| **ntfy access token**        | empty             | —          | Only for a protected or reserved topic. Empty publishes anonymously.                                                                                                                                                                      |
+| **Web push**                 | `off`             | —          | Notifications in the dashboard's own browsers. Needs a VAPID keypair in the hub's environment; without one the card says so and the switch is unavailable.                                                                                |
 
 The pass itself has no interval to set: it runs once per heartbeat, because it
 reads what the boxes last said and they say it once per beat.
+
+The three channels are independent: each has its own credential, and one being
+broken says nothing about the other two. What they share is **Repeat an alert
+after** — the point of that window is that a flapping box does not announce
+itself thirty times, and a window per channel would let it do exactly that by
+taking turns.
+
+**None of them has a minimum severity.** Which rules reach which channel is
+picked on each rule, in **Announce it**. There used to be a floor per channel
+as well, and two filters in series meant a rule set to announce could silently
+not — with nothing on the rule to say why. One filter, where the person looking
+for the reason is already looking.
+
+The VAPID keypair for web push is the one notification credential that is
+**not** here. A push service only accepts a message signed by the key it saw
+when the browser subscribed, so it is deployment identity rather than a knob:
+it goes in the hub's environment as `VAPID_PUBLIC_KEY`, `VAPID_PRIVATE_KEY` and
+`VAPID_SUBJECT`, generated once with `npx web-push generate-vapid-keys`.
+Regenerating the pair silently unsubscribes every browser, which is exactly why
+there is no button for it.
 
 ### A monitoring rule
 
 From **Settings → Monitoring → Add rule**. Seeded rules are written
 **disabled**, and only onto a fleet that has none.
 
-| Field             | Default        | What it does                                                                                  |
-| ----------------- | -------------- | --------------------------------------------------------------------------------------------- |
-| **Enabled**       | `off`          | New and seeded rules both arrive off.                                                         |
-| **Signal**        | `SERVICE_DOWN` | What the rule watches.                                                                        |
-| **Probe**         | `none`         | The command sent to the boxes, when the signal needs one.                                     |
-| **Group**         | fleet-wide     | A group-scoped rule replaces the fleet-wide one for that group rather than stacking.          |
-| **Threshold**     | `1`            | Consecutive bad samples before the ladder starts. `1` acts immediately.                       |
-| **Cooldown**      | `300s`         | After an action, how long before this rule may act on that box again.                         |
-| **Window**        | none           | `HH:MM`–`HH:MM`. Alerts still go out outside it; only the actions are held.                   |
-| **Notify**        | `on`           | Whether the rule announces itself at all.                                                     |
-| **Notify level**  | `WARN`         | The level it announces at.                                                                    |
-| **Probe timeout** | `10s`          | Budget on the box. A probe that runs out reads as _unknown_, which neither counts nor resets. |
-| **Log lines**     | `200`          | For the log-scanning probes: how much tail is read.                                           |
-| **Fail at**       | `1`            | How many pattern matches count as a failure.                                                  |
+| Field             | Default        | What it does                                                                                                 |
+| ----------------- | -------------- | ------------------------------------------------------------------------------------------------------------ |
+| **Enabled**       | `off`          | New and seeded rules both arrive off.                                                                        |
+| **Signal**        | `SERVICE_DOWN` | What the rule watches.                                                                                       |
+| **Probe**         | `none`         | The command sent to the boxes, when the signal needs one.                                                    |
+| **Group**         | fleet-wide     | A group-scoped rule replaces the fleet-wide one for that group rather than stacking.                         |
+| **Threshold**     | `1`            | Consecutive bad samples before the ladder starts. `1` acts immediately.                                      |
+| **Cooldown**      | `300s`         | After an action, how long before this rule may act on that box again.                                        |
+| **Window**        | none           | `HH:MM`–`HH:MM`. Alerts still go out outside it; only the actions are held.                                  |
+| **Announce it**   | all channels   | Which channels this rule announces to. **Nowhere** still acts — quietly.                                     |
+| **Severity**      | `WARN`         | How loud it looks: the Discord colour, ntfy's priority, whether a browser notification sticks. Not a filter. |
+| **All-clear**     | `off`          | A second message on the same channels when the fault clears.                                                 |
+| **Probe timeout** | `10s`          | Budget on the box. A probe that runs out reads as _unknown_, which neither counts nor resets.                |
+| **Log lines**     | `200`          | For the log-scanning probes: how much tail is read.                                                          |
+| **Fail at**       | `1`            | How many pattern matches count as a failure.                                                                 |
 
 ## Settings → Apps
 

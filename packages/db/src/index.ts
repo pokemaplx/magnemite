@@ -340,10 +340,32 @@ export type MonitorSettingsValues = {
   eventRetentionDays: number;
   /** Empty turns notifications off while leaving remediation running. */
   discordWebhookUrl: string;
-  /** INFO, WARN or CRITICAL. Anything below it is acted on but not announced. */
-  discordMinLevel: string;
   /** A role to ping on CRITICAL only. Empty pings nobody. */
   discordMentionRoleId: string;
+  /**
+   * The ntfy server to publish to. Defaulted rather than empty because
+   * ntfy.sh is what almost everyone means, and a self-hosted one is the
+   * exception -- so the topic below is the field that decides whether ntfy is
+   * on at all.
+   */
+  ntfyUrl: string;
+  /** The topic. Empty turns ntfy off however the server URL is set. */
+  ntfyTopic: string;
+  /**
+   * Bearer token for a protected topic. Empty publishes anonymously, which is
+   * what a public ntfy.sh topic wants -- and is also why a topic worth
+   * protecting needs a name nobody guesses.
+   */
+  ntfyToken: string;
+  /**
+   * Web push to the browsers that subscribed.
+   *
+   * Off by default and useless without a VAPID keypair in the hub's
+   * environment -- unlike a webhook or a topic, there is nothing an operator
+   * can paste into a form that turns this on, so the switch is separate from
+   * the credential.
+   */
+  webPushEnabled: boolean;
 };
 
 const MONITOR_SETTINGS_DEFAULTS: MonitorSettingsValues = {
@@ -357,9 +379,47 @@ const MONITOR_SETTINGS_DEFAULTS: MonitorSettingsValues = {
   alertDedupeMinutes: 30,
   eventRetentionDays: 30,
   discordWebhookUrl: "",
-  discordMinLevel: "WARN",
   discordMentionRoleId: "",
+  ntfyUrl: "https://ntfy.sh",
+  ntfyTopic: "",
+  ntfyToken: "",
+  webPushEnabled: false,
 };
+
+/**
+ * The notification channels a rule can announce to.
+ *
+ * Here rather than in the hub because three things need the same list and the
+ * same ids: the hub sends, the dashboard renders the picker, and the rule rows
+ * store them. Ids are what is written to the database, so they are frozen --
+ * the labels beside them are not.
+ */
+export const MONITOR_CHANNELS = ["discord", "ntfy", "webPush"] as const;
+export type MonitorChannel = (typeof MONITOR_CHANNELS)[number];
+
+export const MONITOR_CHANNEL_LABELS: Record<MonitorChannel, string> = {
+  discord: "Discord",
+  ntfy: "ntfy",
+  webPush: "Web push",
+};
+
+/**
+ * Read a rule's `notifyChannels` column.
+ *
+ * An empty array is a real answer -- "act, say nothing" -- so it survives.
+ * Anything *unreadable* becomes every channel instead: a column that has been
+ * hand-edited, written by an older version, or corrupted is a bug, and of the
+ * two ways to get it wrong, a fleet that shouts is recoverable and a fleet
+ * that has gone quiet without saying so is the failure this whole subsystem
+ * exists to avoid.
+ */
+export function parseNotifyChannels(value: unknown): MonitorChannel[] {
+  if (!Array.isArray(value)) return [...MONITOR_CHANNELS];
+  const known = new Set<string>(MONITOR_CHANNELS);
+  return value.filter(
+    (entry): entry is MonitorChannel => typeof entry === "string" && known.has(entry),
+  );
+}
 
 export const MONITOR_SETTINGS_PREFIX = "monitor.";
 

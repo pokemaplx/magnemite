@@ -56,6 +56,34 @@ resource's **Environment** tab.
 | `AGENT_BIN_DIR`         | `/app/agent-bin`   | Where the hub image keeps those binaries.                                                        |
 | `LOG_LEVEL`             | `info` in prod     | pino level: `trace` … `fatal`. `PRISMA_LOG=1` logs every query — development only.               |
 
+## Web push
+
+Optional; see [Monitoring](/docs/fleet/monitoring#web-push). Without a keypair
+web push is simply unavailable, and the Monitoring tab says so rather than
+offering a button that cannot work.
+
+| Variable            | Default                    | What it is                                                                               |
+| ------------------- | -------------------------- | ---------------------------------------------------------------------------------------- |
+| `VAPID_PUBLIC_KEY`  | —                          | Handed to the browser at subscribe time. Needed by **both** the hub and the web.         |
+| `VAPID_PRIVATE_KEY` | —                          | Signs each push. **Hub only** — it must never reach the browser.                         |
+| `VAPID_SUBJECT`     | `mailto:admin@example.com` | Contact address for the push service. A `mailto:` or `https:` URL; required by the spec. |
+
+Generate the pair once:
+
+```sh
+npx web-push generate-vapid-keys
+```
+
+<Callout type="warn" title="The keypair is identity, not a setting">
+  A push service only accepts a message signed by the key it saw when the browser subscribed, so
+  regenerating the pair silently unsubscribes every browser that already opted in. Back it up with
+  `AUTH_SECRET`, and change it only when you mean to start over.
+</Callout>
+
+The Discord webhook, the ntfy topic and each channel's minimum severity are
+**not** here — those are pasted into **Settings → Monitoring**, because they
+are changed while running rather than at boot.
+
 ## Rotom
 
 Optional; see [Rotom](/docs/fleet/rotom).

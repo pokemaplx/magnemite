@@ -2,6 +2,7 @@
 
 import { useMemo, useState, useTransition, type ReactNode } from "react";
 import { Bell, BellOff, Binoculars, Pencil, Plus, Trash2, TriangleAlert } from "lucide-react";
+import type { MonitorChannel } from "@magnemite/db";
 import { deleteMonitorRule, setMonitorEnabled, setMonitorRuleEnabled } from "@/actions/monitoring";
 import type { ActionState } from "@/actions/rollouts";
 import { Badge } from "@/components/ui/badge";
@@ -16,7 +17,7 @@ import {
   type GroupChoice,
   type MonitorRuleRow,
 } from "@/components/settings/monitor-rule-dialog";
-import { actionMeta, signalMeta } from "@/lib/monitor-vocabulary";
+import { actionMeta, CHANNEL_IDS, CHANNEL_LABELS, signalMeta } from "@/lib/monitor-vocabulary";
 import { cn } from "@/lib/utils";
 
 export type {
@@ -36,8 +37,11 @@ export type MonitorSettingsRow = {
   alertDedupeMinutes: number;
   eventRetentionDays: number;
   discordWebhookUrl: string;
-  discordMinLevel: string;
   discordMentionRoleId: string;
+  ntfyUrl: string;
+  ntfyTopic: string;
+  ntfyToken: string;
+  webPushEnabled: boolean;
 };
 
 // ---------------------------------------------------------------------------
@@ -341,10 +345,18 @@ function RuleRow({
             <span className="truncate text-sm font-medium">{rule.name}</span>
             {group ? <Badge variant="secondary">{group.name}</Badge> : null}
             <LevelBadge level={rule.notifyLevel} />
-            {rule.notify ? (
+            {/* Which channels, not whether. "Announced" used to be the whole
+                answer; now a rule can be loud in one place and silent in
+                another, and the list is where somebody wondering why their
+                phone stayed quiet looks first. */}
+            {rule.notifyChannels.length > 0 ? (
               <Badge variant="secondary">
                 <Bell className="h-3 w-3" />
-                Announced
+                {rule.notifyChannels.length === CHANNEL_IDS.length
+                  ? "Everywhere"
+                  : rule.notifyChannels
+                      .map((channel) => CHANNEL_LABELS[channel as MonitorChannel])
+                      .join(", ")}
               </Badge>
             ) : (
               <Badge variant="outline">

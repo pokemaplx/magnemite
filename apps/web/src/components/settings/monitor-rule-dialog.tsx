@@ -1,10 +1,12 @@
 "use client";
 
 import { useActionState, useEffect, useState, type ReactNode } from "react";
-import { Plus, Trash2 } from "lucide-react";
+import { ChevronDown, Plus, Trash2 } from "lucide-react";
 import { createMonitorRule, updateMonitorRule } from "@/actions/monitoring";
+import type { MonitorChannel } from "@magnemite/db";
 import type { ActionState } from "@/actions/rollouts";
 import { Button } from "@/components/ui/button";
+import { Checkbox } from "@/components/ui/checkbox";
 import {
   Dialog,
   DialogContent,
@@ -12,6 +14,12 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { SaveButton } from "@/components/ui/save-button";
@@ -20,6 +28,8 @@ import { Switch } from "@/components/ui/switch";
 import {
   ACTION_OPTIONS,
   actionMeta,
+  CHANNEL_IDS,
+  CHANNEL_LABELS,
   defaultProbeKind,
   LEVEL_OPTIONS,
   PROBE_OPTIONS,
@@ -50,7 +60,7 @@ export type MonitorRuleRow = {
   windowStart: string | null;
   windowEnd: string | null;
   notifyLevel: string;
-  notify: boolean;
+  notifyChannels: string[];
   notifyRecovery: boolean;
   probe: {
     kind: string;
@@ -132,7 +142,9 @@ function RuleForm({
   const [probeKind, setProbeKind] = useState(rule?.probe?.kind ?? "none");
   // Lifted out of its own Toggle only because the all-clear switch below it
   // has nothing to mean while this is off.
-  const [notify, setNotify] = useState(rule?.notify ?? true);
+  const [channels, setChannels] = useState<MonitorChannel[]>(
+    () => (rule?.notifyChannels as MonitorChannel[] | undefined) ?? [...CHANNEL_IDS],
+  );
   const [steps, setSteps] = useState<MonitorStepRow[]>(
     rule?.steps.length
       ? [...rule.steps].sort((a, b) => a.atFailure - b.atFailure)
@@ -325,7 +337,7 @@ function RuleForm({
             <Field
               label="Severity"
               htmlFor={id("notifyLevel")}
-              hint="Weighed against the minimum set on Discord."
+              hint="How loud it looks: the Discord colour, ntfy's priority, whether a browser notification stays put."
             >
               <Select
                 id={id("notifyLevel")}
@@ -335,25 +347,18 @@ function RuleForm({
               />
             </Field>
 
-            <Toggle
-              id={id("notify")}
-              name="notify"
-              label="Announce it"
-              hint="Off, the rule still acts, says nothing in Discord."
-              defaultChecked={rule?.notify ?? true}
-              onChange={setNotify}
-            />
+            <ChannelPicker id={id("notifyChannels")} value={channels} onChange={setChannels} />
 
-            {/* Nothing to say an all-clear about on a rule that is silent
-                anyway, and a switch that does nothing is worse than an absent
+            {/* Nothing to say an all-clear about on a rule that announces
+                nowhere, and a switch that does nothing is worse than an absent
                 one. Unmounted rather than disabled, so the form posts nothing
                 for it and the value follows what is on screen. */}
-            {notify ? (
+            {channels.length > 0 ? (
               <Toggle
                 id={id("notifyRecovery")}
                 name="notifyRecovery"
                 label="Announce the all-clear"
-                hint="A second message when the fault clears. Off, only the fault is announced."
+                hint="A second message when the fault clears, on the same channels. Off, only the fault is announced."
                 defaultChecked={rule?.notifyRecovery ?? false}
               />
             ) : null}
@@ -722,6 +727,91 @@ function Suffixed({ suffix, children }: { suffix: string; children: ReactNode })
     <div className="flex items-center gap-2">
       <div className="min-w-0 flex-1">{children}</div>
       <span className="shrink-0 text-xs text-muted-foreground">{suffix}</span>
+    </div>
+  );
+}
+
+/**
+ * Which channels this rule announces to.
+ *
+ * A dropdown of checkboxes rather than a row of them, so it keeps the shape
+ * of the `Field` and `Toggle` beside it in the grid — three rows: label, one
+ * input-tall box, hint. Three inline checkboxes were a whole line taller than
+ * its neighbours and read as a broken form.
+ *
+ * The value is posted as one comma-joined hidden input rather than as a
+ * checkbox per channel. Absent means "none" here, and with checkboxes the
+ * browser posts nothing for the unchecked ones — so "announce nowhere" and
+ * "this form does not own the field" would have arrived identically.
+ */
+function ChannelPicker({
+  id,
+  value,
+  onChange,
+}: {
+  id: string;
+  value: MonitorChannel[];
+  onChange: (next: MonitorChannel[]) => void;
+}) {
+  const toggle = (channel: MonitorChannel) => {
+    onChange(
+      value.includes(channel)
+        ? value.filter((entry) => entry !== channel)
+        : // Kept in CHANNEL_IDS order rather than click order, so two
+          // rules with the same channels read the same in the list.
+          CHANNEL_IDS.filter((entry) => entry === channel || value.includes(entry)),
+    );
+  };
+
+  const summary =
+    value.length === 0
+      ? "Nowhere"
+      : value.length === CHANNEL_IDS.length
+        ? "Everywhere"
+        : value.map((channel) => CHANNEL_LABELS[channel]).join(", ");
+
+  return (
+    <div className="flex min-w-0 flex-col gap-1.5">
+      <Label htmlFor={id}>Announce it</Label>
+      <DropdownMenu>
+        <DropdownMenuTrigger asChild>
+          <button
+            id={id}
+            type="button"
+            className="flex h-9 items-center justify-between gap-3 rounded-lg border border-input bg-card px-3 text-left"
+          >
+            <span className={cn("truncate text-sm", value.length === 0 && "text-muted-foreground")}>
+              {summary}
+            </span>
+            <ChevronDown className="h-4 w-4 shrink-0 text-muted-foreground" />
+          </button>
+        </DropdownMenuTrigger>
+        {/* As wide as the button that opened it, so it reads as that control
+            opening rather than as a menu landing on top of it. Radix measures
+            the trigger and hands the width over in this variable; a fixed
+            width would drift from the grid column the field sits in. */}
+        <DropdownMenuContent align="start" className="w-(--radix-dropdown-menu-trigger-width)">
+          {CHANNEL_IDS.map((channel) => (
+            <DropdownMenuItem
+              key={channel}
+              // Without this the menu closes on the first tick, and picking two
+              // channels means opening it twice.
+              onSelect={(event) => {
+                event.preventDefault();
+                toggle(channel);
+              }}
+            >
+              <Checkbox checked={value.includes(channel)} className="pointer-events-none" />
+              {CHANNEL_LABELS[channel]}
+            </DropdownMenuItem>
+          ))}
+        </DropdownMenuContent>
+      </DropdownMenu>
+      <input type="hidden" name="notifyChannels" value={value.join(",")} />
+      <p className="text-xs text-muted-foreground">
+        Nowhere, and the rule still acts, quietly. A channel that is not set up in the cards above
+        is skipped.
+      </p>
     </div>
   );
 }

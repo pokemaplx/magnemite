@@ -202,8 +202,9 @@ export const hub = {
    * them. Optional because a hub from an older deploy does not send it.
    */
   refreshSettings: () => call<{ ok: boolean; pushed?: number }>("/internal/settings"),
-  /** Prove the Discord webhook, ignoring the level filter and the dedupe window. */
-  testAlert: () => call<{ ok: boolean; error: string | null }>("/internal/monitor/test"),
+  /** Prove every configured channel, ignoring the level filters and the dedupe window. */
+  testAlert: () =>
+    call<{ ok: boolean; error: string | null; detail: string | null }>("/internal/monitor/test"),
   /** Force an evaluation pass rather than waiting for the next tick. */
   runMonitor: () => call<{ ok: boolean }>("/internal/monitor/run"),
   pollSources: () =>

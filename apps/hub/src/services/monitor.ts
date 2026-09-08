@@ -1,9 +1,12 @@
 import type { deviceMetricsSchema, MonitorSpec } from "@magnemite/protocol";
 import type { z } from "zod";
 import {
+  MONITOR_CHANNELS,
   type MonitorAction,
+  type MonitorChannel,
   type MonitorLevel,
   type MonitorSignal,
+  parseNotifyChannels,
   type Prisma,
   prisma,
 } from "@magnemite/db";
@@ -160,6 +163,18 @@ type RuleRow = Prisma.MonitorRuleGetPayload<{ include: { steps: true } }>;
  * should stop being evaluated, not stop the whole pass.
  */
 type RuleProbe = Omit<MonitorSpec["checks"][number], "id">;
+
+/**
+ * Which channels this rule announces to.
+ *
+ * Read through `parseNotifyChannels`, which turns anything unreadable into
+ * *every* channel rather than none — the same defensive reading `probeOf`
+ * below does, pointed the other way. A malformed probe should stop being
+ * evaluated; a malformed channel list should not stop being heard.
+ */
+function channelsOf(rule: RuleRow): MonitorChannel[] {
+  return parseNotifyChannels(rule.notifyChannels);
+}
 
 function probeOf(rule: RuleRow): RuleProbe | null {
   const config = rule.config as { probe?: unknown } | null;
@@ -544,10 +559,13 @@ async function recover(
     data: { failures: 0, firstFailedAt: null, lastStepFired: null },
   });
   // The row is always written — the recovery is half of what the activity
-  // feed is for. Whether it also goes to Discord is opted into per rule, and
+  // feed is for. Whether it also goes anywhere is opted into per rule, and
   // then only for an episode that reached the threshold: an all-clear for a
-  // fault nobody was told about is noise on its own.
-  const announce = rule.notify && rule.notifyRecovery && state.failures >= rule.threshold;
+  // fault nobody was told about is noise on its own. It goes to the same
+  // channels the fault did, which is the only answer that makes sense — a
+  // recovery announced somewhere the fault was not is a message about
+  // nothing.
+  const announce = rule.notifyRecovery && state.failures >= rule.threshold ? channelsOf(rule) : [];
   await record(
     device,
     rule,
@@ -790,31 +808,33 @@ async function fire(
 }
 
 /**
- * `announce` is what decides whether Discord hears about this at all. It
- * defaults to the rule's own switch, which is the answer for every fault;
- * `recover` passes its own because the all-clear is a separate opt-in.
+ * `announce` is which channels hear about this. It defaults to the rule's own
+ * list, which is the answer for every fault; `recover` passes its own because
+ * the all-clear is a separate opt-in and an empty list is how it declines.
  */
 async function record(
   device: DeviceRow,
   rule: RuleRow,
   event: EventInput,
-  announce = rule.notify,
+  announce: MonitorChannel[] = channelsOf(rule),
 ): Promise<void> {
   const recovery = event.recovery ?? false;
-  const notified = announce
-    ? await notify({
-        deviceId: device.id,
-        deviceName: device.name,
-        groupName: device.group?.name ?? null,
-        signal: rule.signal,
-        level: event.level,
-        message: event.message,
-        action: event.action,
-        actionOk: event.actionOk,
-        detail: event.detail,
-        recovery,
-      }).catch(() => false)
-    : false;
+  const notified =
+    announce.length > 0
+      ? await notify({
+          deviceId: device.id,
+          channels: announce,
+          deviceName: device.name,
+          groupName: device.group?.name ?? null,
+          signal: rule.signal,
+          level: event.level,
+          message: event.message,
+          action: event.action,
+          actionOk: event.actionOk,
+          detail: event.detail,
+          recovery,
+        }).catch(() => false)
+      : false;
 
   await prisma.monitorEvent.create({
     data: {
@@ -858,7 +878,8 @@ type Seed = {
   config: Prisma.InputJsonValue;
   threshold: number;
   cooldownSeconds: number;
-  notify: boolean;
+  /** Which channels the seed announces to. Empty is "act, say nothing". */
+  notifyChannels: MonitorChannel[];
   notifyLevel: MonitorLevel;
   steps: { atFailure: number; action: MonitorAction }[];
 };
@@ -889,7 +910,7 @@ const SEEDS: Seed[] = [
     },
     threshold: 1,
     cooldownSeconds: 300,
-    notify: true,
+    notifyChannels: [...MONITOR_CHANNELS],
     notifyLevel: "WARN",
     steps: [
       { atFailure: 1, action: "RESTART_APP" },
@@ -906,7 +927,7 @@ const SEEDS: Seed[] = [
     // aconf defaults this one's webhook to off, and it is right to: a box
     // briefly on the launcher is common enough that announcing every one
     // teaches people to mute the channel.
-    notify: false,
+    notifyChannels: [],
     notifyLevel: "INFO",
     steps: [
       { atFailure: 1, action: "CLEAR_CACHE_RESTART" },
@@ -920,7 +941,7 @@ const SEEDS: Seed[] = [
     config: {},
     threshold: 1,
     cooldownSeconds: 120,
-    notify: true,
+    notifyChannels: [...MONITOR_CHANNELS],
     notifyLevel: "WARN",
     steps: [
       // ENTER dismisses the dialog, which is usually the whole fix.
@@ -948,7 +969,7 @@ const SEEDS: Seed[] = [
     },
     threshold: 1,
     cooldownSeconds: 600,
-    notify: true,
+    notifyChannels: [...MONITOR_CHANNELS],
     notifyLevel: "WARN",
     steps: [{ atFailure: 1, action: "KILL_APP" }],
   },
@@ -968,7 +989,7 @@ const SEEDS: Seed[] = [
     },
     threshold: 1,
     cooldownSeconds: 600,
-    notify: true,
+    notifyChannels: [...MONITOR_CHANNELS],
     notifyLevel: "WARN",
     steps: [{ atFailure: 1, action: "RESTART_APP" }],
   },
@@ -979,7 +1000,7 @@ const SEEDS: Seed[] = [
     config: {},
     threshold: 1,
     cooldownSeconds: 1800,
-    notify: true,
+    notifyChannels: [...MONITOR_CHANNELS],
     notifyLevel: "WARN",
     // Nothing else is possible: a box Magnemite cannot reach cannot be told
     // to do anything about it.
@@ -992,7 +1013,7 @@ const SEEDS: Seed[] = [
     config: {},
     threshold: 2,
     cooldownSeconds: 1800,
-    notify: true,
+    notifyChannels: [...MONITOR_CHANNELS],
     notifyLevel: "WARN",
     steps: [
       { atFailure: 1, action: "NOTIFY_ONLY" },
@@ -1012,7 +1033,7 @@ const SEEDS: Seed[] = [
     // one waits longer than the rest before it believes anything.
     threshold: 3,
     cooldownSeconds: 1800,
-    notify: true,
+    notifyChannels: [...MONITOR_CHANNELS],
     notifyLevel: "WARN",
     steps: [
       { atFailure: 1, action: "NOTIFY_ONLY" },
@@ -1029,7 +1050,7 @@ const SEEDS: Seed[] = [
     // reading is not five minutes of evidence. Five of them is.
     threshold: 5,
     cooldownSeconds: 1800,
-    notify: true,
+    notifyChannels: [...MONITOR_CHANNELS],
     notifyLevel: "WARN",
     steps: [
       { atFailure: 1, action: "NOTIFY_ONLY" },
@@ -1060,7 +1081,7 @@ export async function seedDefaultMonitorRules(): Promise<number> {
         config: seed.config,
         threshold: seed.threshold,
         cooldownSeconds: seed.cooldownSeconds,
-        notify: seed.notify,
+        notifyChannels: seed.notifyChannels,
         notifyLevel: seed.notifyLevel,
         position: index,
         steps: { create: seed.steps },

@@ -42,6 +42,26 @@ const schema = z.object({
   // How many boxes may swap their binary at once, and how long a box may go
   // quiet before it counts as offline, both live in Settings → Tuning, not here.
 
+  /**
+   * Web push. The keypair identifies this server to every push service the
+   * fleet's browsers happen to use, so it has to outlive a deploy and be the
+   * same for everyone -- which is what keeps it here rather than in
+   * Settings: a regenerated key silently invalidates every subscription, and
+   * a form makes that one click away.
+   *
+   * Generate once with `npx web-push generate-vapid-keys`. Absent is not an
+   * error: web push simply stays unavailable, and the dashboard says so
+   * rather than offering a button that cannot work.
+   */
+  VAPID_PUBLIC_KEY: z.string().optional(),
+  VAPID_PRIVATE_KEY: z.string().optional(),
+  /**
+   * Contact address for the push service to reach if this server misbehaves.
+   * Required by the VAPID spec as a `mailto:` or `https:` URL; push services
+   * reject a JWT without one.
+   */
+  VAPID_SUBJECT: z.string().default("mailto:admin@example.com"),
+
   ROTOM_ENABLED: z
     .string()
     .default("false")

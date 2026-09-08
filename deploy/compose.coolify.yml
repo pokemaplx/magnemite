@@ -51,6 +51,14 @@ services:
       ROTOM_BASIC_PASSWORD: ${ROTOM_BASIC_PASSWORD:-}
       ADMIN_EMAIL: ${ADMIN_EMAIL:-admin@magnemite.com}
       ADMIN_PASSWORD: ${SERVICE_PASSWORD_ADMIN}
+      # --- Web push -----------------------------------------------------
+      # The VAPID keypair identifies this server to every push service the
+      # dashboard's browsers use. Generate once with
+      # `npx web-push generate-vapid-keys` -- regenerating it silently
+      # unsubscribes every browser. Absent simply leaves web push unavailable.
+      VAPID_PUBLIC_KEY: ${VAPID_PUBLIC_KEY:-}
+      VAPID_PRIVATE_KEY: ${VAPID_PRIVATE_KEY:-}
+      VAPID_SUBJECT: ${VAPID_SUBJECT:-mailto:admin@example.com}
     volumes:
       - artifacts:/data/artifacts
     healthcheck:
@@ -127,6 +135,9 @@ services:
       MAGNEMITE_DASHBOARD_URL: ${MAGNEMITE_DASHBOARD_URL:-${SERVICE_URL_WEB}}
       HUB_URL: http://hub:3001
       HUB_INTERNAL_SECRET: ${SERVICE_PASSWORD_HUBSECRET}
+      # The public half only. The browser needs it to subscribe; the private
+      # half stays on the hub, which is what signs the pushes.
+      VAPID_PUBLIC_KEY: ${VAPID_PUBLIC_KEY:-}
     healthcheck:
       test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:3000/login || exit 1"]
       interval: 15s

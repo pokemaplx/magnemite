@@ -2,7 +2,9 @@
 
 import { revalidatePath } from "next/cache";
 import {
+  MONITOR_CHANNELS,
   type MonitorAction,
+  type MonitorChannel,
   type MonitorLevel,
   type MonitorSettingsValues,
   type MonitorSignal,
@@ -75,7 +77,7 @@ function savedMessage(told: boolean): string {
 // Settings
 // ---------------------------------------------------------------------------
 
-/** The master switch, the timings, the ceilings and the Discord webhook. */
+/** The master switch, the timings, the ceilings, and all three channels. */
 export async function updateMonitorSettings(
   _prev: ActionState,
   formData: FormData,
@@ -150,13 +152,6 @@ export async function updateMonitorSettings(
     };
   }
 
-  const level = submitted("discordMinLevel")
-    ? String(formData.get("discordMinLevel"))
-    : stored.discordMinLevel;
-  if (submitted("discordMinLevel") && !LEVELS.has(level)) {
-    return { error: "Pick a minimum severity." };
-  }
-
   // Two sync intervals, because a box can never be fresher than the last time
   // anyone asked Rotom about it. Anything tighter alerts on the sync's own lag.
   // Checked against the pair that is about to be written — typed where the card
@@ -166,6 +161,32 @@ export async function updateMonitorSettings(
     return {
       error: `Asking Rotom every ${rotomSyncSeconds}s means the stale delay has to be at least ${rotomSyncSeconds * 2}s — anything tighter alerts on the sync's own lag rather than on a box.`,
     };
+  }
+
+  // ntfy. The topic is what decides whether the channel is on, so a server
+  // URL alone is not an error -- it is the default sitting there unused.
+  const ntfyUrl = submitted("ntfyUrl") ? String(formData.get("ntfyUrl")).trim() : stored.ntfyUrl;
+  if (submitted("ntfyUrl") && ntfyUrl && !/^https?:\/\//.test(ntfyUrl)) {
+    return {
+      error:
+        "The ntfy server needs to be a URL, starting with https:// — or http:// for one on your own network.",
+    };
+  }
+
+  const ntfyTopic = submitted("ntfyTopic")
+    ? String(formData.get("ntfyTopic")).trim()
+    : stored.ntfyTopic;
+  // ntfy's own rule for a topic, and worth enforcing here rather than
+  // discovering as a 400 during an incident: a slash would silently address a
+  // different path on the server entirely.
+  if (submitted("ntfyTopic") && ntfyTopic && !/^[A-Za-z0-9_-]{1,64}$/.test(ntfyTopic)) {
+    return {
+      error:
+        "An ntfy topic is letters, digits, dashes and underscores — no slashes, and no spaces. Put the server in the field beside it.",
+    };
+  }
+  if (ntfyTopic && !ntfyUrl) {
+    return { error: "A topic needs a server. https://ntfy.sh is the public one." };
   }
 
   const patch: Partial<MonitorSettingsValues> = {
@@ -182,10 +203,18 @@ export async function updateMonitorSettings(
     alertDedupeMinutes,
     eventRetentionDays,
     discordWebhookUrl: webhook,
-    discordMinLevel: level,
     discordMentionRoleId: submitted("discordMentionRoleId")
       ? String(formData.get("discordMentionRoleId")).trim()
       : stored.discordMentionRoleId,
+    ntfyUrl,
+    ntfyTopic,
+    ntfyToken: submitted("ntfyToken") ? String(formData.get("ntfyToken")).trim() : stored.ntfyToken,
+    // The web push card posts this as an explicit "on"/"off" rather than
+    // leaving an unchecked switch to post nothing, which would be
+    // indistinguishable from a save that came from another card.
+    webPushEnabled: submitted("webPushEnabled")
+      ? formData.get("webPushEnabled") === "on"
+      : stored.webPushEnabled,
   };
   await updateMonitorSettingsInDb(patch);
 
@@ -197,7 +226,12 @@ export async function updateMonitorSettings(
       action: "settings.monitoring",
       // The webhook is a credential — anyone who has it can post to the
       // channel — so the audit log records that it changed, not what to.
-      meta: { ...patch, discordWebhookUrl: webhook ? "set" : "", hubNotified: told },
+      meta: {
+        ...patch,
+        discordWebhookUrl: webhook ? "set" : "",
+        ntfyToken: patch.ntfyToken ? "set" : "",
+        hubNotified: told,
+      },
     },
   });
 
@@ -237,8 +271,13 @@ export async function sendTestAlert(): Promise<ActionState> {
   await requireOperator();
   try {
     const result = await hub.testAlert();
-    if (!result.ok) return { error: result.error ?? "Discord did not accept the message." };
-    return { ok: true, message: "Sent — check the channel." };
+    if (!result.ok) return { error: result.error ?? "Nothing accepted the message." };
+    // Which channels took it, because "sent" is useless when the question is
+    // which of three is misconfigured.
+    return {
+      ok: true,
+      message: result.detail ? `Sent — ${result.detail}.` : "Sent — check the channel.",
+    };
   } catch (err) {
     return { error: err instanceof Error ? err.message : String(err) };
   }
@@ -271,7 +310,7 @@ type ParsedRule = {
   windowStart: string | null;
   windowEnd: string | null;
   notifyLevel: MonitorLevel;
-  notify: boolean;
+  notifyChannels: MonitorChannel[];
   notifyRecovery: boolean;
   enabled: boolean;
   steps: { atFailure: number; action: MonitorAction; command: string | null }[];
@@ -328,10 +367,20 @@ function parseRule(formData: FormData): ParsedRule | string {
     windowStart,
     windowEnd,
     notifyLevel: notifyLevel as MonitorLevel,
-    notify: formData.get("notify") === "on",
-    // Only meaningful for a rule that announces at all, and the dialog hides
-    // the switch when it does not — a hidden checkbox posts nothing, so this
-    // reads false on its own rather than needing a second check.
+    // Comma-joined by the picker so that "nowhere" arrives as an empty string
+    // rather than as an absent field — a checkbox per channel would have made
+    // "announce nowhere" indistinguishable from a form that omits them.
+    // Unknown ids are dropped rather than rejected: they can only come from a
+    // newer dialog against an older server, and a save is not the place to
+    // find that out.
+    notifyChannels: String(formData.get("notifyChannels") ?? "")
+      .split(",")
+      .filter((entry): entry is MonitorChannel =>
+        (MONITOR_CHANNELS as readonly string[]).includes(entry),
+      ),
+    // Only meaningful for a rule that announces somewhere, and the dialog
+    // hides the switch when it does not — a hidden checkbox posts nothing, so
+    // this reads false on its own rather than needing a second check.
     notifyRecovery: formData.get("notifyRecovery") === "on",
     enabled: formData.get("enabled") === "on",
     steps,

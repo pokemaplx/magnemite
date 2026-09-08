@@ -766,6 +766,7 @@ model User {
   sessions Session[]
   accounts Account[]
   rollouts Rollout[]
+  pushSubscriptions PushSubscription[]
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -942,10 +943,29 @@ model MonitorRule {
   windowStart String?
   windowEnd   String?
 
+  /// The severity this rule's alerts carry. Not a gate any more -- it decides
+  /// how an alert *looks*: the Discord embed colour, ntfy's priority dial, and
+  /// whether a browser notification stays on screen until it is dealt with.
+  /// It stopped being a filter when rules gained their own channel list: two
+  /// reasons an alert might not arrive, one of them invisible from the rule,
+  /// is the silent hour this file exists to avoid.
   notifyLevel    MonitorLevel @default(WARN)
-  /// Whether this rule announces itself at all. A signal that fires often
-  /// enough to be noise is still worth acting on quietly.
-  notify         Boolean      @default(true)
+  /// Which channels this rule announces to, as a JSON array of ids --
+  /// `["discord", "ntfy", "webPush"]`. An empty array is the old "announce
+  /// off": a signal that fires often enough to be noise is still worth acting
+  /// on quietly.
+  ///
+  /// JSON rather than a scalar list because Prisma's `String[]` is Postgres
+  /// only and this schema has to generate for MariaDB too, and rather than
+  /// three booleans because a fourth channel should not need a migration.
+  /// Anything unreadable in here is read as *every* channel, never as none:
+  /// of the two ways to be wrong, shouting is the recoverable one.
+  ///
+  /// No `@default`, deliberately. Prisma silently drops a Json default on
+  /// MySQL -- the column comes out `JSON NOT NULL` with nothing behind it --
+  /// so a default here would work on Postgres and fail every create on
+  /// MariaDB. Both creates pass it explicitly instead.
+  notifyChannels Json
   /// Whether the all-clear is announced too, once a fault this rule alerted
   /// about has cleared. Off by default: it doubles the traffic a flapping box
   /// makes, and only some faults are worth being told have ended.
@@ -1032,4 +1052,42 @@ model MonitorEvent {
 
   @@index([deviceId, at])
   @@index([at])
+}
+
+/// A browser that asked to be told about faults, as the Web Push spec stores
+/// one: an endpoint on somebody else's push service, plus the two keys that
+/// let us encrypt to it. There is no way to ask a push service what it still
+/// holds, so the only cleanup that works is deleting a row the moment it
+/// answers 404 or 410.
+///
+/// Keyed by a hash of the endpoint rather than the endpoint itself. It has to
+/// be unique — re-subscribing the same browser must update the row, not add a
+/// second one — and endpoints run past the 191 characters a String gets on
+/// MariaDB, which is exactly the length MySQL will not index. A sha256 is 64
+/// and indexes identically on both.
+model PushSubscription {
+  id     String @id @default(cuid())
+  userId String
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  /// sha256 of `endpoint`, hex. The lookup key; never sent anywhere.
+  endpointHash String @unique
+  endpoint     String @db.Text
+  /// The subscription's public key and auth secret, base64url, straight from
+  /// `PushSubscription.toJSON()` in the browser.
+  p256dh       String @db.Text
+  auth         String
+
+  /// What the browser called itself when it subscribed, so somebody with four
+  /// of these can tell which one to revoke. Cosmetic.
+  label String @default("")
+
+  /// When this endpoint last accepted a push. Null until the first one goes
+  /// out, which is also how a subscription that never worked is spotted.
+  lastSentAt DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([userId])
 }

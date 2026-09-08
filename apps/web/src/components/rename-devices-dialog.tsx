@@ -60,13 +60,25 @@ export function RenameDevicesDialog({
   source,
   orders,
   trigger,
+  open: openProp,
+  onOpenChange,
 }: {
   source: { deviceIds: string[] } | { groupId: string };
   /** First entry is the default. The group card has no table to inherit. */
   orders: RenameOrder[];
-  trigger: ReactNode;
+  /** Omitted when the caller drives `open` itself — a menu item, typically. */
+  trigger?: ReactNode;
+  /**
+   * Controlled open, for the callers that have no button to hang a trigger
+   * on. A device page opens this from a dropdown menu item, and Radix
+   * unmounts the menu on select, which takes any trigger inside it with it.
+   */
+  open?: boolean;
+  onOpenChange?: (open: boolean) => void;
 }) {
-  const [open, setOpen] = useState(false);
+  const [uncontrolledOpen, setUncontrolledOpen] = useState(false);
+  const open = openProp ?? uncontrolledOpen;
+  const setOpen = onOpenChange ?? setUncontrolledOpen;
   const [mode, setMode] = useState<Mode>("pattern");
 
   const [targets, setTargets] = useState<RenameTarget[] | null>(null);
@@ -154,9 +166,17 @@ export function RenameDevicesDialog({
   const counts = plan?.counts;
   const canApply = Boolean(plan && !plan.error && counts && counts.renamed > 0 && !pending);
 
+  // One box is the same machinery wearing different words. A counter, an
+  // order to apply it in and a step are all answers to "which box gets which
+  // number", and with one box there is no such question — so the pattern
+  // field becomes a name field and the three knobs go away. What stays is the
+  // preview, which still has something to say: the collision check is against
+  // the whole fleet, not against the selection.
+  const single = targets?.length === 1;
+
   return (
     <Dialog open={open} onOpenChange={setOpen}>
-      <DialogTrigger asChild>{trigger}</DialogTrigger>
+      {trigger ? <DialogTrigger asChild>{trigger}</DialogTrigger> : null}
 
       <DialogContent className="max-w-2xl">
         <DialogHeader>
@@ -180,8 +200,12 @@ export function RenameDevicesDialog({
             <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
               {(
                 [
-                  ["pattern", "A pattern", "Number them into a scheme."],
-                  ["boxes", "From the boxes", "Adopt the names their configs use."],
+                  single
+                    ? (["pattern", "Type it", "A name, or a pattern with tokens."] as const)
+                    : (["pattern", "A pattern", "Number them into a scheme."] as const),
+                  single
+                    ? (["boxes", "From the box", "Adopt the name its config uses."] as const)
+                    : (["boxes", "From the boxes", "Adopt the names their configs use."] as const),
                 ] as const
               ).map(([id, label, hint]) => (
                 <button
@@ -204,24 +228,37 @@ export function RenameDevicesDialog({
             {mode === "pattern" ? (
               <>
                 <div className="flex flex-col gap-2">
-                  <Label htmlFor="rename-pattern">Pattern</Label>
+                  <Label htmlFor="rename-pattern">{single ? "New name" : "Pattern"}</Label>
                   <Input
                     id="rename-pattern"
                     value={pattern}
                     onChange={(e) => setPattern(e.target.value)}
-                    placeholder="{group}-{n:02}"
+                    placeholder={single ? "living-room-01" : "{group}-{n:02}"}
                     className="font-mono"
                     autoFocus
                   />
                   <p className="text-xs text-muted-foreground">
-                    {RENAME_TOKENS.map((token) => `{${token}}`).join(", ")}.{" "}
-                    <span className="font-mono">{"{n:03}"}</span> pads the counter to three digits;{" "}
-                    <span className="font-mono">{"{serial:4}"}</span> is the last four of the
-                    serial.
+                    {single ? (
+                      <>
+                        Plain text, or the same tokens the fleet uses:{" "}
+                        {RENAME_TOKENS.filter((token) => token !== "n")
+                          .map((token) => `{${token}}`)
+                          .join(", ")}
+                        . <span className="font-mono">{"{serial:4}"}</span> is the last four of the
+                        serial.
+                      </>
+                    ) : (
+                      <>
+                        {RENAME_TOKENS.map((token) => `{${token}}`).join(", ")}.{" "}
+                        <span className="font-mono">{"{n:03}"}</span> pads the counter to three
+                        digits; <span className="font-mono">{"{serial:4}"}</span> is the last four
+                        of the serial.
+                      </>
+                    )}
                   </p>
                 </div>
 
-                <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
+                <div className={cn("grid grid-cols-1 gap-3 sm:grid-cols-3", single && "hidden")}>
                   <div className="flex flex-col gap-2">
                     <Label htmlFor="rename-order">Number in order of</Label>
                     <Select

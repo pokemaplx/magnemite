@@ -1,7 +1,7 @@
 "use client";
 
 import { useActionState, useState, useTransition } from "react";
-import { Binoculars, MessageSquare, Send } from "lucide-react";
+import { Binoculars, MessageSquare, Send, Smartphone } from "lucide-react";
 import { sendTestAlert, updateMonitorSettings } from "@/actions/monitoring";
 import type { ActionState } from "@/actions/rollouts";
 import { Button } from "@/components/ui/button";
@@ -9,9 +9,7 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/com
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { SaveButton } from "@/components/ui/save-button";
-import { Select } from "@/components/ui/select";
 import { NumberField, SettingGroup } from "@/components/settings/setting-fields";
-import { LEVEL_OPTIONS } from "@/lib/monitor-vocabulary";
 import type { MonitorSettingsRow } from "@/components/settings/monitoring-section";
 
 /**
@@ -204,10 +202,10 @@ export function MonitorDiscordCard({
       </CardHeader>
 
       <CardContent>
-        {/* Three fields, and only those three are posted: the action keeps the
-            timings and ceilings the other card owns. This form used to mirror
-            them in hidden inputs, and one of them was missing — which is what
-            made saving a webhook fail over a number that is not on this card. */}
+        {/* Only this card's fields are posted: the action keeps the timings
+            and ceilings the other card owns. This form used to mirror them in
+            hidden inputs, and one of them was missing — which is what made
+            saving a webhook fail over a number that is not on this card. */}
         <form action={formAction} className="flex flex-col gap-4">
           <div className="flex flex-col gap-1.5">
             <Label htmlFor="discordWebhookUrl">Webhook URL</Label>
@@ -226,33 +224,130 @@ export function MonitorDiscordCard({
             </p>
           </div>
 
+          {/* No minimum severity here any more. Which rules reach Discord is
+              the rules' own answer, on each rule — two filters in series meant
+              a rule set to announce could silently not, with nothing on it to
+              say why. */}
+          <div className="flex flex-col gap-1.5 sm:max-w-xs">
+            <Label htmlFor="discordMentionRoleId">Role to ping (optional)</Label>
+            <Input
+              id="discordMentionRoleId"
+              name="discordMentionRoleId"
+              placeholder="123456789012345678"
+              defaultValue={settings.discordMentionRoleId}
+              disabled={disabled}
+              className="font-mono text-xs"
+            />
+            <p className="text-xs text-muted-foreground">Pinged on critical alerts only.</p>
+          </div>
+
+          <Outcome state={state} />
+          {test.error ? <p className="text-sm text-destructive">{test.error}</p> : null}
+          {test.ok ? <p className="text-sm text-success">{test.message}</p> : null}
+
+          {!disabled ? (
+            <div className="flex flex-wrap justify-end gap-2">
+              <Button
+                type="button"
+                variant="outline"
+                disabled={pending}
+                onClick={() => {
+                  startTransition(async () => setTest(await sendTestAlert()));
+                }}
+              >
+                <Send className="h-4 w-4" />
+                Send test alert
+              </Button>
+              <SaveButton state={state} />
+            </div>
+          ) : null}
+        </form>
+      </CardContent>
+    </Card>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// ntfy
+// ---------------------------------------------------------------------------
+
+export function MonitorNtfyCard({
+  settings,
+  disabled,
+}: {
+  settings: MonitorSettingsRow;
+  disabled: boolean;
+}) {
+  const [state, formAction] = useActionState<ActionState, FormData>(updateMonitorSettings, {});
+  const [test, setTest] = useState<ActionState>({});
+  const [pending, startTransition] = useTransition();
+
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle className="flex items-center gap-2">
+          <Smartphone className="h-4 w-4 text-muted-foreground" />
+          ntfy
+        </CardTitle>
+        <CardDescription>
+          A push notification on a phone, without an account anywhere. Empty topic turns it off and
+          leaves the rules running.
+        </CardDescription>
+      </CardHeader>
+
+      <CardContent>
+        {/* Only this card's four fields are posted, and the action keeps
+            everything it does not see — the same contract the Discord card
+            relies on. */}
+        <form action={formAction} className="flex flex-col gap-4">
           <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
             <div className="flex flex-col gap-1.5">
-              <Label htmlFor="discordMinLevel">Announce at least</Label>
-              <Select
-                id="discordMinLevel"
-                name="discordMinLevel"
-                options={LEVEL_OPTIONS}
-                defaultValue={settings.discordMinLevel}
+              <Label htmlFor="ntfyUrl">Server</Label>
+              <Input
+                id="ntfyUrl"
+                name="ntfyUrl"
+                type="url"
+                placeholder="https://ntfy.sh"
+                defaultValue={settings.ntfyUrl}
                 disabled={disabled}
+                className="font-mono text-xs"
               />
               <p className="text-xs text-muted-foreground">
-                Anything below this is acted on quietly and recorded, but not sent.
+                The public ntfy.sh, or your own. Install the ntfy app and subscribe to the topic.
               </p>
             </div>
 
             <div className="flex flex-col gap-1.5">
-              <Label htmlFor="discordMentionRoleId">Role to ping (optional)</Label>
+              <Label htmlFor="ntfyTopic">Topic</Label>
               <Input
-                id="discordMentionRoleId"
-                name="discordMentionRoleId"
-                placeholder="123456789012345678"
-                defaultValue={settings.discordMentionRoleId}
+                id="ntfyTopic"
+                name="ntfyTopic"
+                placeholder="magnemite-3f9a2c"
+                defaultValue={settings.ntfyTopic}
                 disabled={disabled}
                 className="font-mono text-xs"
               />
-              <p className="text-xs text-muted-foreground">Pinged on critical alerts only.</p>
+              <p className="text-xs text-muted-foreground">
+                On ntfy.sh anyone who guesses the topic reads your alerts, so pick a name nobody
+                would.
+              </p>
             </div>
+          </div>
+
+          <div className="flex flex-col gap-1.5 sm:max-w-xs">
+            <Label htmlFor="ntfyToken">Access token (optional)</Label>
+            <Input
+              id="ntfyToken"
+              name="ntfyToken"
+              type="password"
+              placeholder="tk_…"
+              defaultValue={settings.ntfyToken}
+              disabled={disabled}
+              className="font-mono text-xs"
+            />
+            <p className="text-xs text-muted-foreground">
+              Only for a protected or reserved topic. Empty publishes anonymously.
+            </p>
           </div>
 
           <Outcome state={state} />

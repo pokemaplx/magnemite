@@ -16,13 +16,13 @@ import {
 import {
   collectDeviceLogs,
   deleteDevice,
-  renameDevice,
   rebootDevice,
   setDeviceApproval,
   setDeviceGroup,
 } from "@/actions/devices";
 import { DeviceExec } from "@/components/device-exec";
 import { DeviceLiveLogs } from "@/components/device-live-logs";
+import { RenameDevicesDialog } from "@/components/rename-devices-dialog";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -39,9 +39,7 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
-import { Input } from "@/components/ui/input";
 import { Select } from "@/components/ui/select";
-import { Label } from "@/components/ui/label";
 import { useToast } from "@/components/ui/toast";
 
 export function DeviceControls({
@@ -63,7 +61,6 @@ export function DeviceControls({
   const toast = useToast();
   const [pending, startTransition] = useTransition();
   const [renaming, setRenaming] = useState(false);
-  const [newName, setNewName] = useState(name);
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [liveLogs, setLiveLogs] = useState(false);
   const [executing, setExecuting] = useState(false);
@@ -178,38 +175,18 @@ export function DeviceControls({
 
       <DeviceLiveLogs deviceId={deviceId} name={name} open={liveLogs} onOpenChange={setLiveLogs} />
 
-      <Dialog open={renaming} onOpenChange={setRenaming}>
-        <DialogContent className="max-w-sm">
-          <DialogHeader>
-            <DialogTitle>Rename device</DialogTitle>
-          </DialogHeader>
-          <div className="flex flex-col gap-2">
-            <Label htmlFor="device-name">Name</Label>
-            <Input
-              id="device-name"
-              value={newName}
-              onChange={(e) => setNewName(e.target.value)}
-              autoFocus
-            />
-          </div>
-          <DialogFooter>
-            <Button variant="ghost" onClick={() => setRenaming(false)}>
-              Cancel
-            </Button>
-            <Button
-              disabled={pending}
-              onClick={() =>
-                run(
-                  () => renameDevice(deviceId, newName),
-                  () => setRenaming(false),
-                )
-              }
-            >
-              Save
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
+      {/* The same dialog the fleet table opens, with one box in it. It used to
+          be a bare name field here, which quietly cost this page everything
+          the other one had learned: the collision check against the rest of
+          the fleet, and reading the name the box's own MITM config already
+          uses. Controlled rather than triggered, because the menu item that
+          opens it is unmounted by Radix the moment it is selected. */}
+      <RenameDevicesDialog
+        source={{ deviceIds: [deviceId] }}
+        orders={["name"]}
+        open={renaming}
+        onOpenChange={setRenaming}
+      />
 
       <Dialog open={confirmDelete} onOpenChange={setConfirmDelete}>
         <DialogContent className="max-w-md">

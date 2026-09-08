@@ -1,57 +1,54 @@
-import { type MonitorLevel, type MonitorSignal, prisma } from "@magnemite/db";
+import { MONITOR_CHANNELS, type MonitorChannel, type MonitorSignal, prisma } from "@magnemite/db";
 import { getMonitorSettings } from "./hubSettings.js";
-import { env } from "../env.js";
+import { type AlertInput } from "./alerts.js";
+import { discordConfigured, sendDiscord } from "./notifyDiscord.js";
+import { ntfyConfigured, sendNtfy } from "./notifyNtfy.js";
+import { sendWebPush, webPushAvailable, webPushConfigured } from "./notifyWebPush.js";
 import { log } from "../log.js";
 
+export type { AlertInput } from "./alerts.js";
+
 /**
- * Outbound alerts, which until now Magnemite had none of.
+ * Outbound alerts, and which of the three channels each one goes to.
  *
  * The rule this file exists to enforce is that **notifying never breaks
- * remediation**. A Discord outage, a revoked webhook, a rate limit — none of
- * those are reasons to stop restarting a dead scanner, so nothing here throws
- * into the engine and every failure is a log line and a `notified: false` on
- * the event that was supposed to go out. A silent hour then has an
- * explanation sitting in the events table rather than being a mystery.
+ * remediation**. A Discord outage, a revoked webhook, an ntfy rate limit, a
+ * push service having a bad afternoon — none of those are reasons to stop
+ * restarting a dead scanner, so nothing here throws into the engine and every
+ * failure is a log line and a `notified: false` on the event that was supposed
+ * to go out. A silent hour then has an explanation sitting in the events table
+ * rather than being a mystery.
+ *
+ * The three channels are independent in every way that matters: each is
+ * configured on its own, and one of them being broken says nothing about the
+ * other two. What they share is the dedupe window, which is deliberately
+ * global — the point of it is that a flapping box does not announce itself
+ * thirty times, and per-channel windows would let it do exactly that by
+ * taking turns.
+ *
+ * **Which channels an alert goes to is the rule's answer, not this file's.**
+ * Each channel used to carry a minimum severity of its own, and two filters
+ * in series meant a rule that said "ntfy" could silently not reach ntfy, with
+ * nothing on the rule to explain it. What is left here is one question per
+ * channel — is it set up — asked of a list the rule already chose.
  */
 
-const LEVEL_RANK: Record<MonitorLevel, number> = { INFO: 0, WARN: 1, CRITICAL: 2 };
+type Settings = Awaited<ReturnType<typeof getMonitorSettings>>;
 
-/** Discord's embed colours, as the integers its API wants. */
-const LEVEL_COLOUR: Record<MonitorLevel, number> = {
-  INFO: 0x3b_82_f6,
-  WARN: 0xf5_9e_0b,
-  CRITICAL: 0xef_44_44,
+type Channel = {
+  /** Matches what a rule stores in `notifyChannels`. Frozen. */
+  id: MonitorChannel;
+  /** What an operator reads in a test result or a log line. Not frozen. */
+  label: string;
+  configured: (settings: Settings) => boolean;
+  send: (alert: AlertInput, settings: Settings) => Promise<boolean>;
 };
 
-const LEVEL_ICON: Record<MonitorLevel, string> = {
-  INFO: "✅",
-  WARN: "⚠️",
-  CRITICAL: "🔴",
-};
-
-export type AlertInput = {
-  deviceId: string;
-  deviceName: string;
-  groupName: string | null;
-  signal: MonitorSignal;
-  level: MonitorLevel;
-  message: string;
-  action: string | null;
-  actionOk: boolean | null;
-  detail: string | null;
-  /**
-   * The all-clear rather than a fault, which changes two things: it goes out
-   * regardless of the minimum level — a recovery is INFO by nature, and an
-   * operator who asked for one on the rule did not ask for it to be weighed
-   * against a floor of WARN — and it ignores the dedupe window, which was
-   * very likely just filled by the fault this ends.
-   */
-  recovery: boolean;
-};
-
-function parseLevel(value: string): MonitorLevel {
-  return value === "INFO" || value === "WARN" || value === "CRITICAL" ? value : "WARN";
-}
+const CHANNELS: Channel[] = [
+  { id: "discord", label: "Discord", configured: discordConfigured, send: sendDiscord },
+  { id: "ntfy", label: "ntfy", configured: ntfyConfigured, send: sendNtfy },
+  { id: "webPush", label: "web push", configured: webPushConfigured, send: sendWebPush },
+];
 
 /**
  * Has this box already been announced for this signal recently?
@@ -78,148 +75,113 @@ async function announcedRecently(
 }
 
 /**
- * Send one alert, and say whether it went.
+ * Send one alert, and say whether it went anywhere.
  *
- * The return value is what the caller stores as `notified`, so "suppressed by
- * the level filter" and "Discord refused it" both come back as false — the
- * difference is in the log, and in whether an operator finds the webhook
- * field empty when they go looking.
+ * The return value is what the caller stores as `notified`, so "the rule asked
+ * for no channels", "the ones it asked for are not set up" and "all of them
+ * refused it" all come back as false — the difference is in the log, and in what an
+ * operator finds when they go looking at Settings → Monitoring. True means at
+ * least one channel took it, which is the honest reading of "this was
+ * announced": a Discord message that landed is not made un-sent by ntfy being
+ * down at the same moment.
  */
 export async function notify(alert: AlertInput): Promise<boolean> {
   const settings = await getMonitorSettings();
-  if (!settings.discordWebhookUrl) return false;
+
+  // Which channels the rule asked for and are actually set up. Computed
+  // before the dedupe check so an alert nobody would have sent does not
+  // consume the window, the same order the single-channel version used.
+  const willing = CHANNELS.filter(
+    (channel) => alert.channels.includes(channel.id) && channel.configured(settings),
+  );
+  if (willing.length === 0) return false;
 
   if (!alert.recovery) {
-    if (LEVEL_RANK[alert.level] < LEVEL_RANK[parseLevel(settings.discordMinLevel)]) return false;
-
     if (await announcedRecently(alert.deviceId, alert.signal, settings.alertDedupeMinutes)) {
       log.debug({ device: alert.deviceName, signal: alert.signal }, "alert deduped");
       return false;
     }
   }
 
-  return post(settings.discordWebhookUrl, buildPayload(alert, settings.discordMentionRoleId));
-}
-
-/**
- * The link back to the box, so an alert is one click from doing something.
- *
- * `/devices/:id` is a dashboard page, so it is built on the dashboard's origin
- * -- not `MAGNEMITE_PUBLIC_URL`, which is the address the *boxes* use. Where
- * the two are separate hosts (Coolify) that domain is Caddy, which answers
- * `/files/*`, `/ws/device`, `/api/enroll` and `/healthz` and 404s the rest.
- * The fallback is for the single-domain deployments, where they are the same.
- */
-function deviceUrl(deviceId: string): string {
-  const base = env.MAGNEMITE_DASHBOARD_URL ?? env.MAGNEMITE_PUBLIC_URL;
-  return `${base.replace(/\/$/, "")}/devices/${deviceId}`;
-}
-
-function buildPayload(alert: AlertInput, mentionRoleId: string): unknown {
-  const fields: { name: string; value: string; inline?: boolean }[] = [
-    { name: "Device", value: `[${alert.deviceName}](${deviceUrl(alert.deviceId)})`, inline: true },
-    { name: "Group", value: alert.groupName ?? "—", inline: true },
-  ];
-
-  if (alert.action && alert.action !== "NOTIFY_ONLY") {
-    fields.push({
-      name: "Action",
-      // Whether it worked is the second half of the sentence, and the half an
-      // operator is actually deciding on: a failed restart needs a person.
-      value: `${alert.action}${alert.actionOk === null ? "" : alert.actionOk ? " ✓" : " ✗ failed"}`,
-      inline: true,
-    });
-  }
-  if (alert.detail) {
-    // Fenced, because a detail is usually a line of log or command output and
-    // Discord would otherwise render its punctuation as markdown.
-    fields.push({ name: "Detail", value: `\`\`\`\n${clamp(alert.detail, 900)}\n\`\`\`` });
-  }
-
-  return {
-    // Only CRITICAL pings. A role mention on every warning is how a channel
-    // gets muted, which costs the alert that mattered.
-    content: mentionRoleId && alert.level === "CRITICAL" ? `<@&${mentionRoleId}>` : undefined,
-    embeds: [
-      {
-        title: `${LEVEL_ICON[alert.level]} ${alert.deviceName} — ${alert.message}`,
-        color: LEVEL_COLOUR[alert.level],
-        fields,
-        footer: { text: `Magnemite · ${alert.signal}` },
-        timestamp: new Date().toISOString(),
-      },
-    ],
-  };
-}
-
-async function post(webhookUrl: string, payload: unknown): Promise<boolean> {
-  for (let attempt = 0; attempt < 2; attempt += 1) {
-    try {
-      const res = await fetch(webhookUrl, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(payload),
-        signal: AbortSignal.timeout(10_000),
-      });
-      if (res.ok) return true;
-
-      // Discord says exactly how long to wait, and a fleet that just came back
-      // from a deploy can hit this legitimately. One retry, then give up —
-      // there is another beat along shortly.
-      if (res.status === 429 && attempt === 0) {
-        const body = (await res.json().catch(() => null)) as { retry_after?: number } | null;
-        const waitMs = Math.min((body?.retry_after ?? 1) * 1000, 5_000);
-        await new Promise((resolve) => setTimeout(resolve, waitMs));
-        continue;
+  // In parallel, and never rejecting: one channel throwing must not cost the
+  // others their message, and none of it may reach the engine.
+  const results = await Promise.all(
+    willing.map(async (channel) => {
+      try {
+        return await channel.send(alert, settings);
+      } catch (err) {
+        log.warn({ err, channel: channel.id }, "notification channel threw");
+        return false;
       }
+    }),
+  );
 
-      log.warn({ status: res.status }, "discord webhook refused an alert");
-      return false;
-    } catch (err) {
-      log.warn({ err }, "discord webhook unreachable");
-      return false;
-    }
-  }
-  return false;
-}
-
-function clamp(value: string, max: number): string {
-  return value.length <= max ? value : `${value.slice(0, max)}…`;
+  return results.some(Boolean);
 }
 
 /**
- * Prove the webhook before anyone trusts it.
+ * Prove the channels before anyone trusts them.
  *
  * Deliberately bypasses the level filter and the dedupe window: someone
  * pressing a button called "Send test alert" wants to see a message, not to
- * discover thirty minutes later that one was suppressed.
+ * discover thirty minutes later that one was suppressed. It reports per
+ * channel rather than as one yes/no, because "it worked" is useless when the
+ * question is which of three is misconfigured.
  */
-export async function sendTestAlert(): Promise<{ ok: boolean; error: string | null }> {
+export async function sendTestAlert(): Promise<{
+  ok: boolean;
+  error: string | null;
+  detail: string | null;
+}> {
   const settings = await getMonitorSettings();
-  if (!settings.discordWebhookUrl) {
-    return { ok: false, error: "No Discord webhook URL is set." };
+
+  const configured = CHANNELS.filter((channel) => channel.configured(settings));
+  if (configured.length === 0) {
+    return {
+      ok: false,
+      error: webPushAvailable()
+        ? "No channel is set up. Add a Discord webhook, an ntfy topic, or turn web push on."
+        : "No channel is set up. Add a Discord webhook or an ntfy topic — web push also needs VAPID keys in the hub's environment.",
+      detail: null,
+    };
   }
 
-  const ok = await post(
-    settings.discordWebhookUrl,
-    buildPayload(
-      {
-        deviceId: "test",
-        deviceName: "Test alert",
-        groupName: null,
-        signal: "AGENT_OFFLINE",
-        level: "INFO",
-        message: "monitoring is wired up",
-        action: null,
-        actionOk: null,
-        detail: "This is what a real alert will look like.",
-        recovery: false,
-      },
-      "",
-    ),
-  );
-  return {
-    ok,
-    error: ok ? null : "Discord did not accept the message. Check the webhook URL.",
+  const alert: AlertInput = {
+    deviceId: "test",
+    // No rule behind a test, so every configured channel is the answer —
+    // `configured` above has already narrowed it to those.
+    channels: [...MONITOR_CHANNELS],
+    deviceName: "Test alert",
+    groupName: null,
+    signal: "AGENT_OFFLINE",
+    level: "INFO",
+    message: "monitoring is wired up",
+    action: null,
+    actionOk: null,
+    detail: "This is what a real alert will look like.",
+    recovery: false,
   };
+
+  const results = await Promise.all(
+    configured.map(async (channel) => {
+      try {
+        return { label: channel.label, ok: await channel.send(alert, settings) };
+      } catch (err) {
+        log.warn({ err, channel: channel.id }, "notification channel threw on a test");
+        return { label: channel.label, ok: false };
+      }
+    }),
+  );
+
+  const detail = results.map((r) => `${r.label} ${r.ok ? "✓" : "✗"}`).join(" · ");
+  const failed = results.filter((r) => !r.ok);
+
+  if (failed.length === results.length) {
+    return {
+      ok: false,
+      error: `Nothing accepted the message (${detail}). Check the webhook URL, the ntfy topic, and whether any browser is subscribed.`,
+      detail,
+    };
+  }
+  return { ok: true, error: null, detail };
 }

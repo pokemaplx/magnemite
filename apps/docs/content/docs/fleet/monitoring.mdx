@@ -1,6 +1,6 @@
 ---
 title: Monitoring and automations
-description: Rules that watch a box, act when it stops working, and say so in Discord.
+description: Rules that watch a box, act when it stops working, and say so in Discord, ntfy or a browser notification.
 icon: Binoculars
 ---
 
@@ -191,31 +191,105 @@ raise that rule's own threshold, which is per group.
   in a loop, and each exists because that has happened to somebody.
 </Callout>
 
-## Discord
+## Where alerts go
 
-In the **Discord** card on the same tab: a **webhook URL** (empty turns
-notifications off and leaves the rules running), a **minimum severity** (below
-it a rule acts and is recorded but not announced), and an optional **role to
-ping**, used on critical only — a mention on every warning is how a channel
-gets muted, which costs you the alert that mattered.
+Three channels, on the same tab, each set up on its own: **Discord**, **ntfy**
+and **web push**. They are independent in every way that matters — its own
+credential, and one being broken says nothing about the other two. Configure
+none of them and the rules still run: remediation never depends on a
+notification going out.
 
-Individual rules can be silenced without being switched off. "Pogo not in
-focus" ships that way: a box briefly on the launcher is common enough that
-announcing every one teaches people to ignore the channel.
+**Which rules reach which channel is decided on the rule**, in **Announce it** —
+a dropdown of the three, and picking none is a rule that acts quietly. Set up a
+channel here; choose who uses it there.
+
+None of the cards has a minimum severity. There used to be one per channel, and
+two filters in series meant a rule set to announce could silently not, with
+nothing on the rule to say why. One filter, on the rule, where somebody looking
+for the reason is already looking.
+
+What the channels do share is the repeat window. The point of it is that a
+flapping box does not announce itself thirty times, and a window per channel
+would let it do exactly that by taking turns.
+
+### Discord
+
+A **webhook URL** — empty turns the channel off and leaves the rules running —
+and an optional **role to ping**, used on critical only: a mention on every
+warning is how a channel gets muted, which costs you the alert that mattered.
+
+### ntfy
+
+A **server** — the public `https://ntfy.sh`, or your own — and a **topic**.
+Empty topic turns it off. Install the ntfy app, subscribe to the topic, and a
+fault buzzes the phone with a link straight to the box.
+
+On ntfy.sh a topic is the only thing protecting it: anyone who guesses the name
+reads your alerts, so pick one nobody would. The **access token** is for a
+self-hosted server or a reserved topic; empty publishes anonymously, which is
+what a public topic wants.
+
+A rule's **Severity** drives ntfy's own priority dial, which is what decides
+whether a phone in a pocket makes a sound: `INFO` is quiet, `WARN` is high, and
+`CRITICAL` is max — which on Android gets through Do Not Disturb. It changes how
+the alert arrives, never whether it does.
+
+### Web push
+
+A notification from the dashboard itself, on the desktop or phone of whoever
+asked for one. Nothing to install and no third party in the path.
+
+Two halves that look like one card and are not. The switch is a fleet-wide
+setting, saved with **Save** like everything else here.
+**Notify this browser** is per browser and per person — it asks for the
+notification permission, registers a service worker and stores an endpoint only
+that browser can be reached at — so it takes effect on the click. Alerts then
+arrive with every tab closed.
+
+It needs a VAPID keypair in the hub's environment; without one the card says so
+rather than offering a button that cannot work. Generate it once:
+
+```sh
+npx web-push generate-vapid-keys
+```
+
+and set `VAPID_PUBLIC_KEY`, `VAPID_PRIVATE_KEY` and `VAPID_SUBJECT`. Keep them:
+a push service only accepts messages signed by the key it saw when a browser
+subscribed, so regenerating the pair silently unsubscribes everyone. There is
+no way for the server to ask a push service what it still holds — a browser
+that was cleared or revoked is only discovered when it answers 404 or 410, and
+its row is dropped then.
+
+<Callout type="info" title="Safari and iOS need the Home Screen">
+  iOS only allows web push for a site added to the Home Screen. Until then the card says the browser
+  cannot do it, which is accurate rather than a bug.
+</Callout>
+
+Individual rules can be silenced without being switched off — **Announce it**
+set to nothing. "Pogo not in focus" ships that way: a box briefly on the
+launcher is common enough that announcing every one teaches people to ignore
+the channel. The same control is how a rule goes to Discord but not to a phone
+at 3am, without either channel having to know about it.
 
 A rule that announces can also announce the **all-clear** — the second switch
 next to it in the rule dialog, off by default. On, the fault is followed by one
 more message when the signal goes good again, which is how "Box unreachable"
 becomes "Box unreachable recovered" in the channel rather than only in the
-feed. It goes out regardless of the minimum severity and ignores the repeat
-window: a recovery is INFO by nature, and the window has just been filled by
-the fault it ends. Only an episode that actually reached the rule's threshold
+feed. It goes to the same channels the fault did — a recovery announced
+somewhere the fault was not is a message about nothing — and it ignores the
+repeat window, which has just been filled by the fault it ends. Only an episode that actually reached the rule's threshold
 gets one — an all-clear for a fault nobody was told about is noise.
 
-Press **Send test alert** before trusting any of it. It ignores the severity
-filter and the repeat window on purpose. A webhook that stops working never
-stops the remediation — the box is still restarted, and the Monitoring page
-records that the message did not arrive.
+Press **Send test alert** before trusting any of it — the button is on all
+three cards and sends through every channel that is set up, reporting each one
+separately, because "it worked" is useless when the question is which of three
+is misconfigured. It has no rule behind it, so it ignores both the per-rule
+channels and the repeat window on purpose.
+
+A channel that stops working never stops the remediation — the box is still
+restarted, and the Monitoring page records that the message did not arrive. An
+event counts as announced when **any** channel took it: a Discord message that
+landed is not made un-sent by ntfy being down at the same moment.
 
 ## Scope
 
