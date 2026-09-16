@@ -72,15 +72,32 @@ async function doCacheVersion(versionId: string) {
   log.info({ versionId, url: version.remoteUrl }, "caching artifact");
 
   try {
+    const total = Number(version.sizeBytes);
+
     // Resume a partial download if the hub restarted mid-transfer.
-    const already = await fs
+    let already = await fs
       .stat(tmpPath)
       .then((s) => s.size)
       .catch(() => 0);
 
-    const headers: Record<string, string> = { "User-Agent": "magnemite-hub" };
-    if (already > 0) headers.Range = `bytes=${already}-`;
-    const res = await fetch(version.remoteUrl, { headers, redirect: "follow" });
+    // A partial file at least as long as the remote one is not partial: an
+    // earlier attempt wrote all of it and then failed verification, or the
+    // feed replaced the build with a smaller one. Resuming would ask for a
+    // range past the end of the file and be refused with a 416, so start
+    // over — and do the same when the server is the one saying so.
+    if (total > 0 && already >= total) already = 0;
+
+    const fetchFrom = (offset: number) => {
+      const headers: Record<string, string> = { "User-Agent": "magnemite-hub" };
+      if (offset > 0) headers.Range = `bytes=${offset}-`;
+      return fetch(version.remoteUrl, { headers, redirect: "follow" });
+    };
+
+    let res = await fetchFrom(already);
+    if (res.status === 416 && already > 0) {
+      already = 0;
+      res = await fetchFrom(0);
+    }
     if (!res.ok || !res.body) {
       throw new Error(`download failed: HTTP ${res.status} ${res.statusText}`);
     }
@@ -88,7 +105,6 @@ async function doCacheVersion(versionId: string) {
     const resuming = res.status === 206 && already > 0;
     if (!resuming && already > 0) await fs.rm(tmpPath, { force: true });
 
-    const total = Number(version.sizeBytes);
     let received = resuming ? already : 0;
     let lastPct = -1;
     let lastReportAt = 0;
@@ -138,11 +154,17 @@ async function doCacheVersion(versionId: string) {
 
     // Some sources publish an md5 and some do not; where there is none, the
     // size the index reported is the only check available.
-    if (version.md5 && version.md5.toLowerCase() !== md5Hex) {
-      throw new Error(`md5 mismatch: expected ${version.md5}, got ${md5Hex}`);
-    }
-    if (total > 0 && finalSize !== total) {
-      throw new Error(`size mismatch: expected ${total} bytes, got ${finalSize}`);
+    const mismatch =
+      version.md5 && version.md5.toLowerCase() !== md5Hex
+        ? `md5 mismatch: expected ${version.md5}, got ${md5Hex}`
+        : total > 0 && finalSize !== total
+          ? `size mismatch: expected ${total} bytes, got ${finalSize}`
+          : null;
+    if (mismatch) {
+      // Complete but wrong. Left on disk, the next attempt would try to resume
+      // it instead of downloading again.
+      await fs.rm(tmpPath, { force: true });
+      throw new Error(mismatch);
     }
 
     await fs.rename(tmpPath, finalPath);
