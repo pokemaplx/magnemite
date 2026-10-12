@@ -17,6 +17,7 @@ import {
 } from "./services/agentRelease.js";
 import { ensureArtifactDir } from "./services/artifacts.js";
 import { sweepOffline } from "./services/devices.js";
+import { reapOrphanedBootstraps } from "./services/hostBootstrap.js";
 import { markMonitorStart, seedDefaultMonitorRules } from "./services/monitor.js";
 import { startRotomSync, stopRotomSync } from "./services/rotom.js";
 import { startScheduler, stopScheduler } from "./services/scheduler.js";
@@ -35,6 +36,9 @@ async function main() {
   // upgrading into a running watchdog would start rebooting boxes before
   // anyone had read the settings.
   await seedDefaultMonitorRules();
+  // Anything still RUNNING cannot be ours -- ours had not started yet -- so it
+  // belongs to a hub that is gone, and nothing else will ever move it.
+  await reapOrphanedBootstraps();
   // Publishes the agent binaries this image was built with, so boxes on an
   // older build are updated as they reconnect.
   await loadAgentRelease();

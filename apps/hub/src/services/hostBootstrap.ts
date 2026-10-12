@@ -37,6 +37,38 @@ const REMOTE_DIR = "/tmp/magnemite-bootstrap";
  */
 const SSH_TIMEOUT_MS = 20 * 60 * 1000;
 
+/**
+ * Fails bootstraps that nothing is working on any more.
+ *
+ * A run lives in a closure in this process, so a hub that restarts mid-run --
+ * a deploy, a crash, `tsx watch` noticing a file save -- leaves its row in
+ * RUNNING with nothing left to move it. Before this, that row said "docker…"
+ * forever and the only way out was SQL.
+ *
+ * Called on boot, which is exactly when the orphans exist: anything still
+ * RUNNING cannot be ours, because ours had not started yet.
+ *
+ * WAITING is deliberately left alone. That state means the SSH half finished
+ * and the machine has not dialled in, which is a legitimate thing to be for a
+ * while -- a bootstrap may have installed a kernel module needing a reboot,
+ * and the machine is the only thing that can close it out.
+ */
+export async function reapOrphanedBootstraps(): Promise<number> {
+  const { count } = await prisma.redroidBootstrap.updateMany({
+    where: { state: "RUNNING" },
+    data: {
+      state: "FAILED",
+      error:
+        "The hub restarted while this was running, so nothing was left watching it. " +
+        "The machine may be half-provisioned; the bootstrap is safe to run again, " +
+        "and skips what is already done.",
+      finishedAt: new Date(),
+    },
+  });
+  if (count > 0) log.warn({ count }, "failed bootstraps orphaned by a hub restart");
+  return count;
+}
+
 export type SshAccess = {
   host: string;
   port?: number;

@@ -76,10 +76,17 @@ fi
 KERNEL=$(uname -r)
 if have apt-get; then
 	export DEBIAN_FRONTEND=noninteractive
-	apt-get update -qq >/dev/null 2>&1 || true
+	# A fresh cloud image is usually running unattended-upgrades on first boot,
+	# and apt waits on dpkg's lock *forever* by default -- so a provisioning
+	# started a minute after the machine was created hangs with no output and
+	# no timeout, which is indistinguishable from a dead connection. Five
+	# minutes is longer than that first run takes and shorter than anyone's
+	# patience.
+	APT="apt-get -o DPkg::Lock::Timeout=300"
+	$APT update -qq >/dev/null 2>&1 || true
 	# Not fatal on its own: a kernel with CONFIG_ANDROID_BINDERFS built in
 	# needs no module at all, and the check below is what actually decides.
-	apt-get install -y -qq "linux-modules-extra-$KERNEL" >/dev/null 2>&1 ||
+	$APT install -y -qq "linux-modules-extra-$KERNEL" >/dev/null 2>&1 ||
 		step modules warn "no linux-modules-extra-$KERNEL (may be built in)"
 fi
 
