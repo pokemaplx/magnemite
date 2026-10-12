@@ -50,6 +50,62 @@ export type SshAccess = {
 export type BootstrapStep = { name: string; ok: boolean; detail: string };
 
 /**
+ * Writes the step list to the row, one write at a time, latest wins.
+ *
+ * An earlier version fired an un-awaited `update` on every `::step` line, which
+ * looked harmless and was not: the script prints arch, modules, binder and
+ * pidmax within milliseconds of each other, so several updates overlapped on
+ * one row and MariaDB rejected them with error 1020, "Record has changed since
+ * last read". The progress stopped being written for the rest of the run.
+ *
+ * So: at most one write in flight, and a burst collapses into the newest state
+ * rather than queueing a write per line. Nobody needs every intermediate list —
+ * they need the latest one to arrive.
+ *
+ * The array is copied on the way in, because the caller keeps pushing to its
+ * own and a reference would be serialised at whatever length it happened to
+ * have when the query ran.
+ */
+function stepWriter(id: string) {
+  let inFlight: Promise<void> | null = null;
+  let pending: BootstrapStep[] | null = null;
+
+  const write = async (steps: BootstrapStep[]): Promise<void> => {
+    try {
+      await prisma.redroidBootstrap.update({ where: { id }, data: { steps } });
+    } catch (err) {
+      // Progress is nice to have; the bootstrap is not. The same trade
+      // recordSample makes — losing a line of progress must never fail a
+      // provisioning that is otherwise working.
+      log.warn({ err, bootstrapId: id }, "could not write bootstrap progress");
+    }
+    if (pending) {
+      const next = pending;
+      pending = null;
+      await write(next);
+    }
+  };
+
+  const publish = (steps: BootstrapStep[]): void => {
+    const snapshot = [...steps];
+    if (inFlight) {
+      pending = snapshot;
+      return;
+    }
+    inFlight = write(snapshot).finally(() => {
+      inFlight = null;
+    });
+  };
+
+  /** Awaits whatever is still queued, so the final state is on the row. */
+  publish.flush = async (): Promise<void> => {
+    while (inFlight) await inFlight;
+  };
+
+  return publish;
+}
+
+/**
  * Starts a bootstrap and returns its row id immediately.
  *
  * Not awaited, because the SSH half is minutes and the dashboard would hold a
@@ -127,16 +183,16 @@ async function run(id: string, serial: string, name: string, access: SshAccess):
         ].join(" "),
       ].join(" && ");
 
+      const publish = stepWriter(id);
       await exec(client, command, (line) => {
         const step = parseStep(line);
         if (!step) return;
         steps.push(step);
         // Written as they arrive, so the page fills in rather than jumping
         // from nothing to done twenty minutes later.
-        void prisma.redroidBootstrap
-          .update({ where: { id }, data: { steps } })
-          .catch(() => undefined);
+        publish(steps);
       });
+      await publish.flush();
     });
 
     // WAITING, not DONE. The script exiting zero proves the machine was
