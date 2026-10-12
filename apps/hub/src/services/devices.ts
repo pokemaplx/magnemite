@@ -86,6 +86,13 @@ export async function applyMetrics(deviceId: string, metrics: DeviceMetrics) {
       memAvailableBytes: toBigInt(metrics.memAvailableBytes) ?? undefined,
       cpuTempC: metrics.cpuTempC ?? undefined,
       batteryTempC: metrics.batteryTempC ?? undefined,
+      // The same `?? undefined` rule, and here it is what the agent's pointer
+      // fields exist for: an idle machine sends a genuine 0 and a machine with
+      // no swap sends a genuine 0 bytes, both of which have to land as zero
+      // rather than be mistaken for an agent that did not say.
+      cpuPercent: metrics.cpuPercent ?? undefined,
+      swapTotalBytes: toBigInt(metrics.swapTotalBytes) ?? undefined,
+      swapFreeBytes: toBigInt(metrics.swapFreeBytes) ?? undefined,
       ...(isInventory ? { packagesSyncedAt: new Date() } : {}),
       // Only stamped when the box actually ran a monitor spec. An agent too
       // old to know about monitoring leaves both alone, which is what tells

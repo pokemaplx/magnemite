@@ -1,6 +1,9 @@
 package sys
 
-import "testing"
+import (
+	"testing"
+	"time"
+)
 
 // A plausible /proc/1/stat. Field 22, the starttime, is 4523 ticks — 45.23s at
 // the 100Hz USER_HZ every Android kernel ships.
@@ -196,5 +199,113 @@ Buffers:           12345 kB
 
 	if total, available := meminfoMemory(""); total != 0 || available != 0 {
 		t.Errorf("empty meminfo = (%d, %d), want (0, 0)", total, available)
+	}
+}
+
+func TestMeminfoSwap(t *testing.T) {
+	const meminfo = "MemTotal:       32000000 kB\nMemFree:  1000000 kB\nSwapTotal:      32000000 kB\nSwapFree:       31000000 kB\n"
+	total, free, ok := meminfoSwap(meminfo)
+	if !ok {
+		t.Fatal("meminfoSwap() ok = false, want true")
+	}
+	if total != 32000000*1024 || free != 31000000*1024 {
+		t.Errorf("meminfoSwap() = (%d, %d), want (%d, %d)",
+			total, free, uint64(32000000)*1024, uint64(31000000)*1024)
+	}
+
+	// A machine with no swap configured. Zero is the answer, and `ok` stays
+	// true: the hub has to be able to tell this from a kernel that never said,
+	// because it is a machine the OOM killer reaches sooner.
+	total, free, ok = meminfoSwap("MemTotal: 100 kB\nSwapTotal: 0 kB\nSwapFree: 0 kB\n")
+	if !ok || total != 0 || free != 0 {
+		t.Errorf("no swap = (%d, %d, %v), want (0, 0, true)", total, free, ok)
+	}
+
+	// No SwapTotal line at all is the one case that is genuinely unknown.
+	if _, _, ok := meminfoSwap("MemTotal: 100 kB\n"); ok {
+		t.Error("meminfo without SwapTotal reported ok = true")
+	}
+}
+
+func TestBusyTicks(t *testing.T) {
+	// user nice system idle iowait irq softirq steal
+	const stat = "cpu  100 20 50 1000 30 5 5 0\ncpu0 50 10 25 500 15 2 2 0\nintr 12345\n"
+	busy, ok := busyTicks(stat)
+	if !ok {
+		t.Fatal("busyTicks() ok = false, want true")
+	}
+	// Everything but idle (1000) and iowait (30), and the per-core `cpu0` line
+	// must not be added in -- doubling every reading is the bug this guards.
+	const want = 100 + 20 + 50 + 5 + 5 + 0
+	if busy != want {
+		t.Errorf("busyTicks() = %d, want %d", busy, want)
+	}
+
+	if _, ok := busyTicks("intr 1 2 3\n"); ok {
+		t.Error("busyTicks() with no cpu line reported ok = true")
+	}
+}
+
+func TestCPURate(t *testing.T) {
+	base := time.Now()
+	// Two and a half cores spent over one second.
+	prev := machineCPU{seconds: 10, at: base}
+	cur := machineCPU{seconds: 12.5, at: base.Add(time.Second)}
+	got := cpuRate(prev, cur, time.Minute)
+	if got == nil {
+		t.Fatal("cpuRate() = nil, want 250")
+	}
+	if *got < 249.9 || *got > 250.1 {
+		t.Errorf("cpuRate() = %v, want 250", *got)
+	}
+
+	// Not clamped at 100. An 8-core machine at full tilt reports 800, and
+	// clamping is how that would look merely busy.
+	eight := cpuRate(machineCPU{seconds: 0, at: base}, machineCPU{seconds: 8, at: base.Add(time.Second)}, time.Minute)
+	if eight == nil || *eight < 799 || *eight > 801 {
+		t.Errorf("eight cores = %v, want ~800", eight)
+	}
+
+	cases := []struct {
+		name      string
+		prev, cur machineCPU
+		maxAge    time.Duration
+		wantNil   string
+	}{
+		{
+			name:    "no previous reading",
+			prev:    machineCPU{},
+			cur:     machineCPU{seconds: 5, at: base},
+			maxAge:  time.Minute,
+			wantNil: "a rate needs two readings",
+		},
+		{
+			name:    "counter went backwards",
+			prev:    machineCPU{seconds: 100, at: base},
+			cur:     machineCPU{seconds: 1, at: base.Add(time.Second)},
+			maxAge:  time.Minute,
+			wantNil: "a recreated container restarts its counter at zero",
+		},
+		{
+			name:    "no elapsed time",
+			prev:    machineCPU{seconds: 1, at: base},
+			cur:     machineCPU{seconds: 2, at: base},
+			maxAge:  time.Minute,
+			wantNil: "two beats inside one clock tick",
+		},
+		{
+			name:    "stale baseline",
+			prev:    machineCPU{seconds: 1, at: base},
+			cur:     machineCPU{seconds: 2, at: base.Add(time.Hour)},
+			maxAge:  time.Minute,
+			wantNil: "an hour-old baseline publishes its own average as now",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := cpuRate(tc.prev, tc.cur, tc.maxAge); got != nil {
+				t.Errorf("cpuRate() = %v, want nil (%s)", *got, tc.wantNil)
+			}
+		})
 	}
 }

@@ -13,6 +13,7 @@ import { dropStreams, failBundle, publishLogLines, rearmStreams } from "../servi
 import { applyMetrics, markOffline, markOnline, trackedPackages } from "../services/devices.js";
 import { ACTIVE_STATES, applyProgress, completeJob, logJobEvent } from "../services/jobs.js";
 import { specForDevice } from "../services/monitor.js";
+import { applyHostReport } from "../services/redroid.js";
 import { nudge } from "../services/scheduler.js";
 
 export const WS_PATH = "/ws/device";
@@ -221,6 +222,10 @@ async function handleMessage(ws: WebSocket, deviceId: string, ip: string | null,
         capabilities: msg.capabilities,
       });
       await applyMetrics(deviceId, msg.metrics);
+      // Absent from every box. A machine's own readings went through
+      // applyMetrics above, like any Device's; this is the half only a host
+      // has -- what docker is, and what containers it is holding.
+      if (msg.host) await applyHostReport(deviceId, msg.host);
       await reconcileJobs(deviceId, msg.currentJobId ?? null, (m) => ws.send(JSON.stringify(m)));
       // Kept on the connection so the periodic sweep can update a box that
       // was busy — or over the batch limit — when it said hello.
@@ -251,6 +256,7 @@ async function handleMessage(ws: WebSocket, deviceId: string, ip: string | null,
       const conn = getConnection(deviceId);
       if (conn) conn.currentJobId = msg.currentJobId ?? null;
       await applyMetrics(deviceId, msg.metrics);
+      if (msg.host) await applyHostReport(deviceId, msg.host);
       if (msg.currentJobId) {
         await prisma.job
           .updateMany({

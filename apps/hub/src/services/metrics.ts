@@ -109,6 +109,12 @@ export async function recordSample(deviceId: string, metrics: DeviceMetrics): Pr
         totalBytes: toBigInt(metrics.totalBytes),
         cpuTempC: metrics.cpuTempC ?? null,
         batteryTempC: metrics.batteryTempC ?? null,
+        // Null here rather than undefined, unlike the Device row: a sample is
+        // one moment and a reading the box did not send at that moment is a
+        // gap, which is what the chart has to draw.
+        cpuPercent: metrics.cpuPercent ?? null,
+        swapTotalBytes: toBigInt(metrics.swapTotalBytes),
+        swapFreeBytes: toBigInt(metrics.swapFreeBytes),
       },
     });
 

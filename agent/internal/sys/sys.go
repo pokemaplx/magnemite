@@ -57,6 +57,16 @@ type System interface {
 	// Memory reports total and available bytes out of /proc/meminfo.
 	Memory() (total uint64, available uint64)
 	CPUCount() int
+	// CPUPercent is how busy this whole machine is, as a share of a single
+	// core: 250 means two and a half cores spent, the same convention
+	// ProcessStats uses. Nil until there are two readings to make a rate from,
+	// and nil again whenever the answer would be a guess -- never zero for it,
+	// because zero means genuinely idle.
+	CPUPercent() *float64
+	// Swap reports total and free bytes. ok is false only where the kernel does
+	// not report swap at all; a machine with none configured answers (0, 0,
+	// true), which is a reading worth having rather than an absent one.
+	Swap() (total uint64, free uint64, ok bool)
 	// Temperatures reports degrees Celsius for the SoC and the battery. Zero
 	// means the box exposes no such sensor, which is common enough on TV
 	// hardware that it is a normal answer rather than an error.
@@ -89,10 +99,21 @@ type Android struct {
 	// readings. These carry the previous one from beat to beat.
 	cpuMu   sync.Mutex
 	lastCPU map[string]cpuReading
+	// The machine-wide counterpart, under the same mutex.
+	lastMachineCPU machineCPU
 	// Resolved package -> pids, kept so the common case skips the /proc walk.
 	// Validated against each pid's own cmdline before use, because pids are
 	// recycled and an app that was killed and restarted gets a new one.
 	pidCache map[string][]int
+}
+
+// machineCPU is one cumulative reading of a whole machine's CPU time, in
+// seconds. Separate from cpuReading, which counts a package's clock ticks: the
+// sources differ (cgroup microseconds, or /proc/stat ticks) and converting both
+// to seconds at the point of reading keeps one rate function for either.
+type machineCPU struct {
+	seconds float64
+	at      time.Time
 }
 
 type cpuReading struct {
@@ -517,6 +538,103 @@ func procStartTicks(line string) (uint64, bool) {
 // procField pulls one whitespace-separated field out of a /proc file. These
 // are the cheapest readings on the box: no fork, no dumpsys, a few hundred
 // bytes each.
+// meminfoSwap reads SwapTotal and SwapFree out of /proc/meminfo.
+//
+// Both are returned even when zero, and the caller is expected to pass them on
+// as a genuine zero rather than as absent: a machine with no swap configured is
+// one the OOM killer reaches sooner, which is worth seeing. `ok` is false only
+// when the file had no SwapTotal line at all -- a kernel built without swap
+// support, or a /proc that could not be read.
+func meminfoSwap(meminfo string) (total uint64, free uint64, ok bool) {
+	scanner := bufio.NewScanner(strings.NewReader(meminfo))
+	for scanner.Scan() {
+		fields := strings.Fields(scanner.Text())
+		if len(fields) < 2 {
+			continue
+		}
+		value, err := strconv.ParseUint(fields[1], 10, 64)
+		if err != nil {
+			continue
+		}
+		// Values are in kB.
+		switch fields[0] {
+		case "SwapTotal:":
+			total = value * 1024
+			ok = true
+		case "SwapFree:":
+			free = value * 1024
+		}
+	}
+	return total, free, ok
+}
+
+// busyTicks sums the non-idle fields of /proc/stat's aggregate `cpu` line.
+//
+// The fields are user, nice, system, idle, iowait, irq, softirq, steal, and
+// idle plus iowait are the two that are not work. iowait in particular is a
+// CPU waiting on disk rather than spending itself, and counting it is how a box
+// doing a large install looks pinned when it is only waiting.
+//
+// Ticks are USER_HZ, which is 100 on every Android and Linux target here --
+// the same constant ProcessStats already divides by.
+func busyTicks(stat string) (uint64, bool) {
+	scanner := bufio.NewScanner(strings.NewReader(stat))
+	for scanner.Scan() {
+		fields := strings.Fields(scanner.Text())
+		// The aggregate line only: "cpu" with no trailing digit. "cpu0" is one
+		// core, and summing those as well would double every reading.
+		if len(fields) < 5 || fields[0] != "cpu" {
+			continue
+		}
+		var busy uint64
+		for i, field := range fields[1:] {
+			// Fields 3 and 4 (zero-based) are idle and iowait.
+			if i == 3 || i == 4 {
+				continue
+			}
+			value, err := strconv.ParseUint(field, 10, 64)
+			if err != nil {
+				return 0, false
+			}
+			busy += value
+		}
+		return busy, true
+	}
+	return 0, false
+}
+
+// cpuRate turns two cumulative CPU-time readings into a percentage of a single
+// core, so 250 means two and a half cores spent. The same convention as
+// ProcessStats.CPUPercent, and deliberately not normalised against the core
+// count: a value above 100 is the honest way to say a machine is using more
+// than one core, and the dashboard divides by cpuCount when it wants a share.
+//
+// Nil rather than zero in every case where the answer would be a guess. A rate
+// needs two readings, and the hub reads an absent field as "unknown" while a
+// zero means genuinely idle:
+//
+//   - no previous reading: the first beat after a start
+//   - the counter went backwards: a container recreated, or a host rebooted,
+//     restarts its counter at zero
+//   - no elapsed time: two beats inside one clock tick, which a forced refresh
+//     reaches
+//   - a stale baseline: dividing by a twenty-minute-old reading publishes a
+//     twenty-minute average as "right now"
+//
+// Nothing is clamped at 100. An eight-core machine at full tilt reports 800,
+// and clamping is how that would look merely busy.
+func cpuRate(prev, cur machineCPU, maxAge time.Duration) *float64 {
+	if prev.at.IsZero() || cur.seconds < prev.seconds {
+		return nil
+	}
+	elapsed := cur.at.Sub(prev.at)
+	if elapsed <= 0 || (maxAge > 0 && elapsed > maxAge) {
+		return nil
+	}
+	percent := (cur.seconds - prev.seconds) / elapsed.Seconds() * 100
+	return &percent
+}
+
 func readProc(path string) string {
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -550,6 +668,46 @@ func (a *Android) Memory() (uint64, uint64) {
 		return total, available
 	}
 	return meminfoMemory(readProc("/proc/meminfo"))
+}
+
+// CPUPercent prefers the container's own cgroup accounting and falls back to
+// the machine's /proc/stat.
+//
+// Inside a container /proc/stat is the *host's*, so on a machine running ten
+// boxes all ten would report the same figure and none of it would be theirs --
+// the same trap the load average has, and the reason this reading exists.
+// cpu.stat is per-cgroup and hierarchical, so it covers every nested cgroup
+// Android's init creates inside the box.
+//
+// Docker defaults to a private cgroup namespace, which is what makes the bare
+// path the container's own rather than the machine's.
+func (a *Android) CPUPercent() *float64 {
+	now := time.Now()
+
+	var cur machineCPU
+	if usec, ok := statKey(readProc("/sys/fs/cgroup/cpu.stat"), "usage_usec"); ok {
+		cur = machineCPU{seconds: float64(usec) / 1e6, at: now}
+	} else if ticks, ok := busyTicks(readProc("/proc/stat")); ok {
+		cur = machineCPU{seconds: float64(ticks) / clockTicksPerSecond, at: now}
+	} else {
+		// Neither source: a box whose /proc this agent cannot read. Unknown,
+		// never zero -- a zero here reads as a perfectly idle machine.
+		return nil
+	}
+
+	a.cpuMu.Lock()
+	prev := a.lastMachineCPU
+	a.lastMachineCPU = cur
+	a.cpuMu.Unlock()
+
+	// A baseline older than a few minutes would publish its own average as
+	// "right now", which is what a suspended or long-throttled agent leaves
+	// behind.
+	return cpuRate(prev, cur, 5*time.Minute)
+}
+
+func (a *Android) Swap() (uint64, uint64, bool) {
+	return meminfoSwap(readProc("/proc/meminfo"))
 }
 
 // cgroupMemory reads the cgroup v2 limit and usage. Not ok when there is no
@@ -1114,6 +1272,7 @@ func Metrics(ctx context.Context, s System, packages []string, withInventory boo
 	one, five, fifteen := s.LoadAvg()
 	memTotal, memAvailable := s.Memory()
 	cpuTemp, batteryTemp := s.Temperatures()
+	swapTotal, swapFree, hasSwap := s.Swap()
 
 	m := proto.DeviceMetrics{
 		FreeBytes:         free,
@@ -1127,10 +1286,19 @@ func Metrics(ctx context.Context, s System, packages []string, withInventory boo
 		MemAvailableBytes: memAvailable,
 		CPUTempC:          cpuTemp,
 		BatteryTempC:      batteryTemp,
+		CPUPercent:        s.CPUPercent(),
 		// Same cost class as the readings above — a handful of small /proc
 		// reads for the tracked apps — so it rides every beat rather than
 		// waiting for the inventory pass.
 		Processes: s.ProcessStats(packages),
+	}
+
+	// Pointers, so "no swap configured" and "this kernel does not report swap"
+	// stay different answers at the hub. Zero bytes of swap is a fact about a
+	// machine, not a missing reading.
+	if hasSwap {
+		m.SwapTotalBytes = &swapTotal
+		m.SwapFreeBytes = &swapFree
 	}
 
 	seen := map[string]bool{}
