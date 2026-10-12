@@ -210,6 +210,11 @@ async function run(id: string, serial: string, name: string, access: SshAccess):
           // The tag the compose file will name. One value from one place, so
           // the machine cannot build one image and be asked to run another.
           `MAGNEMITE_IMAGE=${shellQuote(REDROID_IMAGE)}`,
+          // The port the firewall has to keep open, which is the one this
+          // connection just came in on. Hardcoding 22 on a machine whose sshd
+          // listens elsewhere would lock the operator out of their own VPS
+          // halfway through provisioning it.
+          `MAGNEMITE_SSH_PORT=${shellQuote(String(access.port ?? 22))}`,
           `AGENT_BIN=./magnemite-agent`,
           "sh ./bootstrap.sh",
         ].join(" "),

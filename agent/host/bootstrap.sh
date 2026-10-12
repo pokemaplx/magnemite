@@ -141,63 +141,96 @@ step pidmax ok "$(cat /proc/sys/kernel/pid_max 2>/dev/null || echo unknown)"
 
 # --- 4. docker --------------------------------------------------------------
 #
-# What is needed is docker *and* the compose v2 plugin, invoked as
-# `docker compose`. They are two packages, and which names exist depends on the
-# distro -- so they are installed separately and the outcome is what decides,
-# not whether a particular package name resolved.
+# Two requirements, not one: an engine, and compose *v2* as a CLI plugin
+# (`docker compose`). They used to be a single `apt-get install docker.io
+# docker-compose-v2`, which is how a paid arm64 VPS came back with nothing:
+# **no Debian release has ever had a `docker-compose-v2` package**, apt refuses
+# the whole transaction when one name is unknown, and the machine ended up with
+# no docker at all under the message "could not install docker".
 #
-# An earlier version asked for both in one `apt-get install`. That is the bug
-# that cost a real provisioning: apt refuses the whole transaction when any
-# named package is unknown, so a missing `docker-compose-v2` meant `docker.io`
-# was not installed either -- on a machine where it was available. One command
-# per package, and nothing fatal until the end.
+# Selecting the plugin by distro package name does not work either, and is
+# worse than it looks: Debian 13 calls it `docker-compose`, which is the name
+# Debian 12 uses for the *Python v1* tool that `docker compose` cannot use. On
+# Ubuntu 22.04 `docker-compose-v2` exists only in `jammy-updates`, not the
+# release pocket.
 #
-# The output is kept rather than sent to /dev/null. This is the step most
-# likely to fail and the one where "could not install docker" on its own is
-# useless; apt says exactly what it could not find, and that belongs in the
-# failure.
-if have docker && docker compose version >/dev/null 2>&1; then
+# So: Docker's own apt repository first, which is uniform across Debian 11-13
+# and Ubuntu 22.04+ on arm64 and carries the engine, the plugin and buildx --
+# and `docker build` in step 5b wants buildx. Distro packages second, the
+# convenience script last. Success is judged by `docker compose version` and
+# never by apt's exit code, and every attempt appends to one log the failure
+# quotes from.
+DOCKER_LOG=/tmp/magnemite-docker.log
+: >"$DOCKER_LOG"
+
+compose_ok() { docker compose version >/dev/null 2>&1; }
+
+# Recommends stay on, deliberately: Debian's `docker.io` only *recommends*
+# `docker-cli`, so --no-install-recommends would install a daemon with no
+# `docker` binary at all.
+apt_do() { $APT -y -q "$@" >>"$DOCKER_LOG" 2>&1; }
+
+# apt explains itself on lines starting `E:`; everything else is progress.
+# A step line is one line, so this folds and clips -- the whole log stays on
+# the machine at $DOCKER_LOG.
+why() {
+	w=$(sed -n 's/^E: //p' "$DOCKER_LOG" | tail -2)
+	[ -n "$w" ] || w=$(grep -v '^[[:space:]]*$' "$DOCKER_LOG" | tail -2)
+	printf '%s' "$w" | tr -d '\r' | tr '\n' ';' | cut -c1-160
+}
+
+if have docker && compose_ok; then
 	step docker ok "$(docker --version 2>/dev/null | head -1)"
 else
 	have apt-get || die docker "docker is missing and this is not an apt machine"
-	log=""
 
-	if ! have docker; then
-		# Debian and Ubuntu both ship this, under this name, on every release
-		# that matters here.
-		out=$($APT install -y -qq docker.io 2>&1) || log="$log
-docker.io: $out"
-	fi
+	# Docker's own repository. Keyed by the *upstream* distro and codename, so a
+	# derivative that puts its own name in VERSION_CODENAME still resolves.
+	. /etc/os-release 2>/dev/null || true
+	CODENAME=${UBUNTU_CODENAME:-${VERSION_CODENAME:-}}
+	case "${ID:-}:${ID_LIKE:-}" in
+	ubuntu:* | *ubuntu*) FLAVOUR=ubuntu ;;
+	debian:* | raspbian:* | *debian*) FLAVOUR=debian ;;
+	*) FLAVOUR="" ;;
+	esac
 
-	# The compose plugin, under either name it goes by: Docker's own repository
-	# calls it docker-compose-plugin, Debian calls it docker-compose-v2, and
-	# neither exists everywhere. Failing to find one is not an error on its own
-	# -- the check below is what decides.
-	if ! docker compose version >/dev/null 2>&1; then
-		for pkg in docker-compose-plugin docker-compose-v2; do
-			out=$($APT install -y -qq "$pkg" 2>&1) && break
-			log="$log
-$pkg: $out"
-		done
-	fi
-
-	# Still not both? Docker's own installer, which carries the engine and the
-	# plugin together and knows every distro this might be. Last rather than
-	# first, because it pulls a script off the internet and runs it as root,
-	# and the distro packages are the lighter answer when they work.
-	if ! have docker || ! docker compose version >/dev/null 2>&1; then
-		if have curl; then
-			out=$(curl -fsSL https://get.docker.com 2>&1 | sh 2>&1) || log="$log
-get.docker.com: $out"
-		else
-			log="$log
-get.docker.com: skipped, no curl on this machine"
+	if [ -n "$FLAVOUR" ] && [ -n "$CODENAME" ]; then
+		apt_do install ca-certificates curl || true
+		install -m 0755 -d /etc/apt/keyrings
+		if curl -fsSL --retry 3 --retry-delay 2 \
+			"https://download.docker.com/linux/$FLAVOUR/gpg" \
+			-o /etc/apt/keyrings/docker.asc 2>>"$DOCKER_LOG"; then
+			chmod a+r /etc/apt/keyrings/docker.asc
+			printf 'deb [arch=%s signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/%s %s stable\n' \
+				"$(dpkg --print-architecture)" "$FLAVOUR" "$CODENAME" \
+				>/etc/apt/sources.list.d/docker.list
+			# Only this list, so an unrelated broken third-party repository
+			# cannot decide whether docker gets installed.
+			apt_do update \
+				-o Dir::Etc::sourcelist=sources.list.d/docker.list \
+				-o Dir::Etc::sourceparts=- \
+				-o APT::Get::List-Cleanup=0 || true
+			apt_do install docker-ce docker-ce-cli containerd.io \
+				docker-compose-plugin docker-buildx-plugin || true
 		fi
 	fi
 
-	have docker || die docker "could not install docker.$log"
-	docker compose version >/dev/null 2>&1 ||
-		die docker "docker is installed but the compose v2 plugin is not.$log"
+	# The distro's own, for a machine that cannot reach download.docker.com.
+	# `docker.io` is the one name every Debian and Ubuntu agrees on.
+	have docker || apt_do install docker.io || true
+
+	# Last: Docker's convenience script. Last rather than first because it runs
+	# a downloaded script as root, sleeps for twenty seconds when it finds an
+	# existing install, and its own header says it is not for production -- but
+	# it does carry engine and plugin together, which is what is wanted here.
+	if ! have docker || ! compose_ok; then
+		if curl -fsSL -o /tmp/get-docker.sh https://get.docker.com 2>>"$DOCKER_LOG"; then
+			sh /tmp/get-docker.sh >>"$DOCKER_LOG" 2>&1 || true
+		fi
+	fi
+
+	have docker || die docker "could not install docker: $(why)"
+	compose_ok || die docker "docker is installed, the compose v2 plugin is not: $(why)"
 	step docker ok "$(docker --version 2>/dev/null | head -1)"
 fi
 
@@ -265,6 +298,95 @@ if [ -n "${MAGNEMITE_IMAGE:-}" ] && [ -d ./redroid ]; then
 else
 	step image warn "no image build requested"
 fi
+
+# --- 5c. the hardening a public machine wants -------------------------------
+#
+# A Redroid host is unusually easy to lock down, because nothing on it
+# listens: the rendered compose publishes no ports and the agent dials out, so
+# the only thing that ever needs to reach this machine is whoever holds the SSH
+# key. What is deliberately *not* done is at the bottom of this file, and
+# unattended-upgrades in particular would do real harm here.
+HARDEN_LOG=/tmp/magnemite-harden.log
+: >"$HARDEN_LOG"
+harden() { "$@" >>"$HARDEN_LOG" 2>&1; }
+
+# Which port stays open. Hardcoding 22 on a machine whose sshd listens
+# elsewhere locks the operator out of their own VPS halfway through
+# provisioning it -- so the hub passes the port this connection actually came
+# in on, and sshd's own config is read as well for the by-hand path, where
+# nothing passes anything. Every port any of them names is allowed: a spare
+# rule costs nothing and a missing one costs the machine.
+SSH_PORTS=$(
+	{
+		printf '%s\n' "${MAGNEMITE_SSH_PORT:-}"
+		# Resolved config first -- it is the only source that accounts for
+		# drop-ins, which is where a cloud image usually puts its changes.
+		sshd -T 2>/dev/null || /usr/sbin/sshd -T 2>/dev/null || true
+		awk '$1 == "Port" { print $2 }' /etc/ssh/sshd_config 2>/dev/null
+		awk '$1 == "Port" { print $2 }' /etc/ssh/sshd_config.d/*.conf 2>/dev/null
+	} | awk '
+		$1 == "port" { print $2 }
+		$1 ~ /^[0-9]+$/ { print $1 }
+	' | sort -un
+)
+[ -n "$SSH_PORTS" ] || SSH_PORTS=22
+PORT_LIST=$(printf '%s' "$SSH_PORTS" | tr '\n' ',')
+
+if have apt-get; then
+	$APT -y -q install ufw fail2ban ca-certificates curl >>"$HARDEN_LOG" 2>&1 || true
+fi
+
+if have ufw; then
+	# Outbound is how everything here works -- the agent dials the hub, docker
+	# pulls, apt updates -- so only incoming is denied.
+	harden ufw default deny incoming || true
+	harden ufw default allow outgoing || true
+	for p in $SSH_PORTS; do
+		harden ufw allow "$p"/tcp || true
+	done
+	# --force, because `ufw enable` asks "this may disrupt existing ssh
+	# connections" on a terminal and this script has none: without it the
+	# bootstrap stops on a prompt nobody can answer.
+	harden ufw --force enable || true
+	FIREWALL="ufw, ssh on $PORT_LIST"
+else
+	# Not fatal, and not worth installing a second firewall for: a machine that
+	# listens on nothing but sshd is not wide open, it is just not narrowed.
+	FIREWALL="no ufw"
+fi
+
+if have fail2ban-server; then
+	# A file we own, overwritten rather than appended to, like the modprobe
+	# drop-ins in step 3. Two things have to be in it:
+	#
+	#   port     the jail's default is `ssh`, which /etc/services maps to 22 --
+	#            so on a machine with sshd elsewhere it would watch a port
+	#            nothing is attacking and ban on a port nobody uses.
+	#   backend  Debian 12 and later ship no /var/log/auth.log, and the jail
+	#            fails to start looking for it. journald is there by
+	#            definition on a machine that has just been given a unit file.
+	mkdir -p /etc/fail2ban/jail.d
+	cat >/etc/fail2ban/jail.d/magnemite.conf <<CONF
+[sshd]
+enabled = true
+backend = systemd
+port = $PORT_LIST
+CONF
+	harden systemctl enable fail2ban || true
+	harden systemctl restart fail2ban || true
+	BANS="fail2ban"
+else
+	BANS="no fail2ban"
+fi
+
+# A drifted clock breaks TLS before it breaks anything else, and the symptom is
+# an agent that cannot finish a handshake -- which reads as a network fault and
+# is not one. Usually already on in a cloud image; this makes sure.
+if have timedatectl; then
+	harden timedatectl set-ntp true || true
+fi
+
+step harden ok "$FIREWALL, $BANS"
 
 # --- 6. the agent, its config and its unit ----------------------------------
 [ -f "$AGENT_BIN" ] || die agent "no agent binary at $AGENT_BIN"
@@ -338,3 +460,29 @@ step agent ok "$INSTALL_BIN"
 # module that needs a reboot, after which SSH is gone and the only evidence
 # left is the socket.
 step done ok "waiting for the agent to reach the hub"
+
+# --- what is deliberately not here ------------------------------------------
+#
+# Three things off the usual VPS checklist are missing on purpose, so that
+# nobody adds them back believing they were forgotten.
+#
+# **unattended-upgrades**, which on *this* machine is actively harmful.
+# linux-modules-extra is per kernel version (step 2), so an unattended upgrade
+# that installs a new kernel leaves binder behind -- and after the next reboot
+# every container fails to come up, with nothing in Magnemite to explain it,
+# because the containers are simply gone. The replacement is the hub's "re-run
+# bootstrap", which reaches this file over the agent's own socket and installs
+# the modules for the kernel that is actually running.
+#
+# **A full `apt upgrade`**, the same hazard with worse timing: it can stage a
+# new kernel while the old one is still running, so the modules installed
+# moments ago in step 2 are for a kernel this machine is about to stop using.
+#
+# **Ports 80 and 443.** Nothing here serves HTTP. The dashboard and the hub are
+# somewhere else entirely, and this machine only ever dials out to them.
+#
+# And one thing ufw does not cover, worth knowing before someone publishes a
+# port to debug a container: Docker writes its own iptables rules, and a
+# published container port bypasses ufw completely. Moot today, because the
+# rendered compose publishes nothing -- which is exactly why the firewall can
+# be this tight.
