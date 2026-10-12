@@ -3,7 +3,7 @@
 import { useActionState, useEffect, useState, type ReactNode } from "react";
 import { ChevronDown, Plus, Trash2 } from "lucide-react";
 import { createMonitorRule, updateMonitorRule } from "@/actions/monitoring";
-import type { MonitorChannel } from "@magnemite/db";
+import type { DeviceKind, MonitorChannel } from "@magnemite/db";
 import type { ActionState } from "@/actions/rollouts";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
@@ -26,15 +26,18 @@ import { SaveButton } from "@/components/ui/save-button";
 import { Select } from "@/components/ui/select";
 import { Switch } from "@/components/ui/switch";
 import {
-  ACTION_OPTIONS,
   actionMeta,
+  actionsFor,
   CHANNEL_IDS,
   CHANNEL_LABELS,
   defaultProbeKind,
+  LADDER_LAST_RESORT,
   LEVEL_OPTIONS,
   PROBE_OPTIONS,
-  SIGNAL_OPTIONS,
+  SCOPE_OPTIONS,
+  scopeForSignal,
   signalMeta,
+  signalsFor,
 } from "@/lib/monitor-vocabulary";
 import { cn } from "@/lib/utils";
 
@@ -53,8 +56,20 @@ export type MonitorRuleRow = {
   name: string;
   enabled: boolean;
   signal: string;
+  /**
+   * Boxes or the machines that host them. Optional because a page that lists
+   * rules may not be reading the column yet; absent, the dialog derives it
+   * from the signal, which answers every signal but `AGENT_OFFLINE`.
+   */
+  appliesTo?: DeviceKind;
   packageName: string | null;
   groupId: string | null;
+  /**
+   * The floor out of the rule's `config`, for the two signals that compare a
+   * reading against one. Absent is not zero: a rule with no floor is a rule
+   * the hub reads as unknown and never acts on.
+   */
+  minFreePercent?: number | null;
   threshold: number;
   cooldownSeconds: number;
   windowStart: string | null;
@@ -139,6 +154,13 @@ function RuleForm({
     {},
   );
   const [signal, setSignal] = useState(rule?.signal ?? "SERVICE_DOWN");
+  // What the rule runs on. An existing rule that was handed its scope keeps
+  // it; one that was not has it read off its own signal, which is unambiguous
+  // for all but `AGENT_OFFLINE` — a machine signal cannot be a box rule, so
+  // guessing BOX there would quietly rewrite a host rule on the next save.
+  const [appliesTo, setAppliesTo] = useState<DeviceKind>(
+    rule?.appliesTo ?? (rule ? scopeForSignal(rule.signal) : null) ?? "BOX",
+  );
   const [probeKind, setProbeKind] = useState(rule?.probe?.kind ?? "none");
   // Lifted out of its own Toggle only because the all-clear switch below it
   // has nothing to mean while this is off.
@@ -162,7 +184,7 @@ function RuleForm({
   }, [state, stale, onDone]);
 
   const groupOptions = [
-    { value: "", label: "Every box" },
+    { value: "", label: appliesTo === "HOST" ? "Every machine" : "Every box" },
     ...groups.map((group) => ({ value: group.id, label: group.name })),
   ];
 
@@ -173,6 +195,36 @@ function RuleForm({
     if (signalMeta(next).probe === "required" && probeKind === "none") {
       setProbeKind(defaultProbeKind(next));
     }
+  }
+
+  /**
+   * Switching between boxes and machines, which rewrites whatever the new
+   * scope cannot mean.
+   *
+   * Both halves have to move. A signal is dropped by the hub when it does not
+   * match the machine, so a box signal left behind on a machine rule is a rule
+   * that is enabled and silent; and a rung is an `am` command on a box, so
+   * "Restart the app" left behind on a machine rule is an action that reports
+   * "the rule has no command to run" at the moment it was needed. Both would
+   * have been invisible in a form that looked finished.
+   */
+  function pickScope(next: DeviceKind) {
+    setAppliesTo(next);
+
+    if (!signalMeta(signal).kinds.includes(next)) {
+      const first = signalsFor(next)[0];
+      if (first) pickSignal(first.value);
+    }
+
+    const allowed = new Set(actionsFor(next).map((option) => option.value));
+    setSteps((current) =>
+      current.map((step) =>
+        // NOTIFY_ONLY is the one rung both kinds share, so it is always
+        // somewhere to land — and it is the rung that does nothing, which is
+        // the right thing for a rule whose ladder was just invalidated.
+        allowed.has(step.action) ? step : { ...step, action: "NOTIFY_ONLY", command: null },
+      ),
+    );
   }
 
   const id = (field: string) => `${field}-${rule?.id ?? "new"}`;
@@ -202,6 +254,20 @@ function RuleForm({
           </Field>
 
           <Field
+            label="Watches"
+            htmlFor={id("appliesTo")}
+            hint="A box is an Android; a machine is a VPS that runs them as containers. Almost nothing means the same on both, so this is what the signal list below offers."
+          >
+            <Select
+              id={id("appliesTo")}
+              name="appliesTo"
+              options={SCOPE_OPTIONS}
+              value={appliesTo}
+              onValueChange={(value) => pickScope(value as DeviceKind)}
+            />
+          </Field>
+
+          <Field
             label="Applies to"
             htmlFor={id("groupId")}
             hint="A rule scoped to a group replaces the fleet-wide one for that group rather than adding to it."
@@ -221,29 +287,53 @@ function RuleForm({
             <Select
               id={id("signal")}
               name="signal"
-              options={SIGNAL_OPTIONS}
+              options={signalsFor(appliesTo)}
               value={signal}
               onValueChange={pickSignal}
             />
           </Field>
 
-          <Field
-            label={meta.needsPackage ? "App package" : "App package (optional)"}
-            htmlFor={id("packageName")}
-            hint={
-              meta.needsPackage
-                ? "The signal is about this app, so the rule needs it. Actions act on it too."
-                : "What the actions act on. {pkg} in a command becomes this."
-            }
-          >
-            <Input
-              id={id("packageName")}
-              name="packageName"
-              defaultValue={rule?.packageName ?? ""}
-              placeholder="com.nianticlabs.pokemongo"
-              className="font-mono text-xs"
-            />
-          </Field>
+          {/* The floor is the whole rule for the two signals that have one:
+              the hub compares what a machine reports against it, and reads a
+              rule without one as unknown rather than as a fault. */}
+          {meta.floor ? (
+            <Field label={meta.floor.label} htmlFor={id("minFreePercent")} hint={meta.floor.hint}>
+              <Suffixed suffix="% free">
+                <Input
+                  id={id("minFreePercent")}
+                  name="minFreePercent"
+                  type="number"
+                  min={1}
+                  max={99}
+                  defaultValue={rule?.minFreePercent ?? 10}
+                  className="max-w-[8rem]"
+                />
+              </Suffixed>
+            </Field>
+          ) : null}
+
+          {/* A machine has no app to name. Unmounted rather than disabled, so
+              the form posts nothing for it and the rule is stored without a
+              package instead of carrying one nothing on a VPS could act on. */}
+          {appliesTo === "BOX" ? (
+            <Field
+              label={meta.needsPackage ? "App package" : "App package (optional)"}
+              htmlFor={id("packageName")}
+              hint={
+                meta.needsPackage
+                  ? "The signal is about this app, so the rule needs it. Actions act on it too."
+                  : "What the actions act on. {pkg} in a command becomes this."
+              }
+            >
+              <Input
+                id={id("packageName")}
+                name="packageName"
+                defaultValue={rule?.packageName ?? ""}
+                placeholder="com.nianticlabs.pokemongo"
+                className="font-mono text-xs"
+              />
+            </Field>
+          ) : null}
         </Section>
 
         {/* --- how it is told ----------------------------------------------- */}
@@ -331,7 +421,7 @@ function RuleForm({
           title="What it does about it"
           hint="One rung per failure count, softest first. A rung already spent is not spent again, so a box that has proved a restart does not help is not restarted forever (except the last rung, which repeats at the cooldown because there is nothing stronger left to try)."
         >
-          <StepsEditor steps={steps} onChange={setSteps} />
+          <StepsEditor steps={steps} onChange={setSteps} kind={appliesTo} />
 
           <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
             <Field
@@ -565,9 +655,12 @@ function ProbeFields({
 function StepsEditor({
   steps,
   onChange,
+  kind,
 }: {
   steps: MonitorStepRow[];
   onChange: (steps: MonitorStepRow[]) => void;
+  /** Which actions exist here: a machine has no app to force-stop. */
+  kind: DeviceKind;
 }) {
   // The overrides are for the fleet that needs them and noise for everyone
   // else, so they start folded — unless this rule already carries one, where
@@ -609,7 +702,7 @@ function StepsEditor({
 
               <Select
                 name="stepAction"
-                options={ACTION_OPTIONS}
+                options={actionsFor(kind)}
                 value={step.action}
                 onValueChange={(value) => update(index, { action: value })}
                 aria-label="Action"
@@ -662,7 +755,7 @@ function StepsEditor({
               ...steps,
               {
                 atFailure: Math.max(...steps.map((step) => step.atFailure), 0) + 1,
-                action: "REBOOT",
+                action: LADDER_LAST_RESORT[kind],
                 command: null,
               },
             ])

@@ -230,6 +230,31 @@ export const hub = {
     call<StoredBuild>("/internal/uploads/from-url", input),
   /** Integration probes for the Status page. `force` skips the hub's cache. */
   health: (force = false) => call<HubHealth>("/internal/health", { force }),
+
+  /**
+   * Bring a machine to N containers and converge it.
+   *
+   * One call because pressing Save means both: the rows are the desired state
+   * and the dashboard could write them itself, but nothing would then reach the
+   * machine, and "I changed the number and nothing happened" would be the
+   * normal experience.
+   */
+  scaleHost: (id: string, count: number, workers: number | null) =>
+    call<{ added: number; removed: number; sent: boolean; reason?: string }>(
+      `/internal/hosts/${id}/scale`,
+      { count, workers },
+    ),
+  /**
+   * Import the containers a machine already has.
+   *
+   * Nothing is converged before this, because a machine running a hand-written
+   * compose file has containers holding real device identities and an empty
+   * desired set would make every one of them an orphan.
+   */
+  adoptHost: (id: string) => call<{ adopted: number }>(`/internal/hosts/${id}/adopt`),
+  /** Re-send the file. `force` sends it even when the hash already matches. */
+  convergeHost: (id: string, force = false) =>
+    call<{ sent: boolean; reason?: string }>(`/internal/hosts/${id}/converge`, { force }),
 };
 
 export const HUB_BASE_URL = HUB_URL;

@@ -407,6 +407,7 @@ export const hostConvergeResultSchema = z.object({
   output: z.string().nullish(),
   error: z.string().nullish(),
 });
+export type HostConvergeResult = z.infer<typeof hostConvergeResultSchema>;
 
 export const agentMessageSchema = z.discriminatedUnion("type", [
   helloSchema,
@@ -690,6 +691,7 @@ export const hostConvergeSchema = z.object({
    */
   removeOrphans: z.boolean().default(false),
 });
+export type HostConverge = z.infer<typeof hostConvergeSchema>;
 
 export const serverMessageSchema = z.discriminatedUnion("type", [
   welcomeSchema,

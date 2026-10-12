@@ -55,6 +55,57 @@ Two caveats worth knowing before switching them on:
   not measure, the signal reads unknown rather than idle — which is why turning
   it on cannot start rebooting a fleet that never reports a rate.
 
+### On a machine
+
+A rule declares **which kind of device it is about** — a box or a
+[machine](/docs/fleet/redroid-hosts) — and four signals exist for the second:
+
+| Signal                  | Answered by | What it means                                                                         |
+| ----------------------- | ----------- | ------------------------------------------------------------------------------------- |
+| `HOST_MEMORY_LOW`       | the hub     | Free memory **plus free swap**, under the rule's percentage floor                     |
+| `HOST_DISK_LOW`         | the hub     | Free space under that floor, on the filesystem docker keeps its images and volumes on |
+| `HOST_DOCKER_DOWN`      | not yet     | The agent is up and the docker daemon is not                                          |
+| `REDROID_INSTANCE_DOWN` | not yet     | A container that should be running is not                                             |
+
+Swap counts as headroom in the first one, because on these machines it is
+exactly what stands between fifty workers and the OOM killer. A machine with no
+swap reports zero rather than nothing, so adding it is safe and a genuinely
+absent reading stays unknown.
+
+The last two need facts the hub does not read yet — the daemon's health, and
+per-instance container state — so today they read **unknown**, which neither
+counts nor resets. Wiring them to "fine" would turn a feature that does not
+exist into a clean bill of health on every machine.
+
+`AGENT_OFFLINE` needs nothing new: pointed at machines, it already means exactly
+the right thing, because a machine is a `Device` and its socket is gone the same
+way a box's is.
+
+<Callout type="info" title="The rule editor does not offer these yet">
+  The signals are in the schema and the hub evaluates the two that have data. The vocabulary the
+  **Settings → Monitoring** form is built from has not learned them, so there is no way to write one
+  from the dashboard today.
+</Callout>
+
+#### Why these are signals and not probe rules
+
+A shell probe on the machine looks cheaper — one `HEALTH_CHECK_FAILED` rule per
+check, no enum values, no code. It does not work, and the way it fails is
+silent: `rulesFor` dedupes on **signal + package name** and keeps one winner per
+key, so three `HEALTH_CHECK_FAILED` rules with no package collapse into one. Two
+of your three checks would simply never run — no error, no probe, nothing in the
+feed to say why.
+
+<Callout type="warn" title="And a probe on a box reads the machine's load, on every box at once">
+  Inside a container, `/proc/loadavg` and the thermal zones are the **host's**. A
+  `HEALTH_CHECK_FAILED` probe that greps either is not reading one box's state; it reads the
+  machine's, identically, on all ten boxes on it. One cause then trips ten ladders, and the per-box
+  ceilings do not help because each box is under its own. Nothing in the code can catch this — the
+  probe is a string you typed and the reading is perfectly valid. Use `HOST_MEMORY_LOW` and
+  `HOST_DISK_LOW` on the machine, or a box's own `cpuPercent`, which [is genuinely its
+  own](/docs/fleet/redroid-hosts#cpupercent-is-the-honest-per-box-cpu).
+</Callout>
+
 ## The ladder?
 
 A rule does the gentle thing first and the expensive thing only when the gentle
@@ -84,8 +135,16 @@ left to try.
 | Restart the scanner in Rotom           | Rotom's own `restart` action                          |
 | Drop the scanner's connection in Rotom | Rotom's `disconnect` — the box reconnects             |
 | Reboot the box through Rotom           | Rotom's own `reboot` action                           |
+| Restart one Redroid container          | from the machine that runs it, not from inside it     |
 
-The last three travel **Rotom's socket, not the agent's**, which is what makes
+**Restart one Redroid container** is the host-side counterpart of _restart the
+app_: the smallest thing that fixes a wedged instance. `Reboot the box` is
+deliberately **not** overloaded to mean "reboot the VPS" — that takes every box
+on the machine down at once, which is a much larger decision than the signal
+that would reach for it. Like the host signals above, it is in the schema and
+not yet in the rule editor.
+
+The three Rotom actions travel **Rotom's socket, not the agent's**, which is what makes
 them the only remediation left on a box whose agent has died — every other
 action on the list needs the box reachable from Magnemite. The mirror of that is
 also true and worth planning a ladder around: Rotom cannot act on a box it has
@@ -298,6 +357,19 @@ A rule applies to every box, or to one device group. A group-scoped rule
 adding to it, or two ladders would race over one fault and the box would be
 restarted twice. That is the seam for a fleet running Atlas at one site and
 Aegis at another.
+
+**Which kind of device** is the other half of that filter, and it is not
+optional: a rule is about boxes or about
+[machines](/docs/fleet/redroid-hosts), never both. Existing rules are about
+boxes, which is the default and what every seeded rule is.
+
+| A rule aimed at | Evaluated against          | What the wrong side would do                                                             |
+| --------------- | -------------------------- | ---------------------------------------------------------------------------------------- |
+| boxes           | `kind = BOX` devices only  | A box rule on a VPS reads a scanner's absence as a fault on a machine that never ran one |
+| machines        | `kind = HOST` devices only | A host rule on a box measures a disk and a daemon that are not the box's                 |
+
+Both mistakes would **act**, not just alert, which is why the filter is a field
+on the rule rather than something the evaluator infers.
 
 The group is also where that site declares which MITM it runs and what to write
 into its [config](/docs/fleet/configs). A group-scoped rule and its group's MITM

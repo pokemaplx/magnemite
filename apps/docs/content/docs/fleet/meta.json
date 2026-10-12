@@ -4,6 +4,7 @@
   "pages": [
     "agent",
     "redroid",
+    "redroid-hosts",
     "enrollment",
     "rollouts",
     "update",

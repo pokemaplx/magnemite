@@ -13,7 +13,7 @@ import { dropStreams, failBundle, publishLogLines, rearmStreams } from "../servi
 import { applyMetrics, markOffline, markOnline, trackedPackages } from "../services/devices.js";
 import { ACTIVE_STATES, applyProgress, completeJob, logJobEvent } from "../services/jobs.js";
 import { specForDevice } from "../services/monitor.js";
-import { applyHostReport } from "../services/redroid.js";
+import { applyHostReport, recordConvergeResult } from "../services/redroid.js";
 import { nudge } from "../services/scheduler.js";
 
 export const WS_PATH = "/ws/device";
@@ -251,6 +251,10 @@ async function handleMessage(ws: WebSocket, deviceId: string, ip: string | null,
       nudge();
       break;
     }
+
+    case "host_converge_result":
+      await recordConvergeResult(deviceId, msg);
+      break;
 
     case "heartbeat": {
       const conn = getConnection(deviceId);

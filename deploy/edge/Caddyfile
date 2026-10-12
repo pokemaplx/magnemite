@@ -53,8 +53,16 @@
 	}
 
 	# --- Live job/device updates for the dashboard --------------------------
+	# The *dashboard*, not the hub. /api/events is a Next route that checks the
+	# session cookie and then proxies the hub's /internal/events with the
+	# internal secret -- the hub has no /api/events of its own, so sending this
+	# to it 404s and the dashboard silently stops live-updating.
+	#
+	# It still needs a block of its own rather than falling through to the
+	# catch-all below, because that one has `encode` on it and compressing an
+	# SSE stream buffers it -- which is the same symptom by a different route.
 	handle /api/events* {
-		reverse_proxy hub:{$HUB_PORT} {
+		reverse_proxy web:3000 {
 			# SSE: never buffer, never time out an idle stream.
 			flush_interval -1
 		}

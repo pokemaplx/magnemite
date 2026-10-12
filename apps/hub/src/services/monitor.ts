@@ -952,6 +952,8 @@ const MITM_LOG = "/data/local/tmp/atlas.log";
 type Seed = {
   name: string;
   signal: MonitorSignal;
+  /** Omitted is BOX, which is the column's default and what most seeds are. */
+  appliesTo?: DeviceKind;
   packageName: string | null;
   config: Prisma.InputJsonValue;
   threshold: number;
@@ -1138,37 +1140,147 @@ const SEEDS: Seed[] = [
       { atFailure: 8, action: "ROTOM_RESTART" },
     ],
   },
+
+  // --- machines -------------------------------------------------------------
+  // The four a VPS running Redroid containers is watched for. Their ladders are
+  // shorter than the box ones above on purpose: the blast radius is different.
+  // A box is one scanner, and a machine is every box on it -- so three of these
+  // only tell you, and the fourth touches one container.
+
+  {
+    name: "Docker is down",
+    signal: "HOST_DOCKER_DOWN",
+    appliesTo: "HOST",
+    packageName: null,
+    config: {},
+    // Two readings, so a daemon restart that the operator is doing by hand is
+    // not announced as an outage.
+    threshold: 2,
+    cooldownSeconds: 1800,
+    notifyChannels: [...MONITOR_CHANNELS],
+    // Every box on the machine is down at once, and none of them can be
+    // started. There is no louder thing that can happen to a machine.
+    notifyLevel: "CRITICAL",
+    // Nothing else is possible. The agent answering means the machine is
+    // reachable, and the one thing that could bring docker back is systemd on
+    // the machine itself -- which a rule has no business racing.
+    steps: [{ atFailure: 1, action: "NOTIFY_ONLY" }],
+  },
+  {
+    name: "Machine is low on memory",
+    signal: "HOST_MEMORY_LOW",
+    appliesTo: "HOST",
+    // Memory and swap together, which is what the hub compares: on these
+    // machines swap is exactly what stands between a stack of Androids and the
+    // OOM killer. Ten percent is roughly one more box's worth of headroom.
+    config: { minFreePercent: 10 },
+    packageName: null,
+    // Three readings, because a box booting is a spike: Android takes most of
+    // its memory in the first minute and hands some of it back afterwards.
+    threshold: 3,
+    cooldownSeconds: 1800,
+    notifyChannels: [...MONITOR_CHANNELS],
+    notifyLevel: "WARN",
+    // Telling you is the whole rule. The answer is fewer boxes or more swap,
+    // and the OOM killer does not take the box that caused it -- so acting
+    // here would mean restarting an innocent container to free memory for
+    // whatever actually ate it.
+    steps: [{ atFailure: 1, action: "NOTIFY_ONLY" }],
+  },
+  {
+    name: "Machine is low on disk",
+    signal: "HOST_DISK_LOW",
+    appliesTo: "HOST",
+    config: { minFreePercent: 10 },
+    packageName: null,
+    // A disk fills slowly, so two readings in a row is already a trend rather
+    // than a spike -- and nothing here can be fixed in a hurry anyway.
+    threshold: 2,
+    cooldownSeconds: 3600,
+    notifyChannels: [...MONITOR_CHANNELS],
+    notifyLevel: "WARN",
+    steps: [{ atFailure: 1, action: "NOTIFY_ONLY" }],
+  },
+  {
+    name: "A box on the machine is not running",
+    signal: "REDROID_INSTANCE_DOWN",
+    appliesTo: "HOST",
+    packageName: null,
+    config: {},
+    threshold: 2,
+    cooldownSeconds: 600,
+    notifyChannels: [...MONITOR_CHANNELS],
+    notifyLevel: "WARN",
+    steps: [
+      { atFailure: 1, action: "NOTIFY_ONLY" },
+      // One container, never the machine: every other box on it is working,
+      // and this is the only remediation that knows the difference.
+      { atFailure: 3, action: "RESTART_INSTANCE" },
+    ],
+  },
 ];
 
 /**
- * Write the defaults, once, on a fleet that has none.
+ * Write the defaults this fleet has no answer for, all **disabled**.
  *
- * Only when the table is empty: a fleet that deleted a rule on purpose must
- * not find it back after the next deploy.
+ * Keyed per signal rather than on an empty table. The empty-table test read as
+ * the careful choice and was really a one-way door: every install that has
+ * booted the hub once already has the box rules above, so a seed added in a
+ * later release -- the four machine rules are the first -- could only ever
+ * reach a fleet that did not exist yet. The fleets that run machines are
+ * precisely the ones that already had rules.
+ *
+ * What it costs is worth saying plainly: a rule deleted on purpose comes back,
+ * disabled, after the next deploy. Switching one off is what keeps it gone,
+ * and that is the right way round -- a disabled rule in a list is noise, while
+ * a signal nobody is watching because it shipped after their install is a
+ * fleet with no answer at all.
+ *
+ * Disabled is the part that is not a trade. An upgrade that starts rebooting
+ * boxes is the worst possible version of this feature, so somebody has to read
+ * these and turn them on.
  */
 export async function seedDefaultMonitorRules(): Promise<number> {
-  if ((await prisma.monitorRule.count()) > 0) return 0;
+  const existing = await prisma.monitorRule.findMany({
+    select: { signal: true },
+    distinct: ["signal"],
+  });
+  const present = new Set<MonitorSignal>(existing.map((rule) => rule.signal));
+  // One seed per signal, which is what makes "no rule names this signal" an
+  // exact question. A fleet that renamed and retuned its copy keeps it: the
+  // signal is named, so nothing is written beside it.
+  const missing = SEEDS.filter((seed) => !present.has(seed.signal));
+  if (missing.length === 0) return 0;
 
-  for (const [index, seed] of SEEDS.entries()) {
+  // Continue the list rather than restart it. `position` is the order the
+  // rules are shown in, and a seed landing at 0 would reshuffle a list
+  // somebody has already arranged.
+  const base = await prisma.monitorRule.count();
+
+  for (const [index, seed] of missing.entries()) {
     await prisma.monitorRule.create({
       data: {
         name: seed.name,
         enabled: false,
         signal: seed.signal,
+        appliesTo: seed.appliesTo ?? "BOX",
         packageName: seed.packageName,
         config: seed.config,
         threshold: seed.threshold,
         cooldownSeconds: seed.cooldownSeconds,
         notifyChannels: seed.notifyChannels,
         notifyLevel: seed.notifyLevel,
-        position: index,
+        position: base + index,
         steps: { create: seed.steps },
       },
     });
   }
 
-  log.info({ count: SEEDS.length }, "seeded the default monitor rules, all disabled");
-  return SEEDS.length;
+  log.info(
+    { count: missing.length, signals: missing.map((seed) => seed.signal) },
+    "seeded the monitor rules this fleet was missing, all disabled",
+  );
+  return missing.length;
 }
 
 /** Its own hourly clock, so riding the five-second tick costs nothing. */

@@ -27,6 +27,7 @@ import {
   rotomEnabled,
   syncDevices,
 } from "../services/rotom.js";
+import { adoptHost, convergeHost, setInstanceCount } from "../services/redroid.js";
 import { nudge } from "../services/scheduler.js";
 import { probeRemote, storeFromUrl, storeUpload } from "../services/uploads.js";
 import { pollAllSources } from "../services/sources/poller.js";
@@ -503,6 +504,74 @@ export async function internalRoutes(app: FastifyInstance) {
       return await pollAllSources();
     } catch (err) {
       log.error({ err }, "manual poll failed");
+      return reply.status(500).send({ error: err instanceof Error ? err.message : String(err) });
+    }
+  });
+
+  // --- Redroid machines ----------------------------------------------------
+  //
+  // These are here rather than as server actions for the usual reason: they
+  // need a live socket. The rows a scale writes are the desired state and the
+  // dashboard could write them itself, but nothing would reach the machine.
+
+  /**
+   * Bring a machine to N instances, then converge it.
+   *
+   * The scale and the converge are one call because an operator pressing Save
+   * means both, and leaving them separate would make "I changed the number and
+   * nothing happened" the normal experience.
+   */
+  app.post("/internal/hosts/:id/scale", async (request, reply) => {
+    const { id } = request.params as { id: string };
+    const parsed = z
+      .object({
+        // Zero is valid and is how a machine is drained — not a mistake to
+        // refuse. The upper bound is a sanity rail, not a capacity limit;
+        // capacity is advice the form gives, and the operator may know better.
+        count: z.number().int().min(0).max(64),
+        workers: z.number().int().min(1).max(50).nullable().optional(),
+      })
+      .safeParse(request.body);
+    if (!parsed.success) {
+      return reply.status(400).send({ error: "invalid body", issues: parsed.error.issues });
+    }
+
+    try {
+      const changed = await setInstanceCount(id, parsed.data.count, parsed.data.workers ?? null);
+      const converge = await convergeHost(id);
+      return { ...changed, ...converge };
+    } catch (err) {
+      log.error({ err, hostId: id }, "scale failed");
+      return reply.status(500).send({ error: err instanceof Error ? err.message : String(err) });
+    }
+  });
+
+  /** Import the containers a machine already has, so a first converge is safe. */
+  app.post("/internal/hosts/:id/adopt", async (request, reply) => {
+    const { id } = request.params as { id: string };
+    try {
+      return await adoptHost(id);
+    } catch (err) {
+      // A 400 rather than a 500: every failure here is a precondition the
+      // operator can act on — offline, already adopted, no report yet.
+      return reply.status(400).send({ error: err instanceof Error ? err.message : String(err) });
+    }
+  });
+
+  /**
+   * Converge without changing anything, which is the "re-apply" button.
+   *
+   * `force` sends the file even when its hash already matches, for the case
+   * where the machine and the hub agree on paper and the containers still are
+   * not what they should be.
+   */
+  app.post("/internal/hosts/:id/converge", async (request, reply) => {
+    const { id } = request.params as { id: string };
+    const force = (request.body as { force?: boolean } | undefined)?.force === true;
+    try {
+      return await convergeHost(id, { force });
+    } catch (err) {
+      log.error({ err, hostId: id }, "converge failed");
       return reply.status(500).send({ error: err instanceof Error ? err.message : String(err) });
     }
   });

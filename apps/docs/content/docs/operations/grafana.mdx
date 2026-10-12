@@ -57,13 +57,13 @@ JSON, and saving it back into `deploy/grafana/dashboards/`.
 
 ## What the tables hold
 
-| Table                       | One row is                                                                         |
-| --------------------------- | ---------------------------------------------------------------------------------- |
-| `DeviceMetricSample`        | One box at one moment: load, cores, memory, storage, temperatures                  |
-| `DevicePackageMetricSample` | One tracked app on one box at one moment: CPU, RSS, process count                  |
-| `RotomSample`               | What Rotom said about one box at one moment: workers, request rate, its four flags |
-| `MonitorEvent`              | Something the monitor saw or did                                                   |
-| `Device`                    | The box as of its last heartbeat: live, not history                                |
+| Table                       | One row is                                                                              |
+| --------------------------- | --------------------------------------------------------------------------------------- |
+| `DeviceMetricSample`        | One device at one moment: load, cores, CPU percent, memory, swap, storage, temperatures |
+| `DevicePackageMetricSample` | One tracked app on one box at one moment: CPU, RSS, process count                       |
+| `RotomSample`               | What Rotom said about one box at one moment: workers, request rate, its four flags      |
+| `MonitorEvent`              | Something the monitor saw or did                                                        |
+| `Device`                    | The box as of its last heartbeat: live, not history                                     |
 
 Three things about that data that decide how a panel should be written:
 
@@ -77,6 +77,64 @@ Three things about that data that decide how a panel should be written:
   divides by `s.cpuCount` and not by `d.cpuCount`.
 - **Per-app CPU is a share of one core.** 200 means two cores pinned. It is the
   number `top` shows, deliberately not normalised against the core count.
+
+### Three newer columns
+
+`cpuPercent`, `swapTotalBytes` and `swapFreeBytes` are on both `Device` and
+`DeviceMetricSample`, so they chart like everything else. Two things about them:
+
+- **`cpuPercent` is a share of one core**, the same convention as the per-app
+  figures: 250 is two and a half cores, and an eight-core machine at full tilt
+  reports 800. Divide by `s.cpuCount` for a 0–100 panel; nothing is clamped at
+  100, because clamping is how a saturated machine looks merely busy.
+- **Swap zero is a real reading, null is not.** A machine with no swap
+  configured stores `0`; a device whose agent never looked stores nothing. A
+  `free / total` panel therefore has to guard `total > 0` rather than trusting
+  `spanNulls` to hide it, or every box in the fleet draws a divide-by-zero gap.
+
+### Containerised devices need their own panels
+
+A [Redroid box](/docs/fleet/redroid) is a container, and inside a container the
+load average and the thermal zones are the **host's**. So ten boxes on one VPS
+report ten identical load curves and ten identical temperatures, none of which
+is theirs.
+
+<Callout
+  type="warn"
+  title="A per-device load alert fires once per instance for one machine's problem"
+>
+  Ten notifications, ten device names, one machine actually in trouble — and the fleet's own
+  ceilings cannot damp it, because nothing on that path knows those ten rows are one machine. Per
+  device, chart load and temperature for **real hardware only**; per machine, chart them once, on
+  the machine's own row.
+</Callout>
+
+Which devices are containers is a join, not a flag — an instance row with a
+`deviceId` is a box that is a container:
+
+```sql
+-- Real hardware: boxes that are not a Redroid instance.
+SELECT s.at, d.name, s.loadAvg1 / NULLIF(s.cpuCount, 0) AS `load per core`
+FROM `DeviceMetricSample` s
+JOIN `Device` d ON d.id = s.deviceId
+LEFT JOIN `RedroidInstance` i ON i.deviceId = d.id
+WHERE d.kind = 'BOX' AND i.id IS NULL AND $__timeFilter(s.at)
+GROUP BY 1, 2 ORDER BY 1
+```
+
+To chart a machine instead, filter `d.kind = 'HOST'` — the readings are in the
+same table, which is the
+[point of a machine being a Device](/docs/fleet/redroid-hosts#a-machine-is-a-device).
+`cpuPercent`, memory, swap and storage stay perfectly good per instance; only
+load and temperature belong to the machine.
+
+<Callout type="info" title="The shipped dashboards do not filter on kind at all">
+  Both JSON files in `deploy/grafana/` were written when every device was hardware. The **Fleet**
+  panels aggregate over the whole fleet, so a VPS's load average and its disk are averaged in with
+  the boxes' — add `d.kind = 'BOX'` to those queries. The **Per Device** dashboard is fine either
+  way: it draws one device at a time, and picking a machine from the variable is a reasonable thing
+  to want.
+</Callout>
 
 ## How far back it goes
 

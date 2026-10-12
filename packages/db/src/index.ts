@@ -281,6 +281,133 @@ export async function updateHubSettings(patch: Partial<HubSettingsValues>): Prom
 }
 
 // ---------------------------------------------------------------------------
+// Redroid settings
+// ---------------------------------------------------------------------------
+
+/**
+ * The knobs behind Settings -> Redroid, under a `redroid.` prefix.
+ *
+ * A third group rather than more hub settings, following how `monitor.` is
+ * already split out: these are read by one service, and they are about machines
+ * rather than about the fleet.
+ *
+ * Deliberately *not* here: how many instances a machine runs. That is per
+ * machine and lives on its rows, so the database is the one source of truth for
+ * it and the backup covers it. These are the defaults a new instance inherits
+ * and the arithmetic the form suggests with.
+ */
+export type RedroidSettingsValues = {
+  /**
+   * What each container is capped at, in bytes.
+   *
+   * The single most consequential default: without a limit a box reads the
+   * host's total and every container on a machine reports the same RAM. The
+   * host reports back what docker actually applied so a miss is visible rather
+   * than silent.
+   */
+  memLimitBytes: number;
+  /** androidboot.redroid_gpu_mode. "guest" is software rendering. */
+  gpuMode: string;
+  /**
+   * How many containers may be started at once during a converge.
+   *
+   * `docker compose up` starts every service simultaneously, and ten Androids
+   * coming up together is where a VPS runs out of memory. Low, because it only
+   * costs time on a first provisioning -- the same reason the fleet has a cap
+   * on concurrent installs.
+   */
+  startBatchSize: number;
+  /**
+   * Workers one container is configured for, and the ceiling the form refuses
+   * above.
+   *
+   * 50 is where the scanners stop being happy, and on some licences it is also
+   * the contractual maximum. It is the whole reason a machine needs several
+   * containers rather than one big one.
+   */
+  workersPerInstance: number;
+  /**
+   * Workers per vCPU the capacity suggestion assumes.
+   *
+   * A planning coefficient, not a limit: the form suggests with it and warns
+   * past it, and nothing refuses on it.
+   *
+   * Calibrated against the one self-consistent datum in the published sizing
+   * advice: a 16 vCPU / 32 GB arm64 machine at "about 300 workers at full
+   * speed". That is 18.75 per vCPU, so 20 puts that machine at six containers
+   * of fifty -- which is where it lands on the memory half too, and two
+   * independent routes agreeing is the only reason to trust either.
+   *
+   * Do not "correct" this to a single-digit number. An earlier draft used 2.5,
+   * which put that same reference machine at **zero** containers.
+   */
+  workersPerVCpu: number;
+  /**
+   * Memory to leave the machine itself, in bytes.
+   *
+   * Subtracted before dividing by the per-container limit, because a machine
+   * whose every byte is handed to containers has nothing left for the kernel,
+   * docker or the agent -- and the OOM killer takes a container down rather
+   * than slowing anything.
+   */
+  hostReserveBytes: number;
+};
+
+const REDROID_SETTINGS_PREFIX = "redroid.";
+
+const REDROID_SETTINGS_DEFAULTS: RedroidSettingsValues = {
+  memLimitBytes: 4 * 1024 * 1024 * 1024,
+  gpuMode: "guest",
+  startBatchSize: 2,
+  workersPerInstance: 50,
+  workersPerVCpu: 20,
+  hostReserveBytes: 2 * 1024 * 1024 * 1024,
+};
+
+export async function getRedroidSettings(): Promise<RedroidSettingsValues> {
+  return readGroup(REDROID_SETTINGS_DEFAULTS, REDROID_SETTINGS_PREFIX);
+}
+
+export async function updateRedroidSettings(patch: Partial<RedroidSettingsValues>): Promise<void> {
+  await writeGroup(patch, REDROID_SETTINGS_PREFIX);
+}
+
+/**
+ * How many containers a machine can hold, and what it would cost.
+ *
+ * Suggests rather than decides. The memory half is a real ceiling -- past it
+ * the OOM killer takes boxes down instead of slowing them -- and the CPU half
+ * is a planning coefficient, so the two are returned separately and the caller
+ * says which one bit.
+ */
+export function planCapacity(
+  settings: RedroidSettingsValues,
+  cpuCount: number | null,
+  memTotalBytes: bigint | null,
+): { byMemory: number | null; byCpu: number | null; suggested: number | null } {
+  const byMemory =
+    memTotalBytes === null
+      ? null
+      : Math.max(
+          0,
+          Math.floor((Number(memTotalBytes) - settings.hostReserveBytes) / settings.memLimitBytes),
+        );
+
+  const byCpu =
+    cpuCount === null
+      ? null
+      : Math.max(0, Math.floor((cpuCount * settings.workersPerVCpu) / settings.workersPerInstance));
+
+  const both = [byMemory, byCpu].filter((n): n is number => n !== null);
+  // The lower of the two, because a machine is limited by whichever runs out
+  // first -- and in practice that is memory, which is why that half is a real
+  // ceiling and this one is advice. Null only when the machine has reported
+  // neither, which is a host that has not heartbeated yet rather than a
+  // machine with no room.
+  return { byMemory, byCpu, suggested: both.length === 0 ? null : Math.min(...both) };
+}
+
+// ---------------------------------------------------------------------------
 // Monitoring settings
 // ---------------------------------------------------------------------------
 

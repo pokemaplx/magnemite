@@ -25,11 +25,23 @@ import {
 const TARGET_BUCKETS = 220;
 
 /**
- * Hard cap on rows read per query. A fleet left on a one-second sample
- * interval for a month would otherwise pull millions of rows into the render;
- * hitting this trims the *oldest* end of the window, and the page says so.
+ * Hard cap on rows read **per series**, not per query.
+ *
+ * A fleet left on a one-second sample interval for a month would otherwise
+ * pull millions of rows into the render; hitting this trims the *oldest* end of
+ * the window, and the page says so.
+ *
+ * Per series is the whole point. It used to be one budget for a whole query,
+ * which every series in that query shared: the per-app query carries one
+ * series per package, so six apps got a sixth of the window each and the rest
+ * of it came back with no rows at all. Empty buckets are drawn as gaps — this
+ * project's rule is that a null is a gap and never a zero — so the honest
+ * reading of that chart was "nothing ran for the first twenty-five days",
+ * which is also exactly what a real outage looks like. 40,000 was already
+ * under one series' worth: a single box at the default 60-second interval is
+ * 43,200 rows over thirty days.
  */
-const MAX_ROWS = 40_000;
+const MAX_ROWS_PER_SERIES = 50_000;
 
 type Bucket<T> = { sum: number; count: number; extra?: T };
 
@@ -123,11 +135,18 @@ export async function loadDeviceMetrics(
 
   // Newest-first with a cap, then reversed: when the cap bites it should cost
   // the oldest end of the window, not the part someone is actually looking at.
+  //
+  // One budget each, sized by how many series the query feeds. The device-wide
+  // query is one row per sample however many charts read it, so one series'
+  // worth covers it. The per-app query is one row per sample *per package*, so
+  // it gets a series' worth per palette slot — otherwise the charts the page
+  // is mostly made of are the ones that lose the oldest weeks.
+  const packageRowBudget = MAX_ROWS_PER_SERIES * MAX_SERIES;
   const [deviceRowsDesc, packageRowsDesc] = await Promise.all([
     prisma.deviceMetricSample.findMany({
       where: { deviceId, at: { gte: since } },
       orderBy: { at: "desc" },
-      take: MAX_ROWS,
+      take: MAX_ROWS_PER_SERIES,
       select: {
         at: true,
         loadAvg1: true,
@@ -145,14 +164,18 @@ export async function loadDeviceMetrics(
     prisma.devicePackageMetricSample.findMany({
       where: { deviceId, at: { gte: since } },
       orderBy: { at: "desc" },
-      take: MAX_ROWS,
+      take: packageRowBudget,
       select: { at: true, packageName: true, cpuPercent: true, rssBytes: true },
     }),
   ]);
 
   const deviceRows = [...deviceRowsDesc].reverse();
   const packageRows = [...packageRowsDesc].reverse();
-  const truncated = deviceRowsDesc.length >= MAX_ROWS || packageRowsDesc.length >= MAX_ROWS;
+  // Each query against its own budget. Either one hitting it means the oldest
+  // end of the window has no rows behind it, which the page has to keep saying
+  // — a trimmed window and a dead fleet draw identically.
+  const truncated =
+    deviceRowsDesc.length >= MAX_ROWS_PER_SERIES || packageRowsDesc.length >= packageRowBudget;
 
   // Never finer than the sample interval: buckets narrower than the data are
   // just gaps between single points, which reads as a broken chart.
@@ -355,6 +378,20 @@ export async function loadDeviceMetrics(
   };
 }
 
+/** The window the sparklines span. */
+const TREND_WINDOW_MS = 60 * 60 * 1000;
+
+/**
+ * Every row that hour can hold, at one sample a second.
+ *
+ * Finer than anything that can be configured — `metricsSampleSeconds` cannot
+ * go below the heartbeat, and the heartbeat starts at 5s — so this cap cannot
+ * bite on the window below, which is the point. `take: 400` could: at a
+ * one-second interval it kept the newest 400 samples and the sparkline drew
+ * them edge to edge, labelled as an hour, showing six minutes.
+ */
+const TREND_MAX_ROWS = TREND_WINDOW_MS / 1000;
+
 /**
  * The last hour or so of a metric, for the sparklines on the device page's
  * Load card. Small on purpose: the card is a summary, and the full history is
@@ -368,11 +405,11 @@ export async function loadRecentTrend(
   memory: (number | null)[];
   storage: (number | null)[];
 }> {
-  const since = new Date(Date.now() - 60 * 60 * 1000);
+  const since = new Date(Date.now() - TREND_WINDOW_MS);
   const rows = await prisma.deviceMetricSample.findMany({
     where: { deviceId, at: { gte: since } },
     orderBy: { at: "desc" },
-    take: 400,
+    take: TREND_MAX_ROWS,
     select: {
       loadAvg1: true,
       cpuCount: true,

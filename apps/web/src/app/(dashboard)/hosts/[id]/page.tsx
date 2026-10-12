@@ -1,7 +1,8 @@
 import Link from "next/link";
 import { notFound } from "next/navigation";
-import { prisma } from "@magnemite/db";
+import { getRedroidSettings, planCapacity, prisma } from "@magnemite/db";
 import { requireUser } from "@/lib/session";
+import { HostScaleForm } from "@/components/host-scale-form";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import {
@@ -48,7 +49,7 @@ function instanceState(containerState: string | null, deviceId: string | null) {
  * reason.
  */
 export default async function HostPage({ params }: { params: Promise<{ id: string }> }) {
-  await requireUser();
+  const user = await requireUser();
   const { id } = await params;
 
   const host = await prisma.device.findUnique({
@@ -73,7 +74,11 @@ export default async function HostPage({ params }: { params: Promise<{ id: strin
   if (!host || host.kind !== "HOST") notFound();
 
   const machine = host.redroidHost;
-  const trend = await loadRecentTrend(host.id);
+  const [trend, redroid] = await Promise.all([loadRecentTrend(host.id), getRedroidSettings()]);
+  // Suggests, never decides. The memory half is a real ceiling — past it the
+  // OOM killer takes boxes down instead of slowing them — and the CPU half is
+  // a planning coefficient, so the form shows both and says which is which.
+  const capacity = planCapacity(redroid, host.cpuCount, host.memTotalBytes);
   const wanted = machine?.instances.filter((i) => i.present) ?? [];
   const running = wanted.filter((i) => i.containerState === "running").length;
   const workers = wanted.reduce((sum, i) => sum + (i.workers ?? 0), 0);
@@ -135,6 +140,21 @@ export default async function HostPage({ params }: { params: Promise<{ id: strin
           </CardContent>
         </Card>
       ) : null}
+
+      <HostScaleForm
+        hostId={host.id}
+        adopted={machine?.adoptedAt !== null && machine !== null}
+        converging={machine?.convergingSince !== null && machine !== undefined}
+        instances={wanted.length}
+        workers={wanted[0]?.workers ?? null}
+        capacity={{
+          byMemory: capacity.byMemory,
+          byCpu: capacity.byCpu,
+          suggested: capacity.suggested,
+          workersPerInstance: redroid.workersPerInstance,
+        }}
+        canOperate={user.role !== "VIEWER"}
+      />
 
       <div className="grid gap-4 md:grid-cols-2">
         <Card>

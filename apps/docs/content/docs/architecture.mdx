@@ -74,15 +74,26 @@ B. **With Coolify** they are split across two domains — the dashboard on
 
 ## What the boxes can reach
 
-Only four paths are routed on the agents' domain. Everything else is a 404,
-which is what keeps the hub's `/internal/*` API unreachable from outside.
+A box asks for exactly four paths, and the edge routes exactly those plus a
+little for its own deployment. Nothing routes `/internal/*`, which is what keeps
+the hub's internal API unreachable from outside — the protection is the absence
+of a route, not a rule.
 
-| Path          | Handled by | Purpose                                                                |
-| ------------- | ---------- | ---------------------------------------------------------------------- |
-| `/ws/device`  | hub        | The persistent WebSocket each box opens                                |
-| `/api/enroll` | hub        | First-boot registration, trades an enrollment token for a device token |
-| `/files/*`    | edge       | Cached `.apkm` downloads, gated by `forward_auth`                      |
-| `/healthz`    | hub        | Liveness                                                               |
+| Path          | Handled by | What asks for it                                                  |
+| ------------- | ---------- | ----------------------------------------------------------------- |
+| `/ws/device`  | hub        | The persistent WebSocket every device opens and keeps             |
+| `/api/enroll` | hub        | First boot, trading an enrollment token for a device token        |
+| `/files/*`    | edge       | Cached `.apkm` downloads, gated by `forward_auth` against the hub |
+| `/api/logs/*` | hub        | The log bundle a box uploads when the dashboard asks for one      |
+
+<Callout type="warn" title="The two edge configs are not the same file">
+  `deploy/edge/Caddyfile` fronts **one** virtual host, so after those four it falls through to the
+  dashboard on `web:3000` — nothing 404s there, and it also routes `/api/events*` to the hub.
+  `deploy/edge/Caddyfile.coolify` fronts the **agents'** domain only: it adds `/healthz` on the hub
+  and answers everything else with a flat 404, because the dashboard lives on its own domain. So
+  `/healthz` reaches the hub under Coolify and the **dashboard** under compose, and a probe written
+  against one deployment measures something else in the other.
+</Callout>
 
 ## The hub's internal API
 
@@ -91,14 +102,38 @@ Reachable only from the `web` container over the compose network, behind
 socket or the scheduler.
 
 ```
-GET  /internal/status                     GET  /internal/events        (SSE)
-POST /internal/nudge                      POST /internal/health
-POST /internal/rollouts                   POST /internal/rollouts/:id/cancel
-POST /internal/rollouts/:id/resume        POST /internal/rollouts/:id/retry-failed
-POST /internal/jobs/:id/retry             POST /internal/jobs/:id/cancel
-POST /internal/devices/:id/reboot         POST /internal/devices/:id/install
-POST /internal/devices/:id/rotom/:action  POST /internal/rotom/sync
-POST /internal/devices/:id/rotom/workers
-POST /internal/versions/:id/cache         POST /internal/versions/prune
-POST /internal/sources/poll               GET  /internal/authz         (forward_auth)
+# the hub itself
+GET  /internal/status                      GET  /internal/events               (SSE)
+POST /internal/health                      POST /internal/nudge
+POST /internal/settings                    POST /internal/tracked-packages/refresh
+
+# rollouts and their jobs
+POST /internal/rollouts                    POST /internal/rollouts/:id/cancel
+POST /internal/rollouts/:id/resume         POST /internal/rollouts/:id/retry-failed
+POST /internal/jobs/:id/retry              POST /internal/jobs/:id/cancel
+
+# one device, over its live socket
+POST /internal/devices/:id/reboot          POST /internal/devices/:id/agent-update
+POST /internal/devices/:id/exec            POST /internal/devices/:id/logs
+GET  /internal/devices/:id/logs/:bundleId  GET  /internal/devices/:id/logs/live
+POST /internal/devices/:id/rotom/:action   POST /internal/devices/:id/rotom/workers
+POST /internal/rotom/sync
+
+# builds
+POST /internal/uploads                     POST /internal/uploads/probe
+POST /internal/uploads/from-url            POST /internal/versions/:id/cache
+POST /internal/versions/prune              POST /internal/sources/poll
+
+# monitoring
+POST /internal/monitor/run                 POST /internal/monitor/test
+
+# called by the edge, not the dashboard
+ALL  /internal/authz                       (forward_auth, and the one route the
+                                            shared-secret hook lets through)
 ```
+
+**There is no per-device install route.** Installing one app on one box is a
+rollout with one device in it, which is why `POST /internal/rollouts` is the
+only way in: the canary, the concurrency caps, the retries and the job history
+are all properties of a rollout, and a second path to installing would be a
+second place for them to be forgotten.

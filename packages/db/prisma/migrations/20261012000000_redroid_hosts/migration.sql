@@ -60,6 +60,7 @@ CREATE TABLE "RedroidHost" (
     "dir" TEXT NOT NULL DEFAULT '/etc/magnemite/redroid',
     "appliedSha256" TEXT,
     "appliedAt" TIMESTAMP(3),
+    "convergingSince" TIMESTAMP(3),
     "adoptedAt" TIMESTAMP(3),
     "lastError" TEXT,
     "lastErrorAt" TIMESTAMP(3),

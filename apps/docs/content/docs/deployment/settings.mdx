@@ -100,21 +100,45 @@ there is no button for it.
 From **Settings → Monitoring → Add rule**. Seeded rules are written
 **disabled**, and only onto a fleet that has none.
 
-| Field             | Default        | What it does                                                                                                 |
-| ----------------- | -------------- | ------------------------------------------------------------------------------------------------------------ |
-| **Enabled**       | `off`          | New and seeded rules both arrive off.                                                                        |
-| **Signal**        | `SERVICE_DOWN` | What the rule watches.                                                                                       |
-| **Probe**         | `none`         | The command sent to the boxes, when the signal needs one.                                                    |
-| **Group**         | fleet-wide     | A group-scoped rule replaces the fleet-wide one for that group rather than stacking.                         |
-| **Threshold**     | `1`            | Consecutive bad samples before the ladder starts. `1` acts immediately.                                      |
-| **Cooldown**      | `300s`         | After an action, how long before this rule may act on that box again.                                        |
-| **Window**        | none           | `HH:MM`–`HH:MM`. Alerts still go out outside it; only the actions are held.                                  |
-| **Announce it**   | all channels   | Which channels this rule announces to. **Nowhere** still acts — quietly.                                     |
-| **Severity**      | `WARN`         | How loud it looks: the Discord colour, ntfy's priority, whether a browser notification sticks. Not a filter. |
-| **All-clear**     | `off`          | A second message on the same channels when the fault clears.                                                 |
-| **Probe timeout** | `10s`          | Budget on the box. A probe that runs out reads as _unknown_, which neither counts nor resets.                |
-| **Log lines**     | `200`          | For the log-scanning probes: how much tail is read.                                                          |
-| **Fail at**       | `1`            | How many pattern matches count as a failure.                                                                 |
+| Field             | Default        | What it does                                                                                                                                                                           |
+| ----------------- | -------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Enabled**       | `off`          | New and seeded rules both arrive off.                                                                                                                                                  |
+| **Applies to**    | `BOX`          | Boxes or [machines](/docs/fleet/redroid-hosts), never both. A box rule evaluated against a VPS would read a missing scanner as a fault on a machine that never ran one, and act on it. |
+| **Signal**        | `SERVICE_DOWN` | What the rule watches.                                                                                                                                                                 |
+| **Probe**         | `none`         | The command sent to the boxes, when the signal needs one.                                                                                                                              |
+| **Group**         | fleet-wide     | A group-scoped rule replaces the fleet-wide one for that group rather than stacking.                                                                                                   |
+| **Threshold**     | `1`            | Consecutive bad samples before the ladder starts. `1` acts immediately.                                                                                                                |
+| **Cooldown**      | `300s`         | After an action, how long before this rule may act on that box again.                                                                                                                  |
+| **Window**        | none           | `HH:MM`–`HH:MM`. Alerts still go out outside it; only the actions are held.                                                                                                            |
+| **Announce it**   | all channels   | Which channels this rule announces to. **Nowhere** still acts — quietly.                                                                                                               |
+| **Severity**      | `WARN`         | How loud it looks: the Discord colour, ntfy's priority, whether a browser notification sticks. Not a filter.                                                                           |
+| **All-clear**     | `off`          | A second message on the same channels when the fault clears.                                                                                                                           |
+| **Probe timeout** | `10s`          | Budget on the box. A probe that runs out reads as _unknown_, which neither counts nor resets.                                                                                          |
+| **Log lines**     | `200`          | For the log-scanning probes: how much tail is read.                                                                                                                                    |
+| **Fail at**       | `1`            | How many pattern matches count as a failure.                                                                                                                                           |
+
+**Applies to** also decides which signals the rule can carry. Nine are about a
+box — the five it reports about itself, `AGENT_OFFLINE`, and the three Rotom
+ones — and four are about a machine:
+
+| Host signal             | Status                                                                    |
+| ----------------------- | ------------------------------------------------------------------------- |
+| `HOST_MEMORY_LOW`       | Free memory **plus free swap** under the rule's percentage floor          |
+| `HOST_DISK_LOW`         | Free space under that floor, on docker's own filesystem                   |
+| `HOST_DOCKER_DOWN`      | Reads **unknown** — the daemon's health is not plumbed to the hub yet     |
+| `REDROID_INSTANCE_DOWN` | Reads **unknown** — per-instance container state is not read by rules yet |
+
+`AGENT_OFFLINE` works on either side with no extra signal, because a machine is
+a `Device` and its socket goes quiet the same way a box's does. The one action
+only a host rule has is `RESTART_INSTANCE`, which restarts a single container
+from the machine that runs it — `REBOOT` is deliberately not overloaded to mean
+"reboot the VPS".
+
+<Callout type="info" title="Not selectable from the form yet">
+  The four host signals and `RESTART_INSTANCE` are in the schema, and the hub evaluates the two with
+  data behind them. The vocabulary the rule dialog is built from has not learned them, so there is
+  no way to write one from **Settings → Monitoring** today.
+</Callout>
 
 ## Settings → Apps
 

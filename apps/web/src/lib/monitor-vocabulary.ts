@@ -1,17 +1,21 @@
-import type { MonitorChannel } from "@magnemite/db";
+import type { DeviceKind, MonitorChannel } from "@magnemite/db";
 import {
   AppWindow,
   Ban,
   Bell,
+  Container,
   CornerDownLeft,
   Gauge,
+  HardDrive,
   HeartPulse,
   type LucideIcon,
+  MemoryStick,
   Power,
   Radar,
   Radio,
   RadioTower,
   RotateCcw,
+  ServerCrash,
   ServerOff,
   Terminal,
   Timer,
@@ -24,8 +28,8 @@ import {
 /**
  * The words the monitoring UI uses, in one place.
  *
- * Both screens name the same seven signals and nine actions — the rules editor
- * in the present tense ("Restart the app") and the activity feed in the past
+ * Both screens name the same signals and actions — the rules editor in the
+ * present tense ("Restart the app") and the activity feed in the past
  * ("Restarted the app") — and they had drifted into two hand-kept lists. A
  * signal added to one and forgotten in the other shows up as a raw enum in
  * front of somebody trying to read an incident, so they live here together.
@@ -34,6 +38,12 @@ import {
  * signal actually needs: a probe is the whole rule for a log check and is never
  * read for an unreachable box, and a form that offers both equally is a form
  * that has to be learned rather than read.
+ *
+ * `kinds` is the same idea pointed at the fleet rather than at the form. A box
+ * and the machine that hosts it answer different questions — a VPS has no app
+ * to be in focus, a box has no docker daemon — and the hub filters a rule on
+ * that pair before it reads a single reading. A signal offered under the wrong
+ * one is a rule somebody can save, enable, and watch do nothing.
  */
 
 export type ProbeNeed = "required" | "optional" | "none";
@@ -53,6 +63,25 @@ export type SignalMeta = {
    * is why an old fleet can have a rule that is on and never fires.
    */
   needsAgent: boolean;
+  /**
+   * The machines this signal can fire on, and not derivable from anything
+   * else: the hub's `rulesFor` drops a rule whose `appliesTo` does not match
+   * the machine in front of it, so a signal offered under the wrong scope is a
+   * rule that is enabled and unreachable. Spelled out on every entry rather
+   * than defaulted, so a signal added here has to say what it watches.
+   */
+  kinds: DeviceKind[];
+  /**
+   * The percentage floor the hub compares a reading against, for the two
+   * signals that have one — null for everything else.
+   *
+   * It carries its own words because a floor on memory and a floor on disk are
+   * the same number about different consequences. And it is not optional in
+   * practice: the hub's `underFloor` reads *unknown* when a rule has no floor
+   * configured, unknown neither counts nor resets, so a rule saved without one
+   * looks complete and never fires.
+   */
+  floor: { label: string; hint: string } | null;
 };
 
 export const SIGNALS: SignalMeta[] = [
@@ -66,6 +95,8 @@ export const SIGNALS: SignalMeta[] = [
     // Both ways of answering it — the probe and the process list — are things
     // the box reports, so an agent too old to look cannot answer it either.
     needsAgent: true,
+    kinds: ["BOX"],
+    floor: null,
   },
   {
     value: "APP_NOT_FOREGROUND",
@@ -75,6 +106,8 @@ export const SIGNALS: SignalMeta[] = [
     needsPackage: true,
     probe: "none",
     needsAgent: true,
+    kinds: ["BOX"],
+    floor: null,
   },
   {
     value: "APP_ANR",
@@ -84,6 +117,8 @@ export const SIGNALS: SignalMeta[] = [
     needsPackage: true,
     probe: "none",
     needsAgent: true,
+    kinds: ["BOX"],
+    floor: null,
   },
   {
     value: "HEALTH_CHECK_FAILED",
@@ -93,6 +128,8 @@ export const SIGNALS: SignalMeta[] = [
     needsPackage: false,
     probe: "required",
     needsAgent: true,
+    kinds: ["BOX"],
+    floor: null,
   },
   {
     value: "LOOP_STALLED",
@@ -102,15 +139,25 @@ export const SIGNALS: SignalMeta[] = [
     needsPackage: false,
     probe: "required",
     needsAgent: true,
+    kinds: ["BOX"],
+    floor: null,
   },
   {
     value: "AGENT_OFFLINE",
-    label: "Box is unreachable",
-    hint: "The box stopped answering the hub for longer than the offline timeout. Nothing can be run on it, so the ladder can only tell you — raise the threshold to wait longer first.",
+    // Deliberately not "Box is unreachable": this is the one signal a machine
+    // can carry too, and a machine rule labelled with the wrong noun is a rule
+    // somebody has to translate every time they read it.
+    label: "Stopped answering the hub",
+    hint: "Nothing has been heard from it for longer than the offline timeout. Nothing can be run on it either, so the ladder can only tell you — raise the threshold to wait longer first.",
     icon: WifiOff,
     needsPackage: false,
     probe: "none",
     needsAgent: false,
+    // The one signal that means the same thing on both. A machine dials out,
+    // heartbeats and goes quiet exactly like a box does, and the offline sweep
+    // that notices never asked which it was.
+    kinds: ["BOX", "HOST"],
+    floor: null,
   },
   {
     value: "ROTOM_DISCONNECTED",
@@ -120,6 +167,8 @@ export const SIGNALS: SignalMeta[] = [
     needsPackage: false,
     probe: "none",
     needsAgent: false,
+    kinds: ["BOX"],
+    floor: null,
   },
   {
     value: "ROTOM_NOT_SCANNING",
@@ -129,6 +178,8 @@ export const SIGNALS: SignalMeta[] = [
     needsPackage: false,
     probe: "none",
     needsAgent: false,
+    kinds: ["BOX"],
+    floor: null,
   },
   {
     value: "ROTOM_IDLE",
@@ -138,10 +189,104 @@ export const SIGNALS: SignalMeta[] = [
     needsPackage: false,
     probe: "none",
     needsAgent: false,
+    kinds: ["BOX"],
+    floor: null,
+  },
+
+  // --- machines ------------------------------------------------------------
+  // All four are answered by the hub out of what the machine reports on every
+  // heartbeat, so none of them takes a probe and none of them waits on an
+  // agent new enough to look: the host agent is the new one by definition.
+
+  {
+    value: "HOST_DOCKER_DOWN",
+    label: "Docker is down",
+    hint: "The machine is answering and its docker daemon is not, so every box on it is down at once and none of them can be started. Nothing inside the machine can fix that, so the ladder can only tell you.",
+    icon: ServerCrash,
+    needsPackage: false,
+    probe: "none",
+    needsAgent: false,
+    kinds: ["HOST"],
+    floor: null,
+  },
+  {
+    value: "HOST_MEMORY_LOW",
+    label: "Machine is low on memory",
+    hint: "Memory and swap together are running out. The OOM killer takes whichever box it likes rather than the one that caused it, which is why this is worth hearing before it happens.",
+    icon: MemoryStick,
+    needsPackage: false,
+    probe: "none",
+    needsAgent: false,
+    kinds: ["HOST"],
+    floor: {
+      label: "Alert under",
+      // Swap counts as headroom, because on these machines it is exactly what
+      // stands between a stack of Androids and the OOM killer. The hub adds
+      // both pairs together before it compares.
+      hint: "Free memory and free swap together, as a share of the machine's total. 10% is roughly one more box's worth of headroom.",
+    },
+  },
+  {
+    value: "HOST_DISK_LOW",
+    label: "Machine is low on disk",
+    hint: "The filesystem docker keeps its images and volumes on is filling up. A full disk does not announce itself — it fails the next image pull, and wedges the containers already running.",
+    icon: HardDrive,
+    needsPackage: false,
+    probe: "none",
+    needsAgent: false,
+    kinds: ["HOST"],
+    floor: {
+      label: "Alert under",
+      hint: "Free space as a share of the filesystem's total. Leave room for one more image: a Redroid layer is a couple of gigabytes.",
+    },
+  },
+  {
+    value: "REDROID_INSTANCE_DOWN",
+    label: "A box on the machine is not running",
+    hint: "A container the machine is meant to be running is stopped or wedged. Restarting that one container is the smallest thing that fixes it — the machine is left alone, because restarting it takes every other box on it down too.",
+    icon: Container,
+    needsPackage: false,
+    probe: "none",
+    needsAgent: false,
+    kinds: ["HOST"],
+    floor: null,
   },
 ];
 
+/**
+ * Boxes, or the machines that host them.
+ *
+ * A `Record` rather than a list so that a third `DeviceKind` fails to compile
+ * here instead of quietly becoming a scope with no word for it — the same
+ * check `CHANNEL_LABELS` makes further down for the channels.
+ */
+export const SCOPE_LABELS: Record<DeviceKind, string> = {
+  BOX: "Boxes",
+  HOST: "Machines",
+};
+
+export const SCOPE_OPTIONS = (Object.keys(SCOPE_LABELS) as DeviceKind[]).map((kind) => ({
+  value: kind,
+  label: SCOPE_LABELS[kind],
+}));
+
+/** Every signal, whatever it watches. The pickers want `signalsFor` instead. */
 export const SIGNAL_OPTIONS = SIGNALS.map(({ value, label }) => ({ value, label }));
+
+/**
+ * The signals that can fire on one kind of machine.
+ *
+ * Not cosmetic filtering: `rulesFor` in the hub drops a rule whose `appliesTo`
+ * does not match the machine before it reads anything, so a box rule saved
+ * against a machine sits in the list switched on, costs nothing, and reports
+ * nothing. The picker is the only place that can stop it being made.
+ */
+export function signalsFor(kind: DeviceKind): { value: string; label: string }[] {
+  return SIGNALS.filter((signal) => signal.kinds.includes(kind)).map(({ value, label }) => ({
+    value,
+    label,
+  }));
+}
 
 const SIGNAL_BY_VALUE = new Map(SIGNALS.map((signal) => [signal.value, signal]));
 
@@ -156,8 +301,24 @@ export function signalMeta(value: string): SignalMeta {
       needsPackage: false,
       probe: "optional",
       needsAgent: false,
+      // Both, so an unknown signal is never hidden from the scope its rule is
+      // already in. The list is for narrowing a choice, not for hiding a rule
+      // that exists.
+      kinds: ["BOX", "HOST"],
+      floor: null,
     }
   );
+}
+
+/**
+ * The one scope a signal can live in, or null when it fits both.
+ *
+ * What the dialog opens an existing rule on when the row it was handed does
+ * not carry `appliesTo`. Every signal but `AGENT_OFFLINE` answers this.
+ */
+export function scopeForSignal(value: string): DeviceKind | null {
+  const { kinds } = signalMeta(value);
+  return kinds.length === 1 ? (kinds[0] ?? null) : null;
 }
 
 export function signalLabel(value: string): string {
@@ -175,6 +336,12 @@ export type ActionMeta = {
   hard: boolean;
   /** The action is the command, so the ladder row has to ask for one. */
   needsCommand: boolean;
+  /**
+   * The machines that can be told to do it. Most of these are an `am` or `pm`
+   * command and mean nothing on a VPS; a rung a machine cannot run comes back
+   * as "the rule has no command to run" at the one moment it was needed.
+   */
+  kinds: DeviceKind[];
 };
 
 export const ACTIONS: ActionMeta[] = [
@@ -185,6 +352,7 @@ export const ACTIONS: ActionMeta[] = [
     icon: Bell,
     hard: false,
     needsCommand: false,
+    kinds: ["BOX", "HOST"],
   },
   {
     value: "RESTART_APP",
@@ -193,6 +361,7 @@ export const ACTIONS: ActionMeta[] = [
     icon: RotateCcw,
     hard: false,
     needsCommand: false,
+    kinds: ["BOX"],
   },
   {
     value: "KILL_APP",
@@ -201,6 +370,7 @@ export const ACTIONS: ActionMeta[] = [
     icon: Ban,
     hard: false,
     needsCommand: false,
+    kinds: ["BOX"],
   },
   {
     value: "CLEAR_CACHE_RESTART",
@@ -209,6 +379,7 @@ export const ACTIONS: ActionMeta[] = [
     icon: Trash2,
     hard: false,
     needsCommand: false,
+    kinds: ["BOX"],
   },
   {
     value: "SEND_KEYEVENT",
@@ -217,6 +388,7 @@ export const ACTIONS: ActionMeta[] = [
     icon: CornerDownLeft,
     hard: false,
     needsCommand: false,
+    kinds: ["BOX"],
   },
   {
     value: "START_SERVICE",
@@ -225,6 +397,7 @@ export const ACTIONS: ActionMeta[] = [
     icon: Zap,
     hard: false,
     needsCommand: false,
+    kinds: ["BOX"],
   },
   {
     value: "SHELL",
@@ -233,6 +406,8 @@ export const ACTIONS: ActionMeta[] = [
     icon: Terminal,
     hard: false,
     needsCommand: true,
+    // A machine takes `exec` like any box does, so this one travels.
+    kinds: ["BOX", "HOST"],
   },
   {
     value: "REBOOT",
@@ -241,6 +416,10 @@ export const ACTIONS: ActionMeta[] = [
     icon: Power,
     hard: true,
     needsCommand: false,
+    // Boxes only, deliberately: on a machine this would mean rebooting the VPS
+    // and taking every box on it down for one box's fault. `MonitorAction` has
+    // no spelling for that, and `RESTART_INSTANCE` is what it has instead.
+    kinds: ["BOX"],
   },
   {
     value: "ROTOM_RESTART",
@@ -250,6 +429,7 @@ export const ACTIONS: ActionMeta[] = [
     icon: Radar,
     hard: false,
     needsCommand: false,
+    kinds: ["BOX"],
   },
   {
     value: "ROTOM_DISCONNECT",
@@ -258,6 +438,7 @@ export const ACTIONS: ActionMeta[] = [
     icon: Unplug,
     hard: false,
     needsCommand: false,
+    kinds: ["BOX"],
   },
   {
     value: "ROTOM_REBOOT",
@@ -268,10 +449,45 @@ export const ACTIONS: ActionMeta[] = [
     // a different socket, the same boot cycle.
     hard: true,
     needsCommand: false,
+    kinds: ["BOX"],
+  },
+  {
+    value: "RESTART_INSTANCE",
+    label: "Restart the box's container",
+    past: "Restarted the box's container",
+    // The same mark as "Restart the app", because it is the same move one
+    // level out: the smallest restart that fixes the thing that is wedged.
+    icon: RotateCcw,
+    // Expensive even though it is the gentle option here. The container *is*
+    // the box, so restarting it cold-boots that Android — every app on it
+    // comes back from nothing.
+    hard: true,
+    needsCommand: false,
+    kinds: ["HOST"],
   },
 ];
 
+/** Every action. The ladder wants `actionsFor` instead. */
 export const ACTION_OPTIONS = ACTIONS.map(({ value, label }) => ({ value, label }));
+
+export function actionsFor(kind: DeviceKind): { value: string; label: string }[] {
+  return ACTIONS.filter((action) => action.kinds.includes(kind)).map(({ value, label }) => ({
+    value,
+    label,
+  }));
+}
+
+/**
+ * What a new rung starts on: the hardest thing that kind can be told to do,
+ * because a rung is added to the bottom of a ladder and the bottom is where
+ * the expensive answer goes. Not derived from `hard`, which two box actions
+ * carry — rebooting through Rotom is the fallback for a box the agent has
+ * lost, not the thing to reach for first.
+ */
+export const LADDER_LAST_RESORT: Record<DeviceKind, string> = {
+  BOX: "REBOOT",
+  HOST: "RESTART_INSTANCE",
+};
 
 const ACTION_BY_VALUE = new Map(ACTIONS.map((action) => [action.value, action]));
 
@@ -284,6 +500,9 @@ export function actionMeta(value: string): ActionMeta {
       icon: Zap,
       hard: false,
       needsCommand: false,
+      // Both, for the same reason `signalMeta` says both: this renders a rung
+      // that already exists, and hiding it would hide what a rule does.
+      kinds: ["BOX", "HOST"],
     }
   );
 }

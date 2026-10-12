@@ -28,7 +28,19 @@ x-box: &box
   image: ${REDROID_IMAGE:-magnemite/redroid:1}
   # Redroid needs the host's binder devices; it does not run unprivileged.
   privileged: true
-  restart: unless-stopped
+  # A container that fell over on its own is brought back; a machine that
+  # rebooted does not bring its boxes back by itself. That second half is a
+  # real behaviour change from `unless-stopped`, and it is deliberate: docker
+  # starts every container it is holding at the same moment on boot, and N
+  # Androids all reaching their peak allocation in the same minute is exactly
+  # the OOM the sizing advice warns about. A six-box machine taking a kernel
+  # update is the case that will actually happen.
+  #
+  # So starting them in waves is somebody's job rather than docker's. On a
+  # hub-managed machine the host agent does it. On this hand-written path it is
+  # yours: bring them up with `docker compose up -d` after a reboot, or write a
+  # systemd unit that does, staggered.
+  restart: on-failure
   # This is what makes the agent report *this box's* memory. Without a limit it
   # reads the host's total and every box on the machine reports the same RAM.
   # Load average and temperature stay host-wide whatever you set — Linux has no

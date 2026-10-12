@@ -569,6 +569,14 @@ model RedroidHost {
   /// it turns a reconnect into a container recreate.
   appliedSha256 String?
   appliedAt     DateTime?
+  /// Set when a converge is dispatched and cleared when its result lands.
+  ///
+  /// A converge is minutes of image pulls and Android boots, so it is not
+  /// awaited over an HTTP request -- the dashboard would hold a connection
+  /// open for half an hour. This is what lets the page say "converging" rather
+  /// than looking idle while the machine works, and a value left behind by a
+  /// hub restart is how a converge that never reported is spotted.
+  convergingSince DateTime?
 
   /// Whether this machine's existing containers have been imported as
   /// instance rows. Nothing is converged before that: a machine already
