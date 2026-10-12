@@ -42,6 +42,10 @@ export async function createRollout(input: CreateRolloutInput) {
 
   const devices = await prisma.device.findMany({
     where: {
+      // A host installs no APKs and has no `pm` to install them with, so it is
+      // never a rollout target -- not even when an explicit id list names one,
+      // which is why this sits outside the spread rather than inside it.
+      kind: "BOX",
       approved: true,
       ...(input.deviceIds?.length ? { id: { in: input.deviceIds } } : {}),
     },

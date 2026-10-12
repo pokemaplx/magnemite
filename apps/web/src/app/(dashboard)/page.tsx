@@ -30,6 +30,10 @@ export default async function FleetPage() {
 
   const [devices, versions] = await Promise.all([
     prisma.device.findMany({
+      // The Fleet table is the boxes. Machines have their own page, and a VPS
+      // in here would show an empty MITM column, no scanner and no version
+      // for every one of them.
+      where: { kind: "BOX" },
       include: {
         group: { select: { id: true, name: true } },
         packages: { where: { packageName: { in: [packageName, ...mitmNames] } } },

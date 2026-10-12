@@ -20,6 +20,25 @@ enum DeviceStatus {
   OFFLINE
 }
 
+/// What sort of machine this agent runs on.
+///
+/// A box is what the fleet is for: hardware on a shelf, or a Redroid
+/// container, which are the same thing to every message in the protocol. A
+/// host is the Linux machine those containers run on -- same agent, same
+/// socket, same metrics, same self-update, but it installs no APKs and takes
+/// no rollouts.
+///
+/// A discriminator rather than a separate model, for the reason the Rotom
+/// integration is twenty columns on this table rather than an entity of its
+/// own: a host does everything `Device` already models, and a parallel entity
+/// would mean a second token, socket, registry, offline sweep, enrollment
+/// route, metric table, prune clock and self-update path, all to describe the
+/// same behaviour. The cost is that every query meaning "a box" has to say so.
+enum DeviceKind {
+  BOX
+  HOST
+}
+
 enum VersionSource {
   /// Discovered by polling a source feed. Which one is on `feedId`.
   MIRROR
@@ -100,7 +119,13 @@ model Device {
   name   String
   /// ro.serialno, or a MAC-derived fallback. Identifies the box across
   /// re-enrollments and IP changes.
-  serial String @unique
+  ///
+  /// On a host this is minted by the bootstrap into /etc/magnemite, and
+  /// deliberately not read from /etc/machine-id: imaging a VPS from a snapshot
+  /// clones that file, and two machines claiming one row would fight over the
+  /// socket forever.
+  serial String     @unique
+  kind   DeviceKind @default(BOX)
 
   manufacturer   String?
   model          String?
@@ -142,6 +167,23 @@ model Device {
   cpuCount          Int?
   memTotalBytes     BigInt?
   memAvailableBytes BigInt?
+
+  /// How busy this machine's own CPU is: 0-100 per core, so 250 means two and
+  /// a half cores spent. The same convention as `processStatsSchema`, and the
+  /// one that composes.
+  ///
+  /// The honest version of the load average. A container shares the host's
+  /// /proc/loadavg and there is nothing to scope it to, but its own cgroup
+  /// knows exactly how much CPU time it has spent. On hardware this is
+  /// /proc/stat deltas and means the same thing, which is what lets a TV box
+  /// and a container share one chart instead of needing two.
+  cpuPercent        Float?
+
+  /// Swap, which in practice only a host has and only a host needs: fifty
+  /// workers in a container is where a VPS runs out of RAM, and swap is what
+  /// stands between that and the OOM killer taking a container down mid-scan.
+  swapTotalBytes    BigInt?
+  swapFreeBytes     BigInt?
   /// Degrees Celsius off the box's thermal zones. Null on boxes whose ROM
   /// exposes no sensor at all, which is common on TV hardware — "cannot say"
   /// rather than "cold".
@@ -210,11 +252,20 @@ model Device {
   monitorStates  MonitorState[]
   monitorEvents  MonitorEvent[]
 
+  /// Set only on a HOST, and only once its agent has enrolled.
+  redroidHost     RedroidHost?
+  /// Set on a BOX that is a Redroid container, once the instance row the hub
+  /// minted its serial for has been claimed by an enrollment.
+  redroidInstance RedroidInstance?
+
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
   @@index([status])
   @@index([groupId])
+  /// Every fleet-wide query is "the boxes, by state". Leading on kind keeps
+  /// the hosts out of it without a second scan.
+  @@index([kind, status])
 }
 
 /// One attempt at swapping the agent binary on a box.
@@ -315,6 +366,12 @@ model DeviceMetricSample {
   totalBytes        BigInt?
   cpuTempC          Float?
   batteryTempC      Float?
+  /// Share of a single core summed over the machine, as on `Device`. This is
+  /// the series a container actually has -- its load average is the host's and
+  /// says nothing about it.
+  cpuPercent        Float?
+  swapTotalBytes    BigInt?
+  swapFreeBytes     BigInt?
 
   /// The chart's own query: one box, one time window.
   @@index([deviceId, at])
@@ -447,9 +504,174 @@ model DeviceGroup {
 
   devices      Device[]
   monitorRules MonitorRule[]
+  /// Machines whose new containers enroll into this group.
+  redroidHosts RedroidHost[]
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
+}
+
+// ---------------------------------------------------------------------------
+// Redroid hosts
+// ---------------------------------------------------------------------------
+
+/// A Linux machine running Redroid containers.
+///
+/// Keyed on the Device its agent enrolled as, because a host with no agent is
+/// a machine nobody can reach and there is nothing to record about it. The
+/// machine's own readings -- load, memory, swap, disk, CPU -- live on that
+/// Device like any other box's, which is the whole point of `DeviceKind`:
+/// one metrics pipeline, one chart component, one prune.
+///
+/// What is left here is only what a box has no use for. Not a DeviceGroup
+/// either: a group is a logical site -- its own comment says "two sites on two
+/// Rotom instances are two groups" -- and a site can span three VPSes while
+/// one VPS can hold two sites. This is the physical thing.
+model RedroidHost {
+  deviceId String @id
+  device   Device @relation(fields: [deviceId], references: [id], onDelete: Cascade)
+
+  /// `docker compose -p` and the directory the rendered file is written to.
+  /// Everything the hub renders lives under one project name, which is what
+  /// makes --remove-orphans safe: it can only ever remove containers
+  /// Magnemite put there.
+  project String @default("magnemite-redroid")
+  dir     String @default("/etc/magnemite/redroid")
+
+  /// sha256 of the compose file this machine last converged, as the host read
+  /// it back off its own disk -- so it says what is on the machine rather than
+  /// what the hub meant, the same way a written MITM config does.
+  ///
+  /// Null until the first converge. Comparing a fresh render against this is
+  /// how the hub decides a converge is needed at all, which is why the render
+  /// has to be a pure function of the instance rows: anything conditional in
+  /// it turns a reconnect into a container recreate.
+  appliedSha256 String?
+  appliedAt     DateTime?
+
+  /// Whether this machine's existing containers have been imported as
+  /// instance rows. Nothing is converged before that: a machine already
+  /// running the hand-written compose file has containers holding real device
+  /// identities, and an empty desired set would make every one of them an
+  /// orphan for --remove-orphans to delete.
+  adoptedAt DateTime?
+
+  /// Last failure from a bootstrap or a converge, for the dashboard to show.
+  /// Capped by the caller well under 64KB: @db.Text is TEXT on MariaDB, which
+  /// is 65,535 bytes and errors rather than truncating, and docker's output on
+  /// a cold image build is far larger than that.
+  lastError   String?   @db.Text
+  lastErrorAt DateTime?
+
+  // --- defaults every instance on this machine inherits --------------------
+  // Here as well as in Settings because a 32GB Ampere and an 8GB VPS want
+  // different answers, and a box wants neither. Null falls back to the
+  // `redroid.` settings group.
+  /// What each container is capped at. This is the one field that decides
+  /// whether a box reports its own RAM or the machine's, so the host reports
+  /// the limit docker actually applied and the hub flags a mismatch.
+  memLimitBytes BigInt?
+  cpuset        String?
+  /// androidboot.redroid_gpu_mode. "guest" is software rendering.
+  gpuMode       String?
+  /// Overrides the image tag every instance runs. Pinned to the Redroid base
+  /// version, never to the agent's: `make redroid` tags from the agent line,
+  /// so tying the rendered file to that would move the tag on every agent
+  /// release and make compose recreate every container on the machine -- a
+  /// full Android cold boot each, to deliver a binary the containers would
+  /// have self-updated in seconds.
+  image         String?
+
+  /// The group a container on this machine enrolls into.
+  ///
+  /// Enrollment otherwise hard-codes `default`, and a box in the wrong group
+  /// is handed the wrong MITM config by the first rollout that reaches it --
+  /// with the sha256 read-back faithfully confirming the wrong file. Setting
+  /// the site once per machine is what makes a new instance arrive already
+  /// configured for where it actually is.
+  ///
+  /// Only a default: after enrolling, a box's group is its own and moves with
+  /// the usual controls.
+  defaultGroupId String?
+  defaultGroup   DeviceGroup? @relation(fields: [defaultGroupId], references: [id], onDelete: SetNull)
+
+  instances RedroidInstance[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  /// Declared rather than left to the foreign key: Postgres does not index one
+  /// on its own, and `Device.groupId` next door sets the same precedent.
+  @@index([defaultGroupId])
+}
+
+/// One Redroid container on one host.
+///
+/// A row exists before the container does, and before the Device it will
+/// become: the hub mints the serial here, the renderer writes it into the
+/// compose file, and the agent inside the container enrolls with it. That
+/// ordering is what makes a container's identity survive being recreated.
+model RedroidInstance {
+  id     String      @id @default(cuid())
+  hostId String
+  host   RedroidHost @relation(fields: [hostId], references: [deviceId], onDelete: Cascade)
+
+  /// Stable, sparse, and never renumbered. Removing instance 3 of ten leaves
+  /// a gap and the next scale-up refills it; closing the gap would rewrite
+  /// serials, and a changed serial is a new box with no history.
+  index Int
+
+  /// The serial the container reports, minted once and never changed.
+  ///
+  /// Derived from the host's immutable id rather than its name, so renaming a
+  /// machine does not silently re-identify every box on it. Rendered as
+  /// `ro.magnemite.serial`, which `magnemite-start.sh` reads -- the namespaced
+  /// property, not `ro.serialno`, because it cannot collide with whatever the
+  /// base image sets.
+  serial String @unique
+
+  /// The Device this container enrolled as, once it has. Null is the state
+  /// worth reading: a container that is running and has never enrolled is the
+  /// most common failure while setting a machine up, and without this field
+  /// nothing can tell it apart from one that is not running at all.
+  deviceId String? @unique
+  device   Device? @relation(fields: [deviceId], references: [id], onDelete: SetNull)
+
+  /// False is the desired state "gone". Kept as a row rather than deleted so
+  /// re-adding the index brings the same box back; "forget" is what deletes.
+  present Boolean @default(true)
+
+  /// Workers this instance is configured for, substituted into the group's
+  /// MITM config as {{device.workers}}. Magnemite owning this number is what
+  /// makes a machine's capacity addable-up, and 50 is the per-container
+  /// ceiling the scanners impose.
+  workers Int?
+
+  /// Per-instance overrides of the host's defaults. Null inherits.
+  memLimitBytes BigInt?
+  cpuset        String?
+  image         String?
+
+  // --- what the host last saw -----------------------------------------------
+  /// docker's own state word: running, exited, restarting, created. Null
+  /// before the first report. Current state, not history -- no process inside
+  /// the container can see it, and it is not worth a time series.
+  containerState String?
+  /// Climbing restart counts are what distinguish a crash-looping instance
+  /// from an idle one.
+  restartCount   Int?
+  /// The memory limit docker reports actually applied, against which
+  /// `memLimitBytes` is checked. A silent miss here would have every box on
+  /// the machine reporting the host's total RAM.
+  appliedMemLimitBytes BigInt?
+  reportedAt     DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  /// The renderer's own query, and what keeps an index unique per machine.
+  @@unique([hostId, index])
+  @@index([hostId, present])
 }
 
 // ---------------------------------------------------------------------------
@@ -735,7 +957,19 @@ model EnrollmentToken {
   /// First 8 chars of the plaintext, so the UI can tell tokens apart.
   prefix    String
 
+  /// What this token may enrol. A token minted for boxes cannot bring up a
+  /// host and vice versa, because the two are handed out in completely
+  /// different places: a box token is flashed into a module zip by a person, a
+  /// host token is minted per machine and written into that machine's compose
+  /// file.
+  kind DeviceKind @default(BOX)
+
   /// Devices enrolling with this token skip manual approval.
+  ///
+  /// Forced true for HOST, and the form offers no switch for it: `/internal/authz`
+  /// refuses an unapproved device, so a host that enrolled unapproved would
+  /// get a bare 401 from the edge on its first self-update, with nothing
+  /// anywhere to say why.
   autoApprove Boolean   @default(true)
   maxUses     Int?
   uses        Int       @default(0)
@@ -876,6 +1110,17 @@ enum MonitorSignal {
   ROTOM_DISCONNECTED // Rotom stopped seeing the box, or has no workers on it
   ROTOM_NOT_SCANNING // Rotom has the box and no worker is allocated on it
   ROTOM_IDLE // a worker is allocated and making no requests at all
+
+  // --- hosts ---------------------------------------------------------------
+  // Each one is its own value rather than a HEALTH_CHECK_FAILED rule with a
+  // shell probe, which is the cheaper-looking design and does not work:
+  // `rulesFor` dedupes on signal + packageName and keeps one winner per key,
+  // so three host probe rules would collapse into one and the other two would
+  // never run -- no error, no probe, nothing in the log.
+  HOST_DOCKER_DOWN // the agent is up and the docker daemon is not
+  HOST_MEMORY_LOW // free memory or swap under the rule's floor
+  HOST_DISK_LOW // the filesystem docker keeps its images and volumes on
+  REDROID_INSTANCE_DOWN // a container that should be running is not
 }
 
 /// What a rule does about it. Everything except REBOOT and the ROTOM_* three is
@@ -897,6 +1142,11 @@ enum MonitorAction {
   ROTOM_RESTART
   ROTOM_DISCONNECT
   ROTOM_REBOOT
+  /// Restart one Redroid container, from the host that runs it. The host-side
+  /// counterpart of RESTART_APP: it is the smallest thing that fixes a wedged
+  /// instance, and REBOOT is deliberately not extended to mean "reboot the
+  /// VPS" -- that takes every box on the machine down at once.
+  RESTART_INSTANCE
 }
 
 enum MonitorLevel {
@@ -923,6 +1173,15 @@ model MonitorRule {
   /// or a box would be restarted twice for one fault.
   groupId String?
   group   DeviceGroup? @relation(fields: [groupId], references: [id], onDelete: Cascade)
+
+  /// Which kind of machine this rule is about. A box rule evaluated against a
+  /// VPS would read a scanner's absence as a fault on a machine that never ran
+  /// one; a host rule against a box would do the mirror image.
+  ///
+  /// This is also what lets AGENT_OFFLINE cover a machine going silent with no
+  /// signal of its own -- it already means exactly the right thing on a
+  /// `Device`, whichever kind it is.
+  appliesTo DeviceKind @default(BOX)
 
   signal MonitorSignal
   /// The package the signal and its actions are about. Null for the signals

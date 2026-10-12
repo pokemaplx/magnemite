@@ -236,9 +236,13 @@ export async function broadcastWelcome(): Promise<number> {
     loadEnabledRules(),
     getHubSettings(),
   ]);
+  // `kind` is selected because the monitor spec depends on it: a host must be
+  // sent the host rules, not the box ones. Hosts are otherwise welcomed
+  // exactly like boxes -- same message, same heartbeat, same tracked packages
+  // (which they simply have none of).
   const devices = await prisma.device.findMany({
     where: { id: { in: onlineDeviceIds() } },
-    select: { id: true, name: true, approved: true, groupId: true },
+    select: { id: true, name: true, approved: true, groupId: true, kind: true },
   });
 
   let sent = 0;
@@ -250,7 +254,7 @@ export async function broadcastWelcome(): Promise<number> {
       approved: device.approved,
       heartbeatSeconds: settings.heartbeatSeconds,
       trackedPackages: packages,
-      monitor: specFor(rules, device.groupId),
+      monitor: specFor(rules, device.groupId, device.kind),
     });
     if (ok) sent += 1;
   }

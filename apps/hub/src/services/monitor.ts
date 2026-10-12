@@ -1,6 +1,7 @@
 import type { deviceMetricsSchema, MonitorSpec } from "@magnemite/protocol";
 import type { z } from "zod";
 import {
+  type DeviceKind,
   MONITOR_CHANNELS,
   type MonitorAction,
   type MonitorChannel,
@@ -194,6 +195,33 @@ function probeOf(rule: RuleRow): RuleProbe | null {
   };
 }
 
+/**
+ * A number out of the rule's `config`, or null.
+ *
+ * Read defensively for the reason `probeOf` is: this is operator input that
+ * has been round-tripped through a JSON column. A floor that cannot be read is
+ * *unknown*, which makes the signal silent rather than making it fire on every
+ * machine at once.
+ */
+function numberOf(rule: RuleRow, key: string): number | null {
+  const config = rule.config as Record<string, unknown> | null;
+  const value = config?.[key];
+  if (typeof value !== "number" || !Number.isFinite(value)) return null;
+  return value;
+}
+
+/**
+ * Is `free` of `total` under the rule's percentage floor?
+ *
+ * Null wherever the answer would be a guess: a machine that has not reported
+ * the pair yet, and a rule with no floor configured. Both are silence.
+ */
+function underFloor(rule: RuleRow, free: bigint | null, total: bigint | null): boolean | null {
+  const percent = numberOf(rule, "minFreePercent");
+  if (percent === null || free === null || total === null || total <= 0n) return null;
+  return Number((free * 10000n) / total) / 100 < percent;
+}
+
 export async function loadEnabledRules(): Promise<RuleRow[]> {
   const settings = await getMonitorSettings();
   if (!settings.enabled) return [];
@@ -205,15 +233,21 @@ export async function loadEnabledRules(): Promise<RuleRow[]> {
 }
 
 /**
- * The rules that apply to one box.
+ * The rules that apply to one machine.
  *
  * A group-scoped rule *replaces* the fleet-wide rule for the same signal and
  * package rather than adding to it. Stacking them would mean two ladders
  * racing over one fault, and a box restarted twice for it.
+ *
+ * `kind` is the other half of that filter, and it is not optional: a box rule
+ * evaluated against a VPS would read a scanner's absence as a fault on a
+ * machine that never ran one, and a host rule against a box would do the
+ * mirror image. Both would act.
  */
-export function rulesFor(rules: RuleRow[], groupId: string | null): RuleRow[] {
+export function rulesFor(rules: RuleRow[], groupId: string | null, kind: DeviceKind): RuleRow[] {
   const chosen = new Map<string, RuleRow>();
   for (const rule of rules) {
+    if (rule.appliesTo !== kind) continue;
     if (rule.groupId !== null && rule.groupId !== groupId) continue;
     const key = `${rule.signal}:${rule.packageName ?? ""}`;
     const winner = chosen.get(key);
@@ -225,8 +259,12 @@ export function rulesFor(rules: RuleRow[], groupId: string | null): RuleRow[] {
 }
 
 /** What to tell a box to watch, given the rules that apply to it. */
-export function specFor(rules: RuleRow[], groupId: string | null): MonitorSpec | null {
-  const applicable = rulesFor(rules, groupId);
+export function specFor(
+  rules: RuleRow[],
+  groupId: string | null,
+  kind: DeviceKind = "BOX",
+): MonitorSpec | null {
+  const applicable = rulesFor(rules, groupId, kind);
   if (applicable.length === 0) return null;
 
   const spec: MonitorSpec = { foreground: false, anr: false, checks: [] };
@@ -243,9 +281,12 @@ export function specFor(rules: RuleRow[], groupId: string | null): MonitorSpec |
   return spec;
 }
 
-/** The spec for one box, for the `welcome` that accepts its socket. */
-export async function specForDevice(groupId: string | null): Promise<MonitorSpec | null> {
-  return specFor(await loadEnabledRules(), groupId);
+/** The spec for one machine, for the `welcome` that accepts its socket. */
+export async function specForDevice(
+  groupId: string | null,
+  kind: DeviceKind = "BOX",
+): Promise<MonitorSpec | null> {
+  return specFor(await loadEnabledRules(), groupId, kind);
 }
 
 // ---------------------------------------------------------------------------
@@ -358,6 +399,43 @@ function readSignal(
     case "HEALTH_CHECK_FAILED":
     case "LOOP_STALLED":
       return checkResult(rule, reading);
+
+    // --- hosts -------------------------------------------------------------
+    // These read the machine's own columns rather than a probe result, because
+    // a host reports them on every heartbeat like any other box. What makes
+    // them host signals is `appliesTo`, which `rulesFor` has already filtered
+    // on by the time we get here.
+
+    case "HOST_MEMORY_LOW": {
+      // Swap counts as headroom, because on these machines it is exactly what
+      // stands between fifty workers and the OOM killer. A machine with no
+      // swap at all reports zero rather than null -- see the pointer fields in
+      // the protocol -- so adding it is safe and a missing reading stays
+      // unknown.
+      const free =
+        device.memAvailableBytes === null
+          ? null
+          : device.memAvailableBytes + (device.swapFreeBytes ?? 0n);
+      const total =
+        device.memTotalBytes === null ? null : device.memTotalBytes + (device.swapTotalBytes ?? 0n);
+      return underFloor(rule, free, total);
+    }
+
+    case "HOST_DISK_LOW":
+      // The filesystem docker keeps its images and volumes on, which is what
+      // the host agent reports as its free/total pair. A full disk fails
+      // installs rather than announcing itself.
+      return underFloor(rule, device.freeBytes, device.totalBytes);
+
+    case "HOST_DOCKER_DOWN":
+    case "REDROID_INSTANCE_DOWN":
+      // Both need facts the host reports that this hub does not read yet: the
+      // docker daemon's health, and the per-instance container state. Until
+      // that half lands they are deliberately *unknown*, which neither counts
+      // nor resets -- the same rule every other reading here follows. Wiring
+      // them to `false` would turn a feature that does not exist yet into a
+      // clean bill of health.
+      return null;
   }
 }
 
@@ -515,7 +593,7 @@ async function evaluateDevice(
 ): Promise<void> {
   const reading = freshReading(device.id);
 
-  for (const rule of rulesFor(rules, device.groupId)) {
+  for (const rule of rulesFor(rules, device.groupId, device.kind)) {
     const bad = readSignal(
       rule,
       device,

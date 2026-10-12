@@ -10,8 +10,8 @@ export default async function DashboardLayout({ children }: { children: React.Re
 
   // Small counts in the sidebar, so a stuck rollout is visible from anywhere.
   const [online, total, activeRollouts] = await Promise.all([
-    prisma.device.count({ where: { status: "ONLINE" } }),
-    prisma.device.count(),
+    prisma.device.count({ where: { kind: "BOX", status: "ONLINE" } }),
+    prisma.device.count({ where: { kind: "BOX" } }),
     prisma.rollout.count({ where: { status: { in: ["CANARY", "SOAKING", "RUNNING", "PAUSED"] } } }),
   ]);
 

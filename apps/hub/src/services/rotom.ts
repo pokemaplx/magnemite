@@ -457,7 +457,14 @@ export async function syncDevices(): Promise<{ seen: number; matched: number }> 
     return { seen: 0, matched: 0 };
   }
 
-  const ours = (await prisma.device.findMany({ select: OUR_SELECT })) as OurDevice[];
+  // Boxes only. `matchDevice` below matches on the device *name* against
+  // Rotom's id, and a host named `hel-01` -- the obvious convention once there
+  // are several machines -- would otherwise be handed a scanner's identity,
+  // a Scanner column and a RotomSample history it can never satisfy.
+  const ours = (await prisma.device.findMany({
+    where: { kind: "BOX" },
+    select: OUR_SELECT,
+  })) as OurDevice[];
 
   // An empty list from a Rotom that answered fine is ambiguous — a genuinely
   // empty fleet, or a Rotom that has not rebuilt its device list yet. Acting on

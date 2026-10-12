@@ -458,12 +458,14 @@ export async function loadRenameTargets(
 
   const where =
     "groupId" in source
-      ? { groupId: source.groupId, approved: true }
-      : { id: { in: source.deviceIds } };
+      ? { kind: "BOX" as const, groupId: source.groupId, approved: true }
+      : { kind: "BOX" as const, id: { in: source.deviceIds } };
 
   const [devices, fleet] = await Promise.all([
     prisma.device.findMany({ where, select: RENAME_SELECT }),
-    prisma.device.findMany({ select: { id: true, name: true } }),
+    // Boxes too: this is what the preview checks a proposed name against, and
+    // a machine's name colliding with a box's is not the clash it warns about.
+    prisma.device.findMany({ where: { kind: "BOX" }, select: { id: true, name: true } }),
   ]);
   if (devices.length === 0) return { error: "No boxes to rename." };
 
@@ -638,8 +640,11 @@ export async function renameDevices(
   if (input.deviceIds.length === 0) return { error: "No boxes picked." };
 
   const [devices, fleet] = await Promise.all([
-    prisma.device.findMany({ where: { id: { in: input.deviceIds } }, select: RENAME_SELECT }),
-    prisma.device.findMany({ select: { id: true, name: true } }),
+    prisma.device.findMany({
+      where: { kind: "BOX", id: { in: input.deviceIds } },
+      select: RENAME_SELECT,
+    }),
+    prisma.device.findMany({ where: { kind: "BOX" }, select: { id: true, name: true } }),
   ]);
   if (devices.length !== input.deviceIds.length) {
     return { error: "A box in the selection is no longer there. Reopen the dialog." };

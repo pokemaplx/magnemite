@@ -16,7 +16,8 @@ export default async function ManualPage() {
 
   const [devices, groups, targets, builds, packageCounts] = await Promise.all([
     prisma.device.findMany({
-      where: { approved: true },
+      // A manual install needs somewhere to install to. A host has no `pm`.
+      where: { kind: "BOX", approved: true },
       include: {
         group: { select: { id: true, name: true } },
         // `installed: true` matters: a box that had the app and lost it keeps

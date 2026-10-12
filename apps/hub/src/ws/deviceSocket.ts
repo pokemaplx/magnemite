@@ -157,7 +157,7 @@ async function onConnection(ws: WebSocket, req: IncomingMessage, deviceId: strin
     // What to watch, which depends on the box's group. Null for a fleet with
     // monitoring off, which is also what stops an agent probing after the last
     // rule is switched off.
-    monitor: await specForDevice(device.groupId),
+    monitor: await specForDevice(device.groupId, device.kind),
   });
 
   await prisma.device.update({
