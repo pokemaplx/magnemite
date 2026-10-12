@@ -64,28 +64,44 @@ A rule declares **which kind of device it is about** — a box or a
 | ----------------------- | ----------- | ------------------------------------------------------------------------------------- |
 | `HOST_MEMORY_LOW`       | the hub     | Free memory **plus free swap**, under the rule's percentage floor                     |
 | `HOST_DISK_LOW`         | the hub     | Free space under that floor, on the filesystem docker keeps its images and volumes on |
-| `HOST_DOCKER_DOWN`      | not yet     | The agent is up and the docker daemon is not                                          |
-| `REDROID_INSTANCE_DOWN` | not yet     | A container that should be running is not                                             |
+| `HOST_DOCKER_DOWN`      | the hub     | The agent is up and the docker daemon is not                                          |
+| `REDROID_INSTANCE_DOWN` | the hub     | A container that should be running is not                                             |
 
 Swap counts as headroom in the first one, because on these machines it is
 exactly what stands between fifty workers and the OOM killer. A machine with no
 swap reports zero rather than nothing, so adding it is safe and a genuinely
 absent reading stays unknown.
 
-The last two need facts the hub does not read yet — the daemon's health, and
-per-instance container state — so today they read **unknown**, which neither
-counts nor resets. Wiring them to "fine" would turn a feature that does not
-exist into a clean bill of health on every machine.
+The last two are read from what the machine said on its **last** heartbeat, not
+from its row:
+
+- `HOST_DOCKER_DOWN` is the agent reporting while docker does not answer it. The
+  machine's stored docker version deliberately keeps the last one ever seen, so
+  a newer agent's finding is not wiped by an older one's silence — which makes
+  the column history, and a daemon being down a question about right now. A hub
+  that has just restarted reads **unknown** for one heartbeat, which the startup
+  grace already covers.
+- `REDROID_INSTANCE_DOWN` counts only the instances marked **present**: a
+  removed one keeps its row, and counting it would have a drained machine alarm
+  forever. All the known ones running is healthy even while another is still
+  unknown, so a machine recovers on the container that came back instead of
+  waiting for one nothing has looked at.
+
+<Callout type="info" title="A machine mid-converge is left alone">
+  Its containers are being created or replaced because somebody asked for that, so instances
+  legitimately are not running. It is skipped for the same reason a box mid-install is: the only
+  thing a rule could report is the damage the hub itself asked for.
+</Callout>
+
+`RESTART_INSTANCE` is the narrowest remediation in the project:
+`up -d --no-recreate`, naming only the services that are down. A container that
+is running is not touched, nothing is removed, and the machine is never
+rebooted — which is the whole point of the action existing, since rebooting
+takes every other box on the machine down for one box's fault.
 
 `AGENT_OFFLINE` needs nothing new: pointed at machines, it already means exactly
 the right thing, because a machine is a `Device` and its socket is gone the same
 way a box's is.
-
-<Callout type="info" title="The rule editor does not offer these yet">
-  The signals are in the schema and the hub evaluates the two that have data. The vocabulary the
-  **Settings → Monitoring** form is built from has not learned them, so there is no way to write one
-  from the dashboard today.
-</Callout>
 
 #### Why these are signals and not probe rules
 
@@ -141,8 +157,13 @@ left to try.
 app_: the smallest thing that fixes a wedged instance. `Reboot the box` is
 deliberately **not** overloaded to mean "reboot the VPS" — that takes every box
 on the machine down at once, which is a much larger decision than the signal
-that would reach for it. Like the host signals above, it is in the schema and
-not yet in the rule editor.
+that would reach for it.
+
+It runs on the machine, over the machine's own socket, so a machine that is not
+answering has the rung **refused rather than spent** — the ladder still has it
+when the machine comes back. It is counted as a hard action for the same reason
+a reboot is: the container _is_ the box, so restarting it cold-boots that
+Android and every app on it comes back from nothing.
 
 The three Rotom actions travel **Rotom's socket, not the agent's**, which is what makes
 them the only remediation left on a box whose agent has died — every other

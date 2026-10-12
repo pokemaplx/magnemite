@@ -18,6 +18,7 @@ import { isOnline, sendTo } from "../registry.js";
 import { execOnDevice } from "./deviceCommands.js";
 import { ACTIVE_STATES } from "./jobs.js";
 import { notify } from "./notify.js";
+import { dockerAnswered, startDownInstances } from "./redroid.js";
 import { deviceAction, rotomEnabled } from "./rotom.js";
 
 /**
@@ -134,6 +135,9 @@ const NEEDS_SOCKET = new Set<MonitorAction>([
   "START_SERVICE",
   "SHELL",
   "REBOOT",
+  // The machine's own socket: docker is started by the agent on the machine,
+  // so a machine that is not answering cannot have its containers started.
+  "RESTART_INSTANCE",
 ]);
 
 /**
@@ -144,7 +148,20 @@ const NEEDS_SOCKET = new Set<MonitorAction>([
  * a ceiling that only knew the agent-side spelling would be a ceiling a rule
  * could walk straight past by naming the other one.
  */
-const HARD_ACTIONS = new Set<MonitorAction>(["REBOOT", "ROTOM_REBOOT"]);
+const HARD_ACTIONS = new Set<MonitorAction>([
+  "REBOOT",
+  "ROTOM_REBOOT",
+  // The container *is* the box, so starting it is an Android cold boot and
+  // every app on it comes back from nothing. The rule editor already tells an
+  // operator this counts against the daily ceiling; this is the half that
+  // makes that true.
+  //
+  // Counted against the *machine*, which is the device the action ran on, so
+  // the ceiling bounds how often the monitor may cold-boot things on one
+  // machine — and the post-action grace leaves that machine alone while the
+  // Android inside comes up, for the same minutes a rebooted box gets.
+  "RESTART_INSTANCE",
+]);
 
 function substitute(command: string, packageName: string | null): string {
   return command.replaceAll("{pkg}", packageName ?? "");
@@ -220,6 +237,33 @@ function underFloor(rule: RuleRow, free: bigint | null, total: bigint | null): b
   const percent = numberOf(rule, "minFreePercent");
   if (percent === null || free === null || total === null || total <= 0n) return null;
   return Number((free * 10000n) / total) / 100 < percent;
+}
+
+/** One machine's desired containers, tallied by what docker last said. */
+export type HostInstances = { desired: number; running: number; unknown: number };
+
+/**
+ * Is a machine missing a container it is supposed to be running?
+ *
+ * Only the instances marked present count: a removed one keeps its row, and
+ * counting it would have a drained machine alarm forever.
+ *
+ * Two silences, for the usual reason — unknown neither counts nor resets:
+ *
+ *  - **Nothing is supposed to run here.** A machine kept for capacity, or one
+ *    that has not been scaled yet, is not broken.
+ *  - **Nothing has been reported yet.** A row created moments ago by a
+ *    scale-up has no state until the machine has been round the loop once, and
+ *    a converge is what will create its container.
+ *
+ * Past those, the answer is about the instances actually known: all of them
+ * running is healthy even while another is still unknown, so a machine
+ * recovers on the one that came back rather than waiting for the one nothing
+ * has looked at.
+ */
+export function instancesDown(counts: HostInstances): boolean | null {
+  if (counts.desired === 0 || counts.desired === counts.unknown) return null;
+  return counts.running < counts.desired - counts.unknown;
 }
 
 export async function loadEnabledRules(): Promise<RuleRow[]> {
@@ -307,6 +351,8 @@ function readSignal(
   rule: RuleRow,
   device: DeviceRow,
   reading: Reading | null,
+  /** Tallied once per pass, and empty for a fleet with no machines. */
+  hosts: Map<string, HostInstances>,
   offlineAfterMs: number,
   rotomStaleMs: number,
 ): boolean | null {
@@ -427,15 +473,22 @@ function readSignal(
       // installs rather than announcing itself.
       return underFloor(rule, device.freeBytes, device.totalBytes);
 
-    case "HOST_DOCKER_DOWN":
+    case "HOST_DOCKER_DOWN": {
+      // The agent is up — it is reporting — and docker did not answer it. That
+      // is a different fault from the machine going silent, which is what
+      // AGENT_OFFLINE is for, and it is separately actionable: the containers
+      // are gone and nothing on the machine is going to bring them back.
+      //
+      // Held in memory, so a hub that just restarted says unknown for one
+      // heartbeat. The startup grace already covers that window.
+      const answered = dockerAnswered(device.id);
+      return answered === null ? null : !answered;
+    }
+
     case "REDROID_INSTANCE_DOWN":
-      // Both need facts the host reports that this hub does not read yet: the
-      // docker daemon's health, and the per-instance container state. Until
-      // that half lands they are deliberately *unknown*, which neither counts
-      // nor resets -- the same rule every other reading here follows. Wiring
-      // them to `false` would turn a feature that does not exist yet into a
-      // clean bill of health.
-      return null;
+      // Tallied once for the whole pass rather than queried per rule. A
+      // machine with no entry is one with no instance rows at all.
+      return instancesDown(hosts.get(device.id) ?? { desired: 0, running: 0, unknown: 0 });
   }
 }
 
@@ -516,11 +569,19 @@ export async function evaluate(): Promise<void> {
 
   const busy = await busyDeviceIds(settings.rebootGraceSeconds);
   const budgets = await spentBudgets();
+  const hosts = await hostInstances(devices);
 
   for (const device of devices) {
     if (busy.has(device.id)) continue;
     try {
-      await evaluateDevice(device, rules, settings, deviceOfflineTimeoutSeconds * 1000, budgets);
+      await evaluateDevice(
+        device,
+        rules,
+        settings,
+        deviceOfflineTimeoutSeconds * 1000,
+        budgets,
+        hosts,
+      );
     } catch (err) {
       // One box's failure is not the fleet's. A rule with a broken command
       // must not stop every other box being looked at.
@@ -532,17 +593,47 @@ export async function evaluate(): Promise<void> {
 }
 
 /**
- * Boxes that must be left alone this pass.
+ * What every machine's instances are doing, in one query for the whole pass.
  *
- * Two reasons, both of which look like a fault and are not:
+ * One query rather than one per machine per rule, and skipped entirely for a
+ * fleet with no machines in it — which is every fleet until somebody adds one.
+ */
+async function hostInstances(devices: DeviceRow[]): Promise<Map<string, HostInstances>> {
+  const hostIds = devices.filter((device) => device.kind === "HOST").map((device) => device.id);
+  if (hostIds.length === 0) return new Map();
+
+  const rows = await prisma.redroidInstance.findMany({
+    where: { hostId: { in: hostIds }, present: true },
+    select: { hostId: true, containerState: true },
+  });
+
+  const counts = new Map<string, HostInstances>();
+  for (const row of rows) {
+    const tally = counts.get(row.hostId) ?? { desired: 0, running: 0, unknown: 0 };
+    tally.desired += 1;
+    if (row.containerState === null) tally.unknown += 1;
+    else if (row.containerState === "running") tally.running += 1;
+    counts.set(row.hostId, tally);
+  }
+  return counts;
+}
+
+/**
+ * Boxes and machines that must be left alone this pass.
+ *
+ * Three reasons, all of which look like a fault and are not:
  *
  *  - **An install is running.** It force-stops the scanner on purpose, so every
  *    probe would faithfully report the damage the hub itself asked for.
  *  - **We just rebooted it.** A box takes minutes to come back. Without this
  *    its own reboot reads as unreachable and it is rebooted again, forever.
+ *  - **A machine is converging.** Its containers are being created, recreated
+ *    or destroyed right now, because somebody asked for that — so instances
+ *    legitimately are not running, and a container being rebuilt is not a
+ *    container that failed. The install case for a machine, in other words.
  */
 async function busyDeviceIds(rebootGraceSeconds: number): Promise<Set<string>> {
-  const [installing, rebooted] = await Promise.all([
+  const [installing, rebooted, converging] = await Promise.all([
     prisma.job.findMany({
       where: { state: { in: ACTIVE_STATES } },
       select: { deviceId: true },
@@ -555,8 +646,12 @@ async function busyDeviceIds(rebootGraceSeconds: number): Promise<Set<string>> {
       },
       select: { deviceId: true },
     }),
+    prisma.redroidHost.findMany({
+      where: { convergingSince: { not: null } },
+      select: { deviceId: true },
+    }),
   ]);
-  return new Set([...installing, ...rebooted].map((row) => row.deviceId));
+  return new Set([...installing, ...rebooted, ...converging].map((row) => row.deviceId));
 }
 
 type Budgets = { actions: Map<string, number>; reboots: Map<string, number> };
@@ -590,6 +685,7 @@ async function evaluateDevice(
   settings: Settings,
   offlineAfterMs: number,
   budgets: Budgets,
+  hosts: Map<string, HostInstances>,
 ): Promise<void> {
   const reading = freshReading(device.id);
 
@@ -598,6 +694,7 @@ async function evaluateDevice(
       rule,
       device,
       reading,
+      hosts,
       offlineAfterMs,
       settings.rotomStaleSeconds * 1000,
     );
@@ -790,6 +887,14 @@ async function runAction(
   if (action === "REBOOT") {
     const sent = sendTo(device.id, { type: "reboot" });
     return { ok: sent, detail: sent ? null : "the box did not take the reboot" };
+  }
+
+  // One machine's containers, by name, and nothing else on it. Deliberately
+  // not reachable on a box: a box has no containers, and the form refuses the
+  // action on a BOX rule for the same reason.
+  if (action === "RESTART_INSTANCE") {
+    if (device.kind !== "HOST") return { ok: false, detail: "not a machine" };
+    return await startDownInstances(device.id);
   }
 
   // The three that travel Rotom's own socket rather than the agent's, which is

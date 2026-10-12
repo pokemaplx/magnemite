@@ -109,20 +109,28 @@ keeps its row, and counting it would make a drained machine look broken.
   state, workers, restarts, and when the machine last reported. A climbing
   restart count is what separates a crash-looping instance from an idle one.
 
-## The three instance states
+## The instance states
 
 This is the part you will actually use, and the second one is the whole reason
 `RedroidInstance.deviceId` is nullable:
 
-| Badge                                      | What is true                                                                                        | Where to look                                                          |
-| ------------------------------------------ | --------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------- |
-| **running**                                | The container is up and its agent enrolled. The box's name links to its device page.                | Nothing to do. It is a box now.                                        |
-| **not enrolled**                           | The container is up and **no agent has ever reported**. The row shows the serial instead of a name. | `docker logs`. Wrong hub URL, a spent token, or Android still booting. |
-| **exited**, and the rest of docker's words | The container is not running.                                                                       | `docker logs`, then the restart count beside it.                       |
+| Badge                                      | What is true                                                                                                       | Where to look                                                          |
+| ------------------------------------------ | ------------------------------------------------------------------------------------------------------------------ | ---------------------------------------------------------------------- |
+| **running**                                | The container is up and its agent enrolled. The box's name links to its device page.                               | Nothing to do. It is a box now.                                        |
+| **not enrolled**                           | The container is up and **no agent has ever reported**. The row shows the serial instead of a name.                | `docker logs`. Wrong hub URL, a spent token, or Android still booting. |
+| **exited**, and the rest of docker's words | The container is not running.                                                                                      | `docker logs`, then the restart count beside it.                       |
+| **absent**                                 | Docker answered and has **no container for this instance at all** — destroyed outside Magnemite, or never created. | A converge creates it. If one is already running, wait for it.         |
 
-A fourth badge, **unknown**, is not a fourth state: it means the machine has not
+`absent` is not one of docker's words, because docker has nothing to say about a
+container that does not exist. It is written when the machine reports and this
+instance is not in the report, which is what stops a destroyed container reading
+as `running` for as long as the machine stays up.
+
+A fifth badge, **unknown**, is not a state at all: it means the machine has not
 reported this container yet, the same way an absent reading is unknown
 everywhere else here. Wait a beat, or check that the machine itself is online.
+The difference from `absent` is who has looked — `absent` means docker looked
+and found nothing, `unknown` means nobody has looked.
 
 **"Running but not enrolled" is the commonest failure while setting a machine
 up**, and before instance rows existed nothing could tell it apart from a

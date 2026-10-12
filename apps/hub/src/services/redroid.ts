@@ -4,7 +4,8 @@ import { generateToken, getRedroidSettings, hashToken, prisma } from "@magnemite
 import { env } from "../env.js";
 import { log } from "../log.js";
 import { getConnection, sendTo } from "../registry.js";
-import { renderCompose } from "./redroidCompose.js";
+import { composeServiceName, renderCompose } from "./redroidCompose.js";
+import { execOnDevice } from "./deviceCommands.js";
 import { REDROID_IMAGE } from "../version.js";
 
 /**
@@ -34,6 +35,16 @@ const lastReport = new Map<string, HostInfo>();
 const MAX_ERROR_CHARS = 8_000;
 
 /**
+ * The container state for an instance docker has no container for.
+ *
+ * Not one of docker's own words — docker has nothing to say about a container
+ * that does not exist — and deliberately not null, which this project reserves
+ * for "nothing has looked". The dashboard needs no case for it: the instances
+ * table draws any state that is not `running` as a fault, under its own name.
+ */
+export const ABSENT = "absent";
+
+/**
  * Keeps the head and the tail of an oversized error.
  *
  * Both ends matter and the middle rarely does: docker names what it was doing
@@ -49,6 +60,96 @@ export function clampError(text: string): string {
 function toBigInt(value: number | null | undefined): bigint | null {
   if (value === null || value === undefined) return null;
   return BigInt(Math.trunc(value));
+}
+
+/**
+ * Single-quoted for the host's shell, the one way that cannot be escaped out of.
+ *
+ * The project name and directory are the hub's own, not operator free text, so
+ * this is belt rather than braces — but it is one line and the alternative is
+ * trusting that forever.
+ */
+function quote(value: string): string {
+  return `'${value.replaceAll("'", `'\\''`)}'`;
+}
+
+/**
+ * Starts the containers a machine is supposed to be running and is not.
+ *
+ * This is all `RESTART_INSTANCE` does, and it is deliberately the narrowest
+ * command that could work. Three refusals are built into the command itself
+ * rather than checked for afterwards:
+ *
+ *  - **a running container is not touched**, because `--no-recreate` says so.
+ *    Recreating one would cost a healthy box a full Android cold boot for its
+ *    neighbour's fault.
+ *  - **nothing is removed**, because `--remove-orphans` is absent. This can
+ *    never become the destructive converge that adoption exists to prevent.
+ *  - **the machine is never rebooted.** That would take every box on it down
+ *    for one box's fault, which is exactly what this action exists instead of.
+ *
+ * An instance whose state is unknown is left alone too. Null means nothing has
+ * looked, and acting on silence is what the whole monitor refuses to do.
+ */
+export async function startDownInstances(
+  deviceId: string,
+): Promise<{ ok: boolean; detail: string | null }> {
+  const host = await prisma.redroidHost.findUnique({
+    where: { deviceId },
+    select: {
+      project: true,
+      dir: true,
+      instances: {
+        where: { present: true },
+        select: { index: true, containerState: true },
+      },
+    },
+  });
+  if (!host) return { ok: false, detail: "not a machine" };
+
+  const down = host.instances
+    .filter((row) => row.containerState !== null && row.containerState !== "running")
+    .map((row) => composeServiceName(row.index))
+    .sort();
+  // Nothing to do rather than a failure to report: the signal is read per beat
+  // and the container may have come back between the reading and the ladder.
+  if (down.length === 0) return { ok: true, detail: "nothing was down by the time this ran" };
+
+  const command =
+    `docker compose --project-directory ${quote(host.dir)} -p ${quote(host.project)} ` +
+    `up -d --no-recreate ${down.join(" ")}`;
+
+  const outcome = await execOnDevice(deviceId, command, 300).catch((err: unknown) => ({
+    ok: false,
+    output: "",
+    error: err instanceof Error ? err.message : String(err),
+  }));
+  return {
+    ok: outcome.ok,
+    detail: outcome.ok
+      ? `started ${down.join(", ")}`
+      : clampError(outcome.error ?? outcome.output).slice(0, 400),
+  };
+}
+
+/**
+ * Whether docker answered this machine's last report, as three answers.
+ *
+ * `null` is "this hub has not heard from the machine", which is what a restart
+ * leaves behind for one heartbeat and what a box gives always. `false` is the
+ * one worth having: the agent is up, it asked docker for its version, and
+ * nothing came back.
+ *
+ * Read from the live report rather than from `RedroidHost.dockerVersion`,
+ * because that column deliberately keeps the last version it ever saw — a
+ * newer agent must not have its finding wiped by an older one, which is the
+ * same `?? undefined` rule the whole report follows. The column is history; a
+ * daemon being down is right now.
+ */
+export function dockerAnswered(deviceId: string): boolean | null {
+  const report = lastReport.get(deviceId);
+  if (!report) return null;
+  return Boolean(report.dockerVersion);
 }
 
 /**
@@ -110,22 +211,42 @@ export async function applyHostReport(deviceId: string, host: HostInfo): Promise
  * file would silently become managed.
  */
 async function applyContainers(deviceId: string, host: HostInfo): Promise<void> {
-  if (host.containers.length === 0) return;
+  // Docker could not be asked at all, so this report says nothing about
+  // containers — which is emphatically not the same as a machine with none.
+  // The agent's contract: it reads docker's version first and returns early
+  // with nothing further when there is no answer, so an empty version is the
+  // reading. Without this gate a machine whose daemon died would have every
+  // one of its instances marked absent, which is the hub inventing a fault.
+  if (!host.dockerVersion) return;
 
   const bySerial = new Map(
     host.containers.filter((c) => c.serial).map((c) => [c.serial as string, c]),
   );
-  if (bySerial.size === 0) return;
 
+  // Every instance that is *supposed* to be here, not just the ones reported.
+  // The difference is the whole point: a container destroyed outside Magnemite
+  // simply stops appearing, and matching only what was reported would leave
+  // that row saying `running` for as long as the machine stayed up.
   const rows = await prisma.redroidInstance.findMany({
-    where: { hostId: deviceId, serial: { in: [...bySerial.keys()] } },
-    select: { id: true, serial: true },
+    where: { hostId: deviceId, present: true },
+    select: { id: true, serial: true, containerState: true },
   });
 
   const now = new Date();
   for (const row of rows) {
     const container = bySerial.get(row.serial);
-    if (!container) continue;
+    if (!container) {
+      // Docker answered and this one was not in the answer, so it does not
+      // exist. A state of its own rather than null: null means "nothing has
+      // looked", and something did look. The converge is what creates it, and
+      // a machine mid-converge is left alone by the monitor for that reason.
+      if (row.containerState === ABSENT) continue;
+      await prisma.redroidInstance.update({
+        where: { id: row.id },
+        data: { containerState: ABSENT, reportedAt: now },
+      });
+      continue;
+    }
     await prisma.redroidInstance.update({
       where: { id: row.id },
       data: {
