@@ -279,24 +279,62 @@ a second run does not simply skip.
 ## The manual path
 
 Nothing above is privileged, and the hub holding SSH access is optional. Build
-the binary, copy it and the script across, and run it with the same environment:
+the binary, put the files in one directory on the machine, and run the script
+**from inside it**:
 
 ```sh
 make agent
 
-scp agent/bin/magnemite-agent-linux-arm64 root@203.0.113.10:/tmp/magnemite-agent
-scp agent/host/bootstrap.sh root@203.0.113.10:/tmp/
+ssh root@203.0.113.10 'mkdir -p /tmp/magnemite-bootstrap/redroid && chmod 700 /tmp/magnemite-bootstrap'
+scp agent/bin/magnemite-agent-linux-arm64 root@203.0.113.10:/tmp/magnemite-bootstrap/magnemite-agent
+scp agent/host/bootstrap.sh root@203.0.113.10:/tmp/magnemite-bootstrap/
+scp agent/redroid/Dockerfile agent/redroid/magnemite-start.sh agent/redroid/magnemite.rc root@203.0.113.10:/tmp/magnemite-bootstrap/redroid/
 ```
 
 ```sh title="on the machine"
+cd /tmp/magnemite-bootstrap
+
 MAGNEMITE_SERVER=https://magnemite.example.com \
 MAGNEMITE_TOKEN=<host enrollment token> \
 MAGNEMITE_NAME=hel-01 \
 MAGNEMITE_SERIAL=<any stable, unique value> \
 MAGNEMITE_SSH_PORT=22 \
-AGENT_BIN=/tmp/magnemite-agent \
-sh /tmp/bootstrap.sh
+MAGNEMITE_IMAGE=magnemite/redroid:1 \
+sh ./bootstrap.sh
 ```
+
+<Callout type="warn" title="The `cd` is load-bearing">
+  Four things are relative to the **working directory**, not to where the script lives: the agent
+  binary (`AGENT_BIN`, default `./magnemite-agent`), the `./redroid` directory the image build looks
+  for, the `./bin` it copies the binary into, and the `.` it hands `docker build` as its context.
+  Run it from your home directory and the install still works — but the image build is silently
+  skipped, and the first converge then fails on an image that was never going to exist.
+</Callout>
+
+That layout is not a convention of this page: it is exactly what the hub pushes
+and how it runs the script, so the manual path and the one click are the same
+thing twice.
+
+| Pushed to the machine       | What                                                                                                                                                |
+| --------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `/tmp/magnemite-bootstrap/` | Everything below, `0700`                                                                                                                            |
+| `…/magnemite-agent`         | The arm64 binary, `0755`                                                                                                                            |
+| `…/bootstrap.sh`            | This script, `0755`                                                                                                                                 |
+| `…/redroid/`                | `Dockerfile`, `magnemite-start.sh`, `magnemite.rc`                                                                                                  |
+| `…/bootstrap.env`           | The variables above, `0600` — sourced and deleted by the same command that runs the script, so the enrollment token is in no process's command line |
+
+And where it ends up:
+
+| Installed                                                              | What                                                       |
+| ---------------------------------------------------------------------- | ---------------------------------------------------------- |
+| `/usr/local/bin/magnemite-agent`                                       | The agent                                                  |
+| `/usr/local/lib/magnemite/bootstrap.sh`                                | This script, kept so the hub can re-run it over the socket |
+| `/etc/magnemite/host.json`                                             | Hub URL, serial, name, token. `0600` in a `0700` directory |
+| `/etc/systemd/system/magnemite-host.service`                           | The unit                                                   |
+| `/etc/modules-load.d/magnemite.conf`, `/etc/modprobe.d/magnemite.conf` | binder, persisted across reboots                           |
+| `/etc/sysctl.d/99-magnemite-redroid.conf`                              | `kernel.pid_max`                                           |
+| `/etc/fail2ban/jail.d/magnemite.conf`                                  | The sshd jail, on the port sshd actually uses              |
+| `/swapfile`                                                            | Sized to RAM, plus its `fstab` line                        |
 
 Same artifact, two drivers. The host enrollment token comes from
 **Settings → Enrollment**; see [the machines page](/docs/fleet/redroid-hosts)
@@ -309,6 +347,8 @@ for what happens after it enrolls.
   remembers it across re-runs.
 </Callout>
 
-The image build is skipped on this path unless `MAGNEMITE_IMAGE` is set and the
-`redroid/` directory sits beside the script. `make redroid` from a checkout on
-the machine does the same job — it needs an arm64 host either way.
+The image build runs only when `MAGNEMITE_IMAGE` is set **and** `./redroid`
+exists in the working directory; otherwise the step reports
+`no image build requested` and the machine is otherwise ready. `make redroid`
+from a checkout on the machine does the same job — it needs an arm64 host
+either way.
