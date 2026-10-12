@@ -1,6 +1,7 @@
 import Link from "next/link";
-import { prisma } from "@magnemite/db";
+import { getRedroidSettings, prisma } from "@magnemite/db";
 import { requireUser } from "@/lib/session";
+import { AddHostDialog } from "@/components/add-host-dialog";
 import {
   Table,
   TableBody,
@@ -38,7 +39,7 @@ function ofTotal(free: bigint | null, total: bigint | null): string {
  * the fleet runs with the discriminator flipped.
  */
 export default async function HostsPage() {
-  await requireUser();
+  const user = await requireUser();
 
   const hosts = await prisma.device.findMany({
     where: { kind: "HOST" },
@@ -53,6 +54,18 @@ export default async function HostsPage() {
     },
     orderBy: [{ status: "asc" }, { name: "asc" }],
   });
+
+  const [redroid, running] = await Promise.all([
+    getRedroidSettings(),
+    // Machines being provisioned, which have no Device row yet -- that is the
+    // whole reason the bootstrap has a table of its own. Shown here so a
+    // twenty-minute run is visible rather than looking like nothing happened.
+    prisma.redroidBootstrap.findMany({
+      where: { state: { in: ["RUNNING", "WAITING", "FAILED"] } },
+      orderBy: { startedAt: "desc" },
+      take: 10,
+    }),
+  ]);
 
   const rows = hosts.map((host) => {
     // Only the instances that are *supposed* to be there. A removed one keeps
@@ -70,19 +83,59 @@ export default async function HostsPage() {
 
   return (
     <div className="flex flex-col gap-6">
-      <div>
-        <h1 className="text-xl font-semibold tracking-tight">Machines</h1>
-        <p className="mt-1 text-sm text-muted-foreground">
-          The hosts running Redroid containers, and what each one is spending.
-        </p>
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div>
+          <h1 className="text-xl font-semibold tracking-tight">Machines</h1>
+          <p className="mt-1 text-sm text-muted-foreground">
+            The hosts running Redroid containers, and what each one is spending.
+          </p>
+        </div>
+        {user.role !== "VIEWER" ? (
+          <AddHostDialog defaultWorkers={redroid.workersPerInstance} />
+        ) : null}
       </div>
+
+      {running.length > 0 ? (
+        <div className="space-y-2 rounded-lg border p-4">
+          <p className="text-sm font-medium">Being provisioned</p>
+          {running.map((run) => {
+            const steps = Array.isArray(run.steps)
+              ? (run.steps as { name: string; ok: boolean; detail: string }[])
+              : [];
+            const failed = steps.find((step) => !step.ok);
+            return (
+              <div key={run.id} className="text-sm">
+                <span className="font-medium">{run.name}</span>{" "}
+                <span className="text-muted-foreground">{run.address}</span>
+                {" — "}
+                <span className={run.state === "FAILED" ? "text-danger" : "text-muted-foreground"}>
+                  {run.state === "RUNNING"
+                    ? // The last step that printed is the honest answer to
+                      // "where is it", and better than a percentage nobody can
+                      // check.
+                      (steps.at(-1)?.name ?? "starting") + "…"
+                    : run.state === "WAITING"
+                      ? "waiting for it to dial in"
+                      : (failed?.name ?? "failed")}
+                </span>
+                {run.state === "FAILED" && run.error ? (
+                  <pre className="mt-1 max-h-32 overflow-auto whitespace-pre-wrap text-xs text-muted-foreground">
+                    {run.error}
+                  </pre>
+                ) : null}
+              </div>
+            );
+          })}
+        </div>
+      ) : null}
 
       {rows.length === 0 ? (
         <div className="rounded-lg border border-dashed p-8 text-center">
           <p className="text-sm font-medium">No machines yet</p>
           <p className="mx-auto mt-2 max-w-prose text-sm text-muted-foreground">
-            A machine arrives here by bootstrapping itself: it installs the agent, enrolls with a
-            host token, and dials out like any box. Nothing listens on the machine afterwards.
+            Add one and it installs Docker, the binder module and the agent over a single SSH
+            connection, then enrolls itself and brings up its containers. Nothing listens on the
+            machine afterwards — it dials out, like a box.
           </p>
         </div>
       ) : (

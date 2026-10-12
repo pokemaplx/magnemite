@@ -257,6 +257,8 @@ model Device {
   /// Set on a BOX that is a Redroid container, once the instance row the hub
   /// minted its serial for has been claimed by an enrollment.
   redroidInstance RedroidInstance?
+  /// The provisioning run that produced this machine, if the hub did it.
+  redroidBootstraps RedroidBootstrap[]
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -701,6 +703,74 @@ model RedroidInstance {
   /// The renderer's own query, and what keeps an index unique per machine.
   @@unique([hostId, index])
   @@index([hostId, present])
+}
+
+/// How a bootstrap went.
+///
+/// WAITING is the state that matters and the one a simpler enum would miss:
+/// the SSH half finished and the machine has not dialled in yet. A bootstrap
+/// may have installed a kernel module that needs a reboot, after which SSH is
+/// gone and the only proof left is the socket -- so "the script exited zero"
+/// is not success, and saying so would hide the one failure that matters.
+enum RedroidBootstrapState {
+  RUNNING
+  WAITING
+  DONE
+  FAILED
+}
+
+/// A machine being provisioned, before it is a Device.
+///
+/// It needs a row of its own because of an ordering problem: the hub keys a
+/// machine on its serial, the bootstrap has to write that serial into
+/// /etc/magnemite/host.json, and none of it can hang off a `Device` that will
+/// not exist until the machine enrols with the serial this row minted.
+///
+/// It is also where the bootstrap's progress lives, which is the other half of
+/// why it exists: a bootstrap is minutes of apt, Docker, kernel modules and an
+/// image pull, and one that fails on the fourth step has to say which.
+///
+/// No credential is stored. The SSH access is used once, held in memory for the
+/// duration of the run, and dropped -- which is the whole reason this feature
+/// needs no secret store. A retry asks for it again.
+model RedroidBootstrap {
+  id String @id @default(cuid())
+
+  /// What the machine will be called, and the serial it will enrol under.
+  /// Minted here rather than on the machine: /etc/machine-id is cloned by a VPS
+  /// snapshot, and two machines claiming one row would fight over the socket.
+  name   String
+  serial String @unique
+
+  /// Where it was reached, for the operator to recognise the row by. Not a
+  /// credential, and not used again after the run.
+  address String
+
+  /// What to bring the machine to once it enrols. Applied on first contact,
+  /// which is what makes this one action rather than four.
+  desiredInstances Int  @default(0)
+  desiredWorkers   Int?
+
+  state RedroidBootstrapState @default(RUNNING)
+
+  /// One entry per `::step` line the script printed: its name, whether it
+  /// passed, and its detail. A Json array rather than a child table because it
+  /// is a short fixed list written once, and because `Json` is the one shape
+  /// that works on both providers.
+  steps Json?
+
+  /// Why it failed, capped by the caller well under MariaDB's 64 KB TEXT.
+  error String? @db.Text
+
+  /// Set when the machine finally enrols, which is what closes this out.
+  deviceId String?
+  device   Device? @relation(fields: [deviceId], references: [id], onDelete: SetNull)
+
+  startedAt  DateTime  @default(now())
+  finishedAt DateTime?
+
+  @@index([state])
+  @@index([deviceId])
 }
 
 // ---------------------------------------------------------------------------

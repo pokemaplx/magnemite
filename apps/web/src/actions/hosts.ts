@@ -213,3 +213,76 @@ export async function setHostGroup(hostId: string, groupId: string | null): Prom
     return { error: "Could not set the group for that machine." };
   }
 }
+
+/**
+ * Provision a machine, from the moment its provider handed over SSH access.
+ *
+ * The one action that is the whole point of the feature: a machine goes from an
+ * address and a password to running containers without anything else being
+ * typed. It returns as soon as the run starts, because the SSH half is minutes
+ * — apt, Docker, kernel modules, possibly a reboot — and the row it creates is
+ * what the page renders.
+ *
+ * The credential is passed straight through and kept nowhere. It is not in the
+ * row, not in the log, and not in the audit entry below — which records the
+ * machine, its address and who asked, because that is what an audit trail is
+ * for and a password is not.
+ */
+export async function bootstrapHost(input: {
+  name: string;
+  host: string;
+  port?: number;
+  username: string;
+  password?: string;
+  privateKey?: string;
+  passphrase?: string;
+  desiredInstances: number;
+  desiredWorkers: number | null;
+}): Promise<ActionState & { id?: string }> {
+  const user = await requireOperator();
+
+  const name = input.name.trim();
+  if (!name) return { error: "Give the machine a name." };
+  if (!input.host.trim()) return { error: "Where should it connect?" };
+  if (!input.username.trim()) return { error: "Which user should it log in as?" };
+  if (!input.password && !input.privateKey) {
+    return { error: "A password or a private key is needed to reach the machine." };
+  }
+  if (input.desiredInstances < 0 || input.desiredInstances > 64) {
+    return { error: "Instances must be between 0 and 64." };
+  }
+
+  // Refused here rather than discovered at the end of a twenty-minute run: the
+  // hub keys a machine on its name, and two machines sharing one would be one
+  // machine as far as the fleet is concerned.
+  const clash = await prisma.device.findFirst({
+    where: { kind: "HOST", name },
+    select: { id: true },
+  });
+  if (clash) return { error: `There is already a machine called ${name}.` };
+
+  try {
+    const { id } = await hub.bootstrapHost({ ...input, name });
+    await prisma.auditLog.create({
+      data: {
+        userId: user.id,
+        userEmail: user.email,
+        action: "redroidHost.bootstrap",
+        targetType: "RedroidBootstrap",
+        targetId: id,
+        meta: {
+          name,
+          // The address, which identifies the machine. Never the credential.
+          address: `${input.username}@${input.host}`,
+          desiredInstances: input.desiredInstances,
+        },
+      },
+    });
+    revalidatePath("/hosts");
+    return { ok: true, id };
+  } catch (err) {
+    return {
+      error: err instanceof HubError ? err.message : "Could not start provisioning that machine.",
+    };
+  }
+}

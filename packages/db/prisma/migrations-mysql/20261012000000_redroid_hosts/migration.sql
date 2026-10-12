@@ -124,3 +124,37 @@ ALTER TABLE `RedroidInstance` ADD CONSTRAINT `RedroidInstance_hostId_fkey` FOREI
 -- minted its serial, or the container would come back as a brand-new box with
 -- no history. "Remove" keeps the row; only "forget" deletes it.
 ALTER TABLE `RedroidInstance` ADD CONSTRAINT `RedroidInstance_deviceId_fkey` FOREIGN KEY (`deviceId`) REFERENCES `Device`(`id`) ON DELETE SET NULL ON UPDATE CASCADE;
+
+-- A machine being provisioned, before it is a Device.
+--
+-- Its own table because of an ordering problem: the hub keys a machine on its
+-- serial, the bootstrap writes that serial into /etc/magnemite/host.json, and
+-- none of it can hang off a Device that will not exist until the machine
+-- enrols with the serial this row minted.
+--
+-- No credential is stored here. The SSH access is used once, held in memory
+-- for the run, and dropped -- which is why this feature needs no secret store.
+
+-- CreateTable
+CREATE TABLE `RedroidBootstrap` (
+    `id` VARCHAR(191) NOT NULL,
+    `name` VARCHAR(191) NOT NULL,
+    `serial` VARCHAR(191) NOT NULL,
+    `address` VARCHAR(191) NOT NULL,
+    `desiredInstances` INTEGER NOT NULL DEFAULT 0,
+    `desiredWorkers` INTEGER NULL,
+    `state` ENUM('RUNNING', 'WAITING', 'DONE', 'FAILED') NOT NULL DEFAULT 'RUNNING',
+    `steps` JSON NULL,
+    `error` TEXT NULL,
+    `deviceId` VARCHAR(191) NULL,
+    `startedAt` DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+    `finishedAt` DATETIME(3) NULL,
+
+    UNIQUE INDEX `RedroidBootstrap_serial_key`(`serial`),
+    INDEX `RedroidBootstrap_state_idx`(`state`),
+    INDEX `RedroidBootstrap_deviceId_idx`(`deviceId`),
+    PRIMARY KEY (`id`)
+) DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
+
+-- AddForeignKey
+ALTER TABLE `RedroidBootstrap` ADD CONSTRAINT `RedroidBootstrap_deviceId_fkey` FOREIGN KEY (`deviceId`) REFERENCES `Device`(`id`) ON DELETE SET NULL ON UPDATE CASCADE;

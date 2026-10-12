@@ -26,6 +26,12 @@ RUN set -e; \
       -o /out/magnemite-agent-linux-arm ./cmd/magnemite-agent; \
     printf '%s\n' "$v" > /out/VERSION
 
+# The bootstrap script ships beside the binaries, because the hub pushes both
+# over one SSH connection when it provisions a machine. Deliberately not
+# downloaded by the machine: it would need a token to fetch anything, and at
+# that point it has none.
+COPY agent/host/bootstrap.sh /out/bootstrap.sh
+
 FROM node:22-alpine AS build
 # pnpm is baked into the image below with `corepack install`: with only
 # `corepack enable`, the first pnpm call in a fresh container downloads the

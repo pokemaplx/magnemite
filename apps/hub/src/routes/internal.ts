@@ -27,6 +27,7 @@ import {
   rotomEnabled,
   syncDevices,
 } from "../services/rotom.js";
+import { startBootstrap } from "../services/hostBootstrap.js";
 import { adoptHost, convergeHost, setInstanceCount } from "../services/redroid.js";
 import { nudge } from "../services/scheduler.js";
 import { probeRemote, storeFromUrl, storeUpload } from "../services/uploads.js";
@@ -543,6 +544,56 @@ export async function internalRoutes(app: FastifyInstance) {
     } catch (err) {
       log.error({ err, hostId: id }, "scale failed");
       return reply.status(500).send({ error: err instanceof Error ? err.message : String(err) });
+    }
+  });
+
+  /**
+   * Provision a machine over SSH, from the moment its provider handed over
+   * access.
+   *
+   * Returns as soon as the run starts. The SSH half is minutes -- apt, Docker,
+   * kernel modules, possibly a reboot -- so the row carries the progress and
+   * the dashboard renders that rather than holding a connection open for it.
+   *
+   * The credential is used once and never stored, which is why it travels in
+   * the body of this call and appears in no row, no log and no audit entry.
+   */
+  app.post("/internal/hosts/bootstrap", async (request, reply) => {
+    const parsed = z
+      .object({
+        name: z.string().min(1).max(64),
+        host: z.string().min(1),
+        port: z.number().int().min(1).max(65535).optional(),
+        username: z.string().min(1),
+        password: z.string().min(1).optional(),
+        privateKey: z.string().min(1).optional(),
+        passphrase: z.string().optional(),
+        desiredInstances: z.number().int().min(0).max(64).default(0),
+        desiredWorkers: z.number().int().min(1).max(50).nullable().optional(),
+      })
+      // One or the other. Neither means there is no way in, and without this
+      // the failure would be a timeout twenty minutes later.
+      .refine((body) => Boolean(body.password || body.privateKey), {
+        message: "a password or a private key is required",
+      })
+      .safeParse(request.body);
+    if (!parsed.success) {
+      return reply.status(400).send({ error: "invalid body", issues: parsed.error.issues });
+    }
+
+    const { name, host, port, username, password, privateKey, passphrase } = parsed.data;
+    try {
+      return await startBootstrap({
+        name,
+        access: { host, port, username, password, privateKey, passphrase },
+        desiredInstances: parsed.data.desiredInstances,
+        desiredWorkers: parsed.data.desiredWorkers ?? null,
+      });
+    } catch (err) {
+      // Deliberately not logging the error object: the credential is in the
+      // call that produced it, and an exception can carry its own input.
+      log.error({ name, host }, "could not start the bootstrap");
+      return reply.status(500).send({ error: err instanceof Error ? err.message : "failed" });
     }
   });
 

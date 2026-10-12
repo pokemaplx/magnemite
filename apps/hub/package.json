@@ -15,12 +15,14 @@
     "@prisma/client": "^6.3.1",
     "fastify": "^5.2.1",
     "pino": "^9.6.0",
+    "ssh2": "^1.17.0",
     "web-push": "^3.6.7",
     "ws": "^8.18.0",
     "zod": "^3.24.1"
   },
   "devDependencies": {
     "@types/node": "^22.10.7",
+    "@types/ssh2": "^1.15.6",
     "@types/web-push": "^3.6.4",
     "@types/ws": "^8.5.13",
     "dotenv-cli": "^8.0.0",

@@ -2,6 +2,7 @@ import type { FastifyInstance } from "fastify";
 import { enrollRequestSchema } from "@magnemite/protocol";
 import { generateToken, hashToken, prisma } from "@magnemite/db";
 import { bus } from "../bus.js";
+import { claimBootstrap } from "../services/hostBootstrap.js";
 import { env } from "../env.js";
 import { log } from "../log.js";
 
@@ -135,6 +136,15 @@ export async function enrollRoutes(app: FastifyInstance) {
         create: { deviceId: device.id },
         update: {},
       });
+      // If the hub provisioned this machine, this is the moment that becomes
+      // one action rather than four: the bootstrap row is closed out, the
+      // machine is adopted without asking -- the hub knows it was empty,
+      // because it built it -- and the instance count the operator typed is
+      // applied. A machine somebody bootstrapped by hand has no row here and
+      // goes through adoption like any other.
+      await claimBootstrap(device.id, device.serial).catch((err) =>
+        log.warn({ err, deviceId: device.id }, "could not claim the bootstrap"),
+      );
     }
 
     // Claim the instance for the box it has become. Until this runs the

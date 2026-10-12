@@ -127,3 +127,46 @@ ALTER TABLE "RedroidInstance" ADD CONSTRAINT "RedroidInstance_hostId_fkey" FOREI
 -- minted its serial, or the container would come back as a brand-new box with
 -- no history. "Remove" keeps the row; only "forget" deletes it.
 ALTER TABLE "RedroidInstance" ADD CONSTRAINT "RedroidInstance_deviceId_fkey" FOREIGN KEY ("deviceId") REFERENCES "Device"("id") ON DELETE SET NULL ON UPDATE CASCADE;
+
+-- A machine being provisioned, before it is a Device.
+--
+-- Its own table because of an ordering problem: the hub keys a machine on its
+-- serial, the bootstrap writes that serial into /etc/magnemite/host.json, and
+-- none of it can hang off a Device that will not exist until the machine
+-- enrols with the serial this row minted.
+--
+-- No credential is stored here. The SSH access is used once, held in memory
+-- for the run, and dropped -- which is why this feature needs no secret store.
+
+-- CreateEnum
+CREATE TYPE "RedroidBootstrapState" AS ENUM ('RUNNING', 'WAITING', 'DONE', 'FAILED');
+
+-- CreateTable
+CREATE TABLE "RedroidBootstrap" (
+    "id" TEXT NOT NULL,
+    "name" TEXT NOT NULL,
+    "serial" TEXT NOT NULL,
+    "address" TEXT NOT NULL,
+    "desiredInstances" INTEGER NOT NULL DEFAULT 0,
+    "desiredWorkers" INTEGER,
+    "state" "RedroidBootstrapState" NOT NULL DEFAULT 'RUNNING',
+    "steps" JSONB,
+    "error" TEXT,
+    "deviceId" TEXT,
+    "startedAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    "finishedAt" TIMESTAMP(3),
+
+    CONSTRAINT "RedroidBootstrap_pkey" PRIMARY KEY ("id")
+);
+
+-- CreateIndex
+CREATE UNIQUE INDEX "RedroidBootstrap_serial_key" ON "RedroidBootstrap"("serial");
+
+-- CreateIndex
+CREATE INDEX "RedroidBootstrap_state_idx" ON "RedroidBootstrap"("state");
+
+-- CreateIndex
+CREATE INDEX "RedroidBootstrap_deviceId_idx" ON "RedroidBootstrap"("deviceId");
+
+-- AddForeignKey
+ALTER TABLE "RedroidBootstrap" ADD CONSTRAINT "RedroidBootstrap_deviceId_fkey" FOREIGN KEY ("deviceId") REFERENCES "Device"("id") ON DELETE SET NULL ON UPDATE CASCADE;

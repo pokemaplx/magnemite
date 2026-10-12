@@ -252,6 +252,24 @@ export const hub = {
    * desired set would make every one of them an orphan.
    */
   adoptHost: (id: string) => call<{ adopted: number }>(`/internal/hosts/${id}/adopt`),
+  /**
+   * Provision a machine over SSH and bring it to N containers.
+   *
+   * Returns as soon as the run starts: the SSH half is minutes, and the row it
+   * creates carries the progress. The credential goes no further than this
+   * call — it is used once and stored nowhere.
+   */
+  bootstrapHost: (input: {
+    name: string;
+    host: string;
+    port?: number;
+    username: string;
+    password?: string;
+    privateKey?: string;
+    passphrase?: string;
+    desiredInstances: number;
+    desiredWorkers: number | null;
+  }) => call<{ id: string; serial: string }>("/internal/hosts/bootstrap", input),
   /** Re-send the file. `force` sends it even when the hash already matches. */
   convergeHost: (id: string, force = false) =>
     call<{ sent: boolean; reason?: string }>(`/internal/hosts/${id}/converge`, { force }),
