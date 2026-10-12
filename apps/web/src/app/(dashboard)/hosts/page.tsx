@@ -2,6 +2,7 @@ import Link from "next/link";
 import { getRedroidSettings, prisma } from "@magnemite/db";
 import { requireUser } from "@/lib/session";
 import { AddHostDialog } from "@/components/add-host-dialog";
+import { DismissBootstrap } from "@/components/dismiss-bootstrap";
 import {
   Table,
   TableBody,
@@ -105,19 +106,34 @@ export default async function HostsPage() {
             const failed = steps.find((step) => !step.ok);
             return (
               <div key={run.id} className="text-sm">
-                <span className="font-medium">{run.name}</span>{" "}
-                <span className="text-muted-foreground">{run.address}</span>
-                {" — "}
-                <span className={run.state === "FAILED" ? "text-danger" : "text-muted-foreground"}>
-                  {run.state === "RUNNING"
-                    ? // The last step that printed is the honest answer to
-                      // "where is it", and better than a percentage nobody can
-                      // check.
-                      (steps.at(-1)?.name ?? "starting") + "…"
-                    : run.state === "WAITING"
-                      ? "waiting for it to dial in"
-                      : (failed?.name ?? "failed")}
-                </span>
+                <div className="flex flex-wrap items-center gap-x-1 gap-y-1">
+                  <span className="font-medium">{run.name}</span>{" "}
+                  <span className="text-muted-foreground">{run.address}</span>
+                  {" — "}
+                  <span
+                    className={
+                      run.state === "FAILED" ? "text-destructive" : "text-muted-foreground"
+                    }
+                  >
+                    {run.state === "RUNNING"
+                      ? // The last step that printed is the honest answer to
+                        // "where is it", and better than a percentage nobody can
+                        // check.
+                        (steps.at(-1)?.name ?? "starting") + "…"
+                      : run.state === "WAITING"
+                        ? "waiting for it to dial in"
+                        : (failed?.name ?? "failed")}
+                  </span>
+                  {/* Nothing prunes these rows, so a failure stays here until
+                      somebody says otherwise — which is right, and needs a way
+                      to say it. A run still genuinely going is refused by the
+                      action rather than hidden by the page. */}
+                  {user.role !== "VIEWER" ? (
+                    <span className="ml-auto flex items-center gap-2">
+                      <DismissBootstrap id={run.id} name={run.name} />
+                    </span>
+                  ) : null}
+                </div>
                 {run.state === "FAILED" && run.error ? (
                   <pre className="mt-1 max-h-32 overflow-auto whitespace-pre-wrap text-xs text-muted-foreground">
                     {run.error}

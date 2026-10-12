@@ -160,7 +160,7 @@ export function AddHostDialog({ defaultWorkers }: { defaultWorkers: number }) {
               </p>
             </div>
 
-            {error ? <p className="text-sm text-danger">{error}</p> : null}
+            {error ? <p className="text-sm text-destructive">{error}</p> : null}
           </div>
 
           <DialogFooter className="mt-6">

@@ -178,7 +178,7 @@ export function HostInstancesTable({
         </Table>
       )}
 
-      {error ? <p className="px-6 pb-4 text-sm text-danger">{error}</p> : null}
+      {error ? <p className="px-6 pb-4 text-sm text-destructive">{error}</p> : null}
 
       <ConfirmDialog
         open={doomed !== null}

@@ -98,7 +98,7 @@ export function HostScaleForm({
               {pending ? "Adopting…" : "Adopt this machine"}
             </Button>
           ) : null}
-          {error ? <p className="text-danger">{error}</p> : null}
+          {error ? <p className="text-destructive">{error}</p> : null}
           {message ? <p>{message}</p> : null}
         </CardContent>
       </Card>
@@ -170,7 +170,7 @@ export function HostScaleForm({
             </p>
           )}
           {overMemory ? (
-            <p className="text-danger">
+            <p className="text-destructive">
               Past what this machine&apos;s memory allows. The OOM killer takes a container down
               rather than slowing it, so boxes will disappear under load.
             </p>
@@ -181,13 +181,13 @@ export function HostScaleForm({
             </p>
           ) : null}
           {!valid ? (
-            <p className="text-danger">
+            <p className="text-destructive">
               Instances must be 0–64, and workers 1–50. Zero instances is how a machine is drained.
             </p>
           ) : null}
         </div>
 
-        {error ? <p className="text-sm text-danger">{error}</p> : null}
+        {error ? <p className="text-sm text-destructive">{error}</p> : null}
         {message ? <p className="text-sm text-muted-foreground">{message}</p> : null}
       </CardContent>
     </Card>

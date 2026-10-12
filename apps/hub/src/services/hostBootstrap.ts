@@ -197,27 +197,41 @@ async function run(id: string, serial: string, name: string, access: SshAccess):
         await upload(client, await redroidFile(name), `${REMOTE_DIR}/redroid/${name}`, mode);
       }
 
-      // The token is passed in the environment rather than on the command
-      // line, so it does not land in the machine's process list where any
-      // other user could read it.
-      const command = [
-        `cd ${REMOTE_DIR}`,
+      // Uploaded as a file and sourced, rather than written into the command.
+      //
+      // An ssh exec request is run as `$SHELL -c '<command>'`, so everything
+      // in it is that shell's argv — and argv is world-readable through
+      // /proc/<pid>/cmdline, for the minutes a bootstrap takes. The enrollment
+      // token would be sitting there for any other user on the machine. An
+      // environment is readable only by root and the process's owner, which is
+      // the difference being bought here.
+      //
+      // Deleted by the same command that sources it, so the file exists for
+      // the moment between the two: it is 0600 in a 0700 directory, and the
+      // variables it set survive in the environment the script inherits.
+      const envFile =
         [
-          `MAGNEMITE_SERVER=${shellQuote(env.MAGNEMITE_PUBLIC_URL.replace(/\/$/, ""))}`,
-          `MAGNEMITE_SERIAL=${shellQuote(serial)}`,
-          `MAGNEMITE_NAME=${shellQuote(name)}`,
-          `MAGNEMITE_TOKEN=${shellQuote(token)}`,
+          `export MAGNEMITE_SERVER=${shellQuote(env.MAGNEMITE_PUBLIC_URL.replace(/\/$/, ""))}`,
+          `export MAGNEMITE_SERIAL=${shellQuote(serial)}`,
+          `export MAGNEMITE_NAME=${shellQuote(name)}`,
+          `export MAGNEMITE_TOKEN=${shellQuote(token)}`,
           // The tag the compose file will name. One value from one place, so
           // the machine cannot build one image and be asked to run another.
-          `MAGNEMITE_IMAGE=${shellQuote(REDROID_IMAGE)}`,
+          `export MAGNEMITE_IMAGE=${shellQuote(REDROID_IMAGE)}`,
           // The port the firewall has to keep open, which is the one this
           // connection just came in on. Hardcoding 22 on a machine whose sshd
           // listens elsewhere would lock the operator out of their own VPS
           // halfway through provisioning it.
-          `MAGNEMITE_SSH_PORT=${shellQuote(String(access.port ?? 22))}`,
-          `AGENT_BIN=./magnemite-agent`,
-          "sh ./bootstrap.sh",
-        ].join(" "),
+          `export MAGNEMITE_SSH_PORT=${shellQuote(String(access.port ?? 22))}`,
+          `export AGENT_BIN=./magnemite-agent`,
+        ].join("\n") + "\n";
+      await upload(client, Buffer.from(envFile, "utf8"), `${REMOTE_DIR}/bootstrap.env`, 0o600);
+
+      const command = [
+        `cd ${REMOTE_DIR}`,
+        ". ./bootstrap.env",
+        "rm -f ./bootstrap.env",
+        "sh ./bootstrap.sh",
       ].join(" && ");
 
       const publish = stepWriter(id);
@@ -463,6 +477,13 @@ async function hostToken(name: string): Promise<string> {
       kind: "HOST",
       autoApprove: true,
       maxUses: 1,
+      // A run that never finishes leaves this token behind, and an
+      // auto-approving HOST token with no expiry is one that lives forever —
+      // in a list nobody revisits, for a machine that may have been
+      // decommissioned. A week is longer than any real provisioning, reboot
+      // and second attempt put together, and short enough that forgetting it
+      // is not permanent.
+      expiresAt: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000),
     },
   });
   return token;

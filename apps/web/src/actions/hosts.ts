@@ -286,3 +286,97 @@ export async function bootstrapHost(input: {
     };
   }
 }
+
+/**
+ * How long a run may say RUNNING before nothing can still be working on it.
+ *
+ * The hub's own SSH timeout, which is what makes this a fact rather than a
+ * guess: a live run gives up by itself after it, so a row older than this is
+ * either finished or orphaned — and orphaned is what a hub restart mid-run
+ * leaves behind, because the run lives in a closure that goes with the process.
+ */
+const RUN_ABANDONED_AFTER_MS = 20 * 60 * 1000;
+
+/**
+ * Takes a finished or abandoned provisioning off the page.
+ *
+ * The Machines page lists every run that is not DONE, and nothing prunes them,
+ * so a failure stays on screen until somebody says otherwise. That is right —
+ * a provisioning that failed at four in the morning should still be there at
+ * nine — but it needs a way to say otherwise, and until now the only one was
+ * SQL.
+ *
+ * A run that is genuinely still going is refused rather than hidden: the row is
+ * the only thing watching it, and dismissing it would leave an SSH session
+ * working on a machine nobody is being told about.
+ */
+export async function dismissBootstrap(id: string): Promise<ActionState> {
+  const user = await requireOperator();
+
+  const row = await prisma.redroidBootstrap.findUnique({
+    where: { id },
+    select: {
+      name: true,
+      serial: true,
+      state: true,
+      startedAt: true,
+      // Kept for the audit entry: once the row is deleted these numbers exist
+      // nowhere else, and they are what the operator asked for.
+      desiredInstances: true,
+      desiredWorkers: true,
+    },
+  });
+  // Already gone. Idempotent on purpose: two clicks, or two tabs, must not
+  // turn into an error the second time — but the page that offered the button
+  // is showing a row that is not there, so it has to be refreshed or Dismiss
+  // looks like a button that does nothing.
+  if (!row) {
+    revalidatePath("/hosts");
+    return { ok: true };
+  }
+
+  if (row.state === "RUNNING" && Date.now() - row.startedAt.getTime() < RUN_ABANDONED_AFTER_MS) {
+    // Deliberately not "wait and it will resolve itself". That is only true of
+    // a run whose hub is alive: the timeout lives in the same process as the
+    // run, so a hub that was killed mid-run takes the clock with it and
+    // nothing will ever move this row. Both ways out are named instead.
+    // Refreshed even on the refusal: the row may have moved on since the page
+    // was rendered, and an operator told "it is still running" should be
+    // looking at what it is still running.
+    revalidatePath("/hosts");
+    return {
+      error:
+        "That provisioning started less than twenty minutes ago and may still be running. " +
+        "A live run gives up on its own after twenty; one whose hub has already been restarted " +
+        "is marked failed the next time the hub starts, and can be dismissed then.",
+    };
+  }
+
+  try {
+    await prisma.redroidBootstrap.delete({ where: { id } });
+    await prisma.auditLog.create({
+      data: {
+        userId: user.id,
+        userEmail: user.email,
+        action: "redroidHost.dismissBootstrap",
+        targetType: "RedroidBootstrap",
+        targetId: id,
+        // What was dismissed, since the row itself is gone: this entry is the
+        // only remaining record that the attempt happened at all — including
+        // what the machine was going to be brought up to, which the deleted
+        // row was the only place holding.
+        meta: {
+          name: row.name,
+          serial: row.serial,
+          state: row.state,
+          desiredInstances: row.desiredInstances,
+          desiredWorkers: row.desiredWorkers,
+        },
+      },
+    });
+    revalidatePath("/hosts");
+    return { ok: true };
+  } catch {
+    return { error: "Could not dismiss that provisioning." };
+  }
+}
