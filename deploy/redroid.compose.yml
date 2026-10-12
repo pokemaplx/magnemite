@@ -22,7 +22,10 @@ name: magnemite-redroid
 # mappings, not sequences, so each box spells its properties out. A new box is
 # this block copied with a new name, volume and serial.
 x-box: &box
-  image: ${REDROID_IMAGE:-magnemite/redroid:1.0.0}
+  # Tracks the `redroid=` line of VERSION, which is what `make redroid` tags.
+  # It is not the agent version: the agent updates itself over the wire, and a
+  # moving tag here would cold-boot every container on the machine for nothing.
+  image: ${REDROID_IMAGE:-magnemite/redroid:1}
   # Redroid needs the host's binder devices; it does not run unprivileged.
   privileged: true
   restart: unless-stopped

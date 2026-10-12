@@ -43,15 +43,30 @@ sudo modprobe ashmem_linux
 
 ```sh
 make redroid
-# → magnemite/redroid:1.0.0
+# → magnemite/redroid:1
 ```
 
 Unlike `make module`, this takes no `SERVER` and no `TOKEN`. **The image holds
 no secret**, so one image serves every fleet — the hub URL and the enrollment
 token are properties passed to each container at run time.
 
-The base image is `REDROID_BASE`, default
-`redroid/redroid:13.0.0_64only-latest`.
+The tag comes from the `redroid=` line of `VERSION`, and deliberately **not**
+from the agent's. The agent inside is only a seed that each box's own
+self-update replaces, so a tag that moved with every agent release would change
+the `image:` line and have Docker recreate every container on the machine — a
+full Android cold boot each, to deliver a binary the boxes would have swapped
+in seconds on their own. Bump `redroid=` when the base image, the start script
+or the init service changes.
+
+The base image is `REDROID_BASE`, default `abing7k/redroid:a11_magisk_arm` —
+Magisk-prerooted, because [Cosmog](https://sylvie.fyi/cosmog/) needs Magisk
+hidden from its worker processes and upstream Redroid ships none.
+
+<Callout type="info" title="`_arm` is the host, not a 32-bit guest">
+  That image is `linux/arm64`, which is why the arm64 agent is still the right one. The `_amd` tags
+  are the x86_64 variants, and there is no `a11_magisk_ndk_arm` because `ndk` is the ARM native
+  bridge — nothing an ARM host needs.
+</Callout>
 
 ## Run the boxes
 

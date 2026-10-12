@@ -68,8 +68,23 @@ module: agent ## Package the Magisk module zip into dist/
 # Redroid boxes: Android in a container instead of on a shelf. The image is the
 # install, so unlike the Magisk zip it takes no SERVER or TOKEN — those are
 # properties on the docker command line, and the image stays free of secrets.
-REDROID_BASE ?= redroid/redroid:13.0.0_64only-latest
-REDROID_TAG  ?= magnemite/redroid:$(VERSION)
+#
+# Magisk-prerooted, because Cosmog needs it. `_arm` in that tag is the *host*
+# architecture, not a 32-bit guest: the image is linux/arm64, which is why the
+# Dockerfile copies the arm64 agent and the arm64-only policy still holds.
+# There is no `a11_magisk_ndk_arm`, and nothing is missing -- `ndk` is the ARM
+# native bridge, which an ARM host has no use for.
+REDROID_BASE ?= abing7k/redroid:a11_magisk_arm
+# Versioned by what is *in* the image -- the base, the start script, the .rc --
+# and deliberately not by the agent version.
+#
+# The agent inside is only a seed that the box's own self-update replaces, so
+# tying the tag to it would move the tag on every agent release, change the
+# rendered `image:` line, and make compose recreate every container on the
+# machine: a full Android cold boot each, to deliver a binary the containers
+# would have swapped in seconds with a syscall.Exec.
+REDROID_VERSION ?= $(shell awk -F= '/^redroid=/ { print $$2 }' VERSION)
+REDROID_TAG     ?= magnemite/redroid:$(REDROID_VERSION)
 
 .PHONY: redroid
 redroid: agent ## Build the Redroid image with the agent baked in (arm64 host)
