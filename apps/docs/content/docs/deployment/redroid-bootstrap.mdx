@@ -1,0 +1,314 @@
+---
+title: Provisioning a machine
+description: One click from the moment a provider hands over SSH access — what the bootstrap does to a fresh VPS, what it deliberately leaves alone, and where to look when a step fails.
+icon: ServerCog
+---
+
+import { Step, Steps } from "fumadocs-ui/components/steps";
+
+Everything here starts where a provider's job ends: **you have an address and
+an SSH key or password**, and nothing else. From there, bringing a machine into
+the fleet is one form.
+
+Buying the machine is not part of it and does not need to be — that would mean
+one integration per provider and a stored credential with spending power.
+
+<Callout type="info" title="arm64 only">
+  The fleet's `.apkm` bundles carry an `arm64-v8a` split and the agent matches ABI exactly, so an
+  x86_64 machine is refused at the first step rather than half-provisioned. Any arm64 Linux with a
+  kernel that can do binder works — a VPS, an Ampere instance, a box in a rack.
+</Callout>
+
+## The one click
+
+**Machines → Add machine.**
+
+| Field              | Notes                                                                                     |
+| ------------------ | ----------------------------------------------------------------------------------------- |
+| **Name**           | The machine's handle, renameable later. Its serial is minted separately and never changes |
+| **Address**        | IP or hostname                                                                            |
+| **SSH user**       | `root` by default. Anything else needs passwordless `sudo`                                |
+| **Port**           | 22 by default. Whatever is put here is also the port the firewall keeps open              |
+| **Password / key** | Used once, for this run, and never stored                                                 |
+| **Instances**      | How many containers it should end up running. `0` provisions the machine and runs nothing |
+| **Workers**        | Workers per instance, which is what reaches a scanner through `{{device.workers}}`        |
+
+Press **Create** and the hub opens one outbound SSH connection, pushes the agent
+binary, the bootstrap script and the three files that build the Redroid image,
+runs the script, and follows its progress step by step. Then the machine enrolls
+itself, is adopted, and brings its instances up.
+
+<Callout type="warn" title="The SSH credential is never stored">
+  It is held in memory for the length of the run and dropped when it ends — it is not in the
+  database, not in the step log and not in the audit entry, which records the machine, the address
+  and who pressed the button. A retry asks for it again rather than keeping it warm. This is the
+  only moment anything in Magnemite connects _towards_ a machine; afterwards the agent dials out,
+  like every box.
+</Callout>
+
+### Success is the machine dialling in
+
+The script exiting zero proves the machine was **prepared**, not that it works,
+so the run goes to **waiting** rather than done. What closes it out is the agent
+reaching the hub on its own — the same rule the agent's
+[self-update](/docs/fleet/update) follows, where the fresh `hello` is the proof.
+
+It matters here because a step may install a kernel module that needs a reboot,
+after which SSH is gone and the socket is the only evidence left.
+
+So a run has four states:
+
+| State       | Meaning                                                                                                            |
+| ----------- | ------------------------------------------------------------------------------------------------------------------ |
+| **running** | The SSH half is working through the steps                                                                          |
+| **waiting** | The script finished; the machine has not dialled in yet. Normal for a minute or two, and for longer after a reboot |
+| **done**    | The machine enrolled, was adopted, and was scaled to the instance count asked for                                  |
+| **failed**  | A step refused, or the connection died. The step it stopped on is in the row                                       |
+
+If the hub restarts mid-run — a deploy, a crash, a file save under `tsx watch` —
+the row would be left in **running** with nothing watching it. Those are failed
+on the next boot with an explanation, because the bootstrap is safe to run
+again. **waiting** is deliberately left alone: only the machine can close that
+one out.
+
+## What the script does
+
+`agent/host/bootstrap.sh`, POSIX `sh`, re-runnable, and the same artifact
+whether the hub runs it or you do. Each stage prints one
+`::step <name> <ok|warn|fail>` line, which is what the dashboard turns into
+progress — a bootstrap that fails on the fourth stage has to say which one.
+
+<Steps>
+
+<Step>
+### arch · root
+
+`aarch64` or stop, and root or stop. The first failure is the one most likely to
+happen on a machine somebody just bought.
+
+</Step>
+
+<Step>
+### modules — the step everyone misses
+
+`binder_linux` lives in `linux-modules-extra-$(uname -r)`, and **cloud images
+frequently do not install it**. Without binder a container boots and Android
+never comes up, which looks like anything except a missing kernel module.
+
+Persisted by writing `/etc/modules-load.d/magnemite.conf` and
+`/etc/modprobe.d/magnemite.conf` — files we own, overwritten rather than
+appended to, which is what makes re-running safe.
+
+A missing package is a **warning**, not a failure: a kernel with binderfs built
+in needs no module at all.
+
+</Step>
+
+<Step>
+### binder — the outcome, not the step
+
+Redroid's own documentation disagrees with itself about whether a modern kernel
+needs the module, so what gets verified is the end state: that `/dev/binder`,
+`/dev/binderfs` or `binder` in `/proc/filesystems` is actually there. This is
+the one hardware-ish refusal — a kernel without it cannot run Redroid at all.
+
+</Step>
+
+<Step>
+### pidmax
+
+Every Redroid container writes `65535` into `/proc/sys/kernel/pid_max` at boot,
+for its own reasons, and `/proc/sys` is not namespaced — so a box silently
+changes a setting for the whole machine. Redroid genuinely needs it below 65536,
+so the value is not the problem; being a surprise is. It is set here and
+persisted to `/etc/sysctl.d/`, where somebody can see it.
+
+</Step>
+
+<Step>
+### docker
+
+An engine **and** compose v2 as a CLI plugin. Docker's own apt repository first,
+because it is uniform across Debian 11–13 and Ubuntu 22.04+ on arm64 and carries
+the engine, the compose plugin and buildx; the distro's `docker.io` second, for
+a machine that cannot reach `download.docker.com`; the convenience script last.
+
+Success is judged by `docker compose version`, never by apt's exit code.
+
+<Callout type="warn" title="Why not just `apt-get install docker.io docker-compose-v2`">
+  Because that is what it used to be, and it is how a paid arm64 VPS came back with no Docker at
+  all. **No Debian release has ever had a `docker-compose-v2` package**, and apt refuses the whole
+  transaction when one name is unknown — so `docker.io` was never installed either, under the
+  message "could not install docker". Selecting the plugin by distro package name cannot be made to
+  work: Debian 13 calls it `docker-compose`, which is the name Debian 12 uses for the Python v1 tool
+  that `docker compose` cannot use.
+</Callout>
+
+</Step>
+
+<Step>
+### swap
+
+A swap file sized to RAM, which is the one stage needing a real guard — both the
+file and its `fstab` line must not be created twice. Worth doing: many workers
+on one machine is where a VPS runs out of memory, and swap is what stands
+between that and the OOM killer taking boxes down.
+
+A machine where it could not be created is a warning. It runs; it just reaches
+the OOM killer sooner, and the dashboard shows `0 B` as a real zero.
+
+</Step>
+
+<Step>
+### image
+
+The Redroid image, **built** here rather than pulled, because there is nothing
+to pull from: the tag is local and this project publishes no registry. Skipped
+when the tag is already there.
+
+A failure here is a warning, not a refusal — the machine is otherwise ready and
+will enroll. The converge is what fails, and it says why on the machine page,
+which is a better place to find out than halfway through a 780 MB build nobody
+is watching.
+
+</Step>
+
+<Step>
+### harden
+
+See [below](#the-hardening) — a firewall, fail2ban and NTP.
+
+</Step>
+
+<Step>
+### config · agent
+
+`/etc/magnemite/host.json` (`0600`, in a `0700` directory) with the hub URL, the
+minted serial, the name and a host enrollment token, then the binary into
+`/usr/local/bin` and `magnemite-host.service` enabled and started.
+
+On a re-run an existing config is **kept**: it holds a device token by then, and
+rewriting it would have the machine enroll a second time as a second row.
+
+</Step>
+
+</Steps>
+
+The script also leaves a copy of itself at
+`/usr/local/lib/magnemite/bootstrap.sh`, which is what lets the hub re-run it
+later over the agent's own socket, with no SSH and no credential.
+
+## The hardening
+
+A Redroid host is unusually easy to lock down, because **nothing on it listens**:
+the rendered compose publishes no ports and the agent dials out, so the only
+thing that ever needs to reach the machine is whoever holds the SSH key.
+
+| What                                 | Why                                                                                                                                                                   |
+| ------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `ufw`, deny incoming, allow outgoing | Outbound is how everything here works — the agent dials the hub, docker pulls, apt updates                                                                            |
+| SSH allowed on its real port         | The port the hub connected on, plus any port `sshd`'s own config names                                                                                                |
+| `fail2ban`, with an `sshd` jail      | The port is written into the jail, and the backend is journald — Debian 12 and later ship no `/var/log/auth.log` and the default jail fails to start looking for it   |
+| NTP via `timedatectl`                | A drifted clock breaks TLS before it breaks anything else, and the symptom is an agent that cannot finish a handshake — which reads as a network fault and is not one |
+
+<Callout type="warn" title="The firewall never hardcodes port 22">
+  Hardcoding 22 on a machine whose `sshd` listens elsewhere would lock an operator out of their own
+  VPS, halfway through provisioning it. Every port the hub passed or `sshd -T` resolves is allowed —
+  a spare rule costs nothing and a missing one costs the machine — and anything that is not a bare
+  number is discarded.
+</Callout>
+
+### What is deliberately not here
+
+Three things off the usual VPS checklist are missing on purpose, and the script
+says so at the bottom of the file so nobody adds them back believing they were
+forgotten.
+
+- **`unattended-upgrades`**, which on _this_ machine is actively harmful.
+  `linux-modules-extra` is per kernel version, so an unattended upgrade that
+  installs a new kernel leaves binder behind — and after the next reboot **every
+  container fails to come up**, with nothing in Magnemite to explain it, because
+  the containers are simply gone.
+- **A full `apt upgrade`**, the same hazard with worse timing: it can stage a new
+  kernel while the old one is still running, so the modules installed moments
+  earlier are for a kernel the machine is about to stop using.
+- **Ports 80 and 443.** Nothing here serves HTTP. The dashboard and the hub are
+  somewhere else entirely, and this machine only ever dials out to them.
+
+<Callout type="warn" title="ufw does not cover Docker">
+  Docker writes its own iptables rules, and a published container port bypasses `ufw` completely.
+  Moot today, because the rendered compose publishes nothing — which is exactly why the firewall can
+  be this tight. Worth knowing before publishing a port to debug a container.
+</Callout>
+
+## The kernel trap, and re-running
+
+The replacement for automatic upgrades is doing it on purpose. When a machine
+takes a new kernel, the modules have to be installed for **that** kernel, which
+is what re-running the bootstrap does: it reaches the copy on the machine over
+the agent's own socket — no SSH, no credential — and skips everything already
+satisfied.
+
+The signature to look for is a whole machine going wrong at once right after a
+reboot: `HOST_DOCKER_DOWN`, or every instance down together. The **Kernel** fact
+on the machine page is there for this reason — watching it move is how the trap
+gets caught before it bites.
+
+<Callout type="info" title="Idempotence is a requirement, not a nicety">
+  Running the script twice must change nothing and report every step as already satisfied, because
+  the whole recovery path depends on it. The two stages with real guards are the swap file (must not
+  be recreated or added to `fstab` twice) and a `binder_linux` that is already loaded.
+</Callout>
+
+## When a step fails
+
+The step it stopped on, and what the step said, are on the row — that is the
+whole reason the script prints markers instead of just failing. The longer output
+stays on the machine:
+
+```sh
+/tmp/magnemite-docker.log     # every docker install attempt, in order
+/tmp/magnemite-build.log      # the Redroid image build
+/tmp/magnemite-harden.log     # ufw, fail2ban, apt
+journalctl -u magnemite-host  # the agent, once it is running
+```
+
+A failed run is safe to start again from the form. Nothing is half-written that
+a second run does not simply skip.
+
+## The manual path
+
+Nothing above is privileged, and the hub holding SSH access is optional. Build
+the binary, copy it and the script across, and run it with the same environment:
+
+```sh
+make agent
+
+scp agent/bin/magnemite-agent-linux-arm64 root@203.0.113.10:/tmp/magnemite-agent
+scp agent/host/bootstrap.sh root@203.0.113.10:/tmp/
+```
+
+```sh title="on the machine"
+MAGNEMITE_SERVER=https://magnemite.example.com \
+MAGNEMITE_TOKEN=<host enrollment token> \
+MAGNEMITE_NAME=hel-01 \
+MAGNEMITE_SERIAL=<any stable, unique value> \
+MAGNEMITE_SSH_PORT=22 \
+AGENT_BIN=/tmp/magnemite-agent \
+sh /tmp/bootstrap.sh
+```
+
+Same artifact, two drivers. The host enrollment token comes from
+**Settings → Enrollment**; see [the machines page](/docs/fleet/redroid-hosts)
+for what happens after it enrolls.
+
+<Callout type="warn" title="A serial is identity">
+  Pick one and never change it. A changed serial is a new machine with a new row and no history —
+  and do not use `/etc/machine-id`, because imaging a VPS from a snapshot clones it and two machines
+  would then fight over one row forever. When the hub drives the bootstrap it mints this value and
+  remembers it across re-runs.
+</Callout>
+
+The image build is skipped on this path unless `MAGNEMITE_IMAGE` is set and the
+`redroid/` directory sits beside the script. `make redroid` from a checkout on
+the machine does the same job — it needs an arm64 host either way.

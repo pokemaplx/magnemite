@@ -15,9 +15,11 @@ fleet table, because the question is different: the fleet table answers "which
 box needs attention", and a machine would be an empty row in every column over
 there — no scanner, no MITM, no installed version.
 
-<Callout type="info" title="What this page covers">
-  The model and the screens, which are in the tree. The host-mode agent and the bootstrap that
-  brings a new machine up are being built; the commands land here when they do.
+<Callout type="info" title="Getting a machine here in the first place">
+  This page is the model and the screens. Turning a bare VPS into one of these — one form, from the
+  moment a provider hands over SSH access — is [provisioning a
+  machine](/docs/deployment/redroid-bootstrap), which also covers what the bootstrap does to the
+  machine and what it deliberately leaves alone.
 </Callout>
 
 ## A machine is a Device
@@ -98,7 +100,8 @@ keeps its row, and counting it would make a drained machine look broken.
   `linux-modules-extra` is per kernel version, so an `apt upgrade` that installs
   a new kernel leaves binder behind and **every container fails to come up after
   the reboot**. Watching the kernel move is how that gets caught before it
-  bites.
+  bites, and [re-running the bootstrap](/docs/deployment/redroid-bootstrap#the-kernel-trap-and-re-running)
+  is the fix.
 - **Load** — the device load card, unchanged, and its history button goes to
   `/devices/<id>/metrics`. Both work for the same reason: a machine is a Device,
   so its readings are in the same table and the same component draws them.

@@ -1,5 +1,5 @@
 {
   "title": "Deployment",
   "icon": "Server",
-  "pages": ["docker-compose", "coolify", "environment", "settings"]
+  "pages": ["docker-compose", "coolify", "redroid-bootstrap", "environment", "settings"]
 }
