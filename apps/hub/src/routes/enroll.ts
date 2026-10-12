@@ -124,6 +124,19 @@ export async function enrollRoutes(app: FastifyInstance) {
       data: { uses: { increment: 1 } },
     });
 
+    // A host needs its satellite row, which carries the compose project and
+    // the per-machine defaults a box has no use for. Upserted rather than
+    // created, because a machine that re-enrolls after losing its config must
+    // keep the instances already sitting on it as containers and volumes --
+    // creating a fresh row would orphan every one of them.
+    if (kind === "HOST") {
+      await prisma.redroidHost.upsert({
+        where: { deviceId: device.id },
+        create: { deviceId: device.id },
+        update: {},
+      });
+    }
+
     // Claim the instance for the box it has become. Until this runs the
     // instance reads as "running, not enrolled", which is the state an
     // operator setting a machine up most needs to be able to see -- and the

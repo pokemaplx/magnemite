@@ -75,12 +75,58 @@ func TestUptimeSeconds(t *testing.T) {
 
 func TestCgroupMemory(t *testing.T) {
 	cases := []struct {
-		name          string
-		max, current  string
-		wantTotal     uint64
-		wantAvailable uint64
-		wantOK        bool
+		name               string
+		max, current, stat string
+		wantTotal          uint64
+		wantAvailable      uint64
+		wantOK             bool
 	}{
+		{
+			// The reading this fix exists for. Android mmaps the ROM and the
+			// APKs and the scanner reads files, all of it charged to the box as
+			// page cache -- so the unsubtracted number reports a healthy idle
+			// box as nearly full and the chart flatlines at the ceiling.
+			name:          "page cache is not memory used",
+			max:           "4294967296\n",
+			current:       "4000000000\n",
+			stat:          "anon 500000000\nfile 3500000000\ninactive_file 3400000000\nactive_file 100000000\n",
+			wantTotal:     4294967296,
+			wantAvailable: 4294967296 - 600000000,
+			wantOK:        true,
+		},
+		{
+			// docker's own guard, and not paranoia: the two values are separate
+			// reads, so a box at its limit can read a larger inactive_file than
+			// the usage sampled a moment earlier. Subtracting anyway would
+			// underflow to sixteen exabytes available.
+			name:          "inactive_file above usage is ignored",
+			max:           "1000\n",
+			current:       "400\n",
+			stat:          "inactive_file 900\n",
+			wantTotal:     1000,
+			wantAvailable: 600,
+			wantOK:        true,
+		},
+		{
+			// A missing memory.stat reports the raw usage rather than deferring
+			// to meminfo, which is what docker does: the limit is still the
+			// box's own, and the host's total would be a worse answer.
+			name:          "no memory.stat falls back to the raw usage",
+			max:           "1000\n",
+			current:       "400\n",
+			wantTotal:     1000,
+			wantAvailable: 600,
+			wantOK:        true,
+		},
+		{
+			name:          "a malformed inactive_file is ignored",
+			max:           "1000\n",
+			current:       "400\n",
+			stat:          "inactive_file not-a-number\n",
+			wantTotal:     1000,
+			wantAvailable: 600,
+			wantOK:        true,
+		},
 		{
 			name:          "limited container",
 			max:           "8589934592\n",
@@ -119,7 +165,7 @@ func TestCgroupMemory(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			total, available, ok := cgroupMemory(tc.max, tc.current)
+			total, available, ok := cgroupMemory(tc.max, tc.current, tc.stat)
 			if ok != tc.wantOK {
 				t.Fatalf("cgroupMemory() ok = %v, want %v", ok, tc.wantOK)
 			}

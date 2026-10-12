@@ -545,6 +545,7 @@ func (a *Android) Memory() (uint64, uint64) {
 	if total, available, ok := cgroupMemory(
 		readProc("/sys/fs/cgroup/memory.max"),
 		readProc("/sys/fs/cgroup/memory.current"),
+		readProc("/sys/fs/cgroup/memory.stat"),
 	); ok {
 		return total, available
 	}
@@ -554,7 +555,24 @@ func (a *Android) Memory() (uint64, uint64) {
 // cgroupMemory reads the cgroup v2 limit and usage. Not ok when there is no
 // cgroup at all, or when it is unlimited — `memory.max` reads "max" then, and
 // the host's own total is the honest answer, which is what a real box gives.
-func cgroupMemory(max, current string) (uint64, uint64, bool) {
+//
+// `memory.current` includes reclaimable page cache, which the kernel documents
+// as part of what the controller charges, and that is not what anyone means by
+// "memory used". Android mmaps the ROM and the APKs, the scanner reads files,
+// and all of it lands in that number — so subtracting nothing reports a
+// healthy idle box as ~100% full within minutes and the chart becomes a flat
+// line at the ceiling forever.
+//
+// `docker stats` subtracts `inactive_file` for exactly this reason, and this
+// matches it deliberately rather than trying to be more correct: host mode
+// reads the per-instance figures out of `docker stats`, and if the agent inside
+// the box used different arithmetic the dashboard would show two memory numbers
+// for the same box with nothing to say which was wrong.
+//
+// It is an approximation, and worth knowing which one: docker does not subtract
+// `active_file`, which is also reclaimable, so this is not "anonymous plus
+// kernel". It is what docker shows.
+func cgroupMemory(max, current, stat string) (uint64, uint64, bool) {
 	limit, err := strconv.ParseUint(strings.TrimSpace(max), 10, 64)
 	if err != nil || limit == 0 {
 		return 0, 0, false
@@ -563,10 +581,42 @@ func cgroupMemory(max, current string) (uint64, uint64, bool) {
 	if err != nil {
 		return 0, 0, false
 	}
+
+	// The guard is docker's, and it is not paranoia: the two values are
+	// separate reads, so a box sitting at its limit can read a larger
+	// inactive_file than the usage sampled a moment earlier. An unsubtracted
+	// number is wrong; an underflowed one is 16 exabytes.
+	//
+	// A missing memory.stat falls through with the raw usage rather than
+	// deferring to meminfo, which is also what docker does — the limit is still
+	// the box's own, and the host's total would be a worse answer.
+	if inactive, ok := statKey(stat, "inactive_file"); ok && inactive < used {
+		used -= inactive
+	}
+
 	if used > limit {
 		used = limit
 	}
 	return limit, limit - used, true
+}
+
+// statKey reads one key out of a cgroup flat-keyed file — `memory.stat` and
+// `cpu.stat` are both "name value" per line, in bytes and microseconds
+// respectively.
+func statKey(content, key string) (uint64, bool) {
+	scanner := bufio.NewScanner(strings.NewReader(content))
+	for scanner.Scan() {
+		name, value, found := strings.Cut(strings.TrimSpace(scanner.Text()), " ")
+		if !found || name != key {
+			continue
+		}
+		parsed, err := strconv.ParseUint(strings.TrimSpace(value), 10, 64)
+		if err != nil {
+			return 0, false
+		}
+		return parsed, true
+	}
+	return 0, false
 }
 
 func meminfoMemory(meminfo string) (uint64, uint64) {
