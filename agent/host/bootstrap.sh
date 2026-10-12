@@ -34,6 +34,18 @@ INSTALL_BIN=/usr/local/bin/magnemite-agent
 LIB_DIR=/usr/local/lib/magnemite
 UNIT=/etc/systemd/system/magnemite-host.service
 
+# A fresh cloud image is usually running unattended-upgrades on first boot, and
+# apt waits on dpkg's lock *forever* by default -- so a provisioning started a
+# minute after the machine was created hangs with no output and no timeout,
+# which from the outside is indistinguishable from a dead connection. Five
+# minutes is longer than that first run takes and shorter than anyone's
+# patience.
+#
+# Defined here rather than inside the first step that needs it, so no later
+# step depends on an earlier one having run -- `set -u` would otherwise turn a
+# skipped block into "APT: unbound variable" three stages later.
+APT="apt-get -o DPkg::Lock::Timeout=300"
+
 step() { printf '::step %s %s %s\n' "$1" "$2" "${3:-}"; }
 
 # A stage that fails says so in the machine-readable line *and* on stderr, then
@@ -82,7 +94,6 @@ if have apt-get; then
 	# no timeout, which is indistinguishable from a dead connection. Five
 	# minutes is longer than that first run takes and shorter than anyone's
 	# patience.
-	APT="apt-get -o DPkg::Lock::Timeout=300"
 	$APT update -qq >/dev/null 2>&1 || true
 	# Not fatal on its own: a kernel with CONFIG_ANDROID_BINDERFS built in
 	# needs no module at all, and the check below is what actually decides.
@@ -129,16 +140,64 @@ echo 'kernel.pid_max = 65535' >/etc/sysctl.d/99-magnemite-redroid.conf
 step pidmax ok "$(cat /proc/sys/kernel/pid_max 2>/dev/null || echo unknown)"
 
 # --- 4. docker --------------------------------------------------------------
+#
+# What is needed is docker *and* the compose v2 plugin, invoked as
+# `docker compose`. They are two packages, and which names exist depends on the
+# distro -- so they are installed separately and the outcome is what decides,
+# not whether a particular package name resolved.
+#
+# An earlier version asked for both in one `apt-get install`. That is the bug
+# that cost a real provisioning: apt refuses the whole transaction when any
+# named package is unknown, so a missing `docker-compose-v2` meant `docker.io`
+# was not installed either -- on a machine where it was available. One command
+# per package, and nothing fatal until the end.
+#
+# The output is kept rather than sent to /dev/null. This is the step most
+# likely to fail and the one where "could not install docker" on its own is
+# useless; apt says exactly what it could not find, and that belongs in the
+# failure.
 if have docker && docker compose version >/dev/null 2>&1; then
 	step docker ok "$(docker --version 2>/dev/null | head -1)"
 else
-	if have apt-get; then
-		apt-get install -y -qq docker.io docker-compose-v2 >/dev/null 2>&1 ||
-			die docker "could not install docker"
-	else
-		die docker "docker is missing and this is not an apt machine"
+	have apt-get || die docker "docker is missing and this is not an apt machine"
+	log=""
+
+	if ! have docker; then
+		# Debian and Ubuntu both ship this, under this name, on every release
+		# that matters here.
+		out=$($APT install -y -qq docker.io 2>&1) || log="$log
+docker.io: $out"
 	fi
-	docker compose version >/dev/null 2>&1 || die docker "docker compose v2 plugin is missing"
+
+	# The compose plugin, under either name it goes by: Docker's own repository
+	# calls it docker-compose-plugin, Debian calls it docker-compose-v2, and
+	# neither exists everywhere. Failing to find one is not an error on its own
+	# -- the check below is what decides.
+	if ! docker compose version >/dev/null 2>&1; then
+		for pkg in docker-compose-plugin docker-compose-v2; do
+			out=$($APT install -y -qq "$pkg" 2>&1) && break
+			log="$log
+$pkg: $out"
+		done
+	fi
+
+	# Still not both? Docker's own installer, which carries the engine and the
+	# plugin together and knows every distro this might be. Last rather than
+	# first, because it pulls a script off the internet and runs it as root,
+	# and the distro packages are the lighter answer when they work.
+	if ! have docker || ! docker compose version >/dev/null 2>&1; then
+		if have curl; then
+			out=$(curl -fsSL https://get.docker.com 2>&1 | sh 2>&1) || log="$log
+get.docker.com: $out"
+		else
+			log="$log
+get.docker.com: skipped, no curl on this machine"
+		fi
+	fi
+
+	have docker || die docker "could not install docker.$log"
+	docker compose version >/dev/null 2>&1 ||
+		die docker "docker is installed but the compose v2 plugin is not.$log"
 	step docker ok "$(docker --version 2>/dev/null | head -1)"
 fi
 
