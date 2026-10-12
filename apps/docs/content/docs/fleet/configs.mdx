@@ -51,7 +51,20 @@ before the file is written.
 
 Available: `device.id`, `device.name`, `device.serial`, `device.model`,
 `device.manufacturer`, `device.androidVersion`, `device.abi`, `device.localIp`,
-`device.publicIp`, `device.rotomOrigin`, `device.rotomDeviceId`, `group.name`.
+`device.publicIp`, `device.rotomOrigin`, `device.rotomDeviceId`,
+`device.workers`, `group.name`.
+
+`device.workers` is how many workers a Redroid container is configured for, set
+per machine on its [Machines](/docs/fleet/redroid-hosts) page. It is what makes
+a machine's capacity a number the dashboard owns — containers times workers —
+rather than one hard-coded into the group's config, where it would be the same
+for every machine in the group.
+
+<Callout type="warn" title="A group that mixes containers and real hardware">
+  Only a container has a worker count, so `{{device.workers}}` is empty on a TV box — and an empty
+  known placeholder is refused when the config is rendered, naming the box. That is the refusal
+  working, and the fix is a group per kind rather than a default nobody chose.
+</Callout>
 
 Two things are refused rather than papered over:
 

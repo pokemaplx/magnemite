@@ -37,6 +37,21 @@ const PLACEHOLDERS: Record<ConfigPlaceholder, (d: DeviceForConfig) => string | n
   "device.publicIp": (d: DeviceForConfig) => d.publicIp,
   "device.rotomOrigin": (d: DeviceForConfig) => d.rotomOrigin,
   "device.rotomDeviceId": (d: DeviceForConfig) => d.rotomDeviceId,
+  // How many workers this box is configured for, off its Redroid instance row.
+  //
+  // The whole point of Magnemite owning that number: a machine's capacity is
+  // containers times workers, and without this the figure the scale form
+  // collects would be decorative -- the operator would still be hard-coding
+  // `"workers": 50` into the group's config, where it is the same for every
+  // machine in the group.
+  //
+  // Null on a box that is not a container, which the renderer refuses rather
+  // than substituting as empty. That refusal is the feature: a scanner started
+  // against `"workers": ""` is worse off than one never configured, and a
+  // group mixing containers with real hardware finds out at the deploy that
+  // names the box, instead of silently.
+  "device.workers": (d: DeviceForConfig) =>
+    d.redroidInstance?.workers == null ? null : String(d.redroidInstance.workers),
   "group.name": (d: DeviceForConfig) => d.group?.name ?? null,
 };
 
@@ -64,6 +79,7 @@ export type DeviceForConfig = {
   publicIp: string | null;
   rotomOrigin: string | null;
   rotomDeviceId: string | null;
+  redroidInstance: { workers: number | null } | null;
   group: {
     name: string;
     mitmPackageName: string | null;
@@ -85,6 +101,7 @@ export const deviceForConfigSelect = {
   publicIp: true,
   rotomOrigin: true,
   rotomDeviceId: true,
+  redroidInstance: { select: { workers: true } },
   group: {
     select: {
       name: true,

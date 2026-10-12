@@ -112,7 +112,12 @@ async function dispatchQueued(maxConcurrentJobs: number) {
       OR: [{ nextAttemptAt: null }, { nextAttemptAt: { lte: new Date() } }],
     },
     include: {
-      device: { include: { group: true } },
+      // `redroidInstance` because the config renderer substitutes
+      // {{device.workers}} off it. Selected here rather than fetched inside
+      // the loop: the candidate query already walks these rows, so it costs no
+      // extra round trip, and a missing include would have been a placeholder
+      // that silently refused on every container.
+      device: { include: { group: true, redroidInstance: { select: { workers: true } } } },
       rollout: { include: { appVersion: { include: { appTarget: true } } } },
     },
     // Canaries first, then oldest rollout first, so one rollout drains before

@@ -644,6 +644,12 @@ export const CONFIG_PLACEHOLDERS = [
   "device.publicIp",
   "device.rotomOrigin",
   "device.rotomDeviceId",
+  // How many workers the box is configured for, off its Redroid instance row.
+  // Null on a box that is not a container, and the renderer refuses a null
+  // rather than substituting an empty string -- the same rule every other
+  // placeholder follows, and the reason a group mixing containers with real
+  // hardware finds out at the deploy that names the box.
+  "device.workers",
   "group.name",
 ] as const;
 export type ConfigPlaceholder = (typeof CONFIG_PLACEHOLDERS)[number];

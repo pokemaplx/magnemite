@@ -26,5 +26,10 @@ export const CONFIG_PLACEHOLDERS = [
   "device.publicIp",
   "device.rotomOrigin",
   "device.rotomDeviceId",
+  // Off the box's Redroid instance row, so a machine's capacity is a number
+  // the dashboard owns rather than one hard-coded per group. Refused at render
+  // on a box that is not a container, which is the same refusal every other
+  // placeholder with no value gets.
+  "device.workers",
   "group.name",
 ] as const;
