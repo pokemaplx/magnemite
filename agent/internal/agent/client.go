@@ -51,6 +51,13 @@ const (
 // An interface and not a concrete type so the fake can stand in: the whole
 // point of -fake-docker is that everything except the two docker calls is
 // real, and that only works if the docker calls are the seam.
+// Converger brings a machine's containers in line with a rendered compose
+// file. Separate from HostReporter because the fake implements one of them
+// trivially and the other almost entirely for real.
+type Converger interface {
+	Converge(ctx context.Context, req proto.HostConverge) proto.HostConvergeResult
+}
+
 type HostReporter interface {
 	// Report is what this machine is and what containers it is holding. It is
 	// allowed to be slow -- it shells out -- and it is called once per beat.
@@ -63,6 +70,9 @@ type Agent struct {
 	Version string
 	// Path the config was loaded from, so a rotated token can be written back.
 	ConfigPath string
+	// Brings the containers in line with what the hub asked for. Nil on a box,
+	// and nil in host mode until docker is wired up.
+	Converger Converger
 	// Set only in host mode, and nil on every box.
 	//
 	// This is the whole of what -host changes about the client: the loop below
@@ -448,6 +458,36 @@ func (a *Agent) handle(ctx context.Context, data []byte) {
 		if !msg.Approved {
 			log.Printf("waiting for an operator to approve this device in the dashboard")
 		}
+
+	case "host_converge":
+		// Only a machine has containers to converge. A box ignoring this is the
+		// protocol's own rule working: the type switch has no default branch,
+		// so an unknown message falls straight through -- but being explicit
+		// here means a misdirected converge is logged rather than silent.
+		if a.Converger == nil {
+			log.Printf("ignoring host_converge: this agent is not running in -host mode")
+			return
+		}
+		var req proto.HostConverge
+		if json.Unmarshal(data, &req) != nil {
+			return
+		}
+		// Its own goroutine: a converge is minutes of image pulls and Android
+		// boots, and the read loop has to keep taking frames -- including the
+		// pings that stop the hub deciding this machine has gone.
+		go func() {
+			log.Printf("converging %d bytes of compose (batch %d, orphans %v)",
+				len(req.Compose), req.BatchSize, req.RemoveOrphans)
+			result := a.Converger.Converge(ctx, req)
+			if result.Ok {
+				log.Printf("converge %s done", req.RequestID)
+			} else {
+				log.Printf("converge %s failed: %s", req.RequestID, result.Error)
+			}
+			if err := a.send(result); err != nil {
+				log.Printf("could not report the converge: %v", err)
+			}
+		}()
 
 	case "install_job":
 		var job proto.InstallJob

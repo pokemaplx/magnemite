@@ -181,6 +181,47 @@ type HostInfo struct {
 	Containers []ContainerStat `json:"containers"`
 }
 
+// HostConverge brings the containers on a machine in line with the hub's
+// desired set. Carries the whole set every time, never a delta, which is what
+// makes it idempotent and drift self-correcting.
+type HostConverge struct {
+	Type      string `json:"type"` // "host_converge"
+	RequestID string `json:"requestId"`
+	Project   string `json:"project"`
+	Dir       string `json:"dir"`
+	// The rendered compose file. The hub renders it, not the machine, so the
+	// bytes are the auditable artifact and the hub can compare a fresh render
+	// against the sha256 the machine read back to decide whether a converge is
+	// needed at all.
+	Compose string `json:"compose"`
+	// How many containers may start at once. `docker compose up` starts every
+	// service simultaneously, and ten Androids coming up together is the OOM
+	// the sizing advice warns about.
+	BatchSize int `json:"batchSize"`
+	// Whether containers the file does not name may be removed. False until a
+	// machine has converged once: one running the hand-written compose file has
+	// containers holding real device identities, and an empty desired set would
+	// make every one of them an orphan.
+	RemoveOrphans bool `json:"removeOrphans"`
+}
+
+// HostConvergeResult is what the machine did about it.
+type HostConvergeResult struct {
+	Type      string `json:"type"` // "host_converge_result"
+	RequestID string `json:"requestId"`
+	Ok        bool   `json:"ok"`
+	// sha256 of the file as read back off disk, not of what was sent: it says
+	// what is on the machine rather than what the hub meant.
+	ComposeSha256 string `json:"composeSha256,omitempty"`
+	// Docker's own output, capped here rather than at the hub. A frame is 1 MB
+	// and the column it lands in is 64 KB on MariaDB, so an uncapped cold image
+	// build would close the socket or fail the insert -- and either way the hub
+	// would never record the hash, see the same mismatch on the next reconnect,
+	// and converge forever.
+	Output string `json:"output,omitempty"`
+	Error  string `json:"error,omitempty"`
+}
+
 type Hello struct {
 	Type            string        `json:"type"` // "hello"
 	ProtocolVersion int           `json:"protocolVersion"`

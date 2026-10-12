@@ -103,6 +103,7 @@ func main() {
 
 	var system sys.System
 	var reporter agent.HostReporter
+	var converger agent.Converger
 
 	switch {
 	case *hostMode:
@@ -119,10 +120,12 @@ func main() {
 			cfg.WorkDir = filepath.Join(os.TempDir(), "magnemite-host")
 		}
 		if *fakeDocker {
-			reporter = hostpkg.NewFakeReporter(hostProject, hostpkg.FakeInstancesFromEnv(0))
+			fake := hostpkg.NewFakeReporter(hostProject, hostpkg.FakeInstancesFromEnv(0))
+			reporter, converger = fake, fake
 			log.Printf("running in -fake-docker mode — only the docker calls are stubbed")
 		} else {
-			reporter = hostpkg.NewReporter(hostProject, hostDir, host.DiskPath())
+			real := hostpkg.NewReporter(hostProject, hostDir, host.DiskPath())
+			reporter, converger = real, real.Docker
 		}
 		log.SetPrefix("[" + cfg.Serial + "] ")
 		log.Printf("running as a Redroid host, measuring disk on %s", host.DiskPath())
@@ -170,6 +173,7 @@ func main() {
 	// Nil on a box, which is what keeps the host block absent from everything a
 	// box sends rather than present and empty.
 	a.Host = reporter
+	a.Converger = converger
 	if err := a.Run(ctx); err != nil && ctx.Err() == nil {
 		log.Fatalf("agent stopped: %v", err)
 	}

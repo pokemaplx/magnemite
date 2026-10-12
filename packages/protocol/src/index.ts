@@ -389,6 +389,25 @@ export const execResultSchema = z.object({
 
 export const pongSchema = z.object({ type: z.literal("pong") });
 
+/**
+ * What the machine did about it.
+ *
+ * `output` is docker's own, capped by the agent: a frame is 1 MB and the
+ * column it lands in is 64 KB on MariaDB, so an uncapped cold image build
+ * would close the socket or fail the insert — and either way the hub would
+ * never record the sha256, see the same mismatch on reconnect, and converge
+ * forever.
+ */
+export const hostConvergeResultSchema = z.object({
+  type: z.literal("host_converge_result"),
+  requestId: z.string(),
+  ok: z.boolean(),
+  /** sha256 of the file as read back off disk, not of what was sent. */
+  composeSha256: z.string().nullish(),
+  output: z.string().nullish(),
+  error: z.string().nullish(),
+});
+
 export const agentMessageSchema = z.discriminatedUnion("type", [
   helloSchema,
   heartbeatSchema,
@@ -400,6 +419,7 @@ export const agentMessageSchema = z.discriminatedUnion("type", [
   logLinesSchema,
   execResultSchema,
   pongSchema,
+  hostConvergeResultSchema,
 ]);
 export type AgentMessage = z.infer<typeof agentMessageSchema>;
 
@@ -629,6 +649,48 @@ export type ConfigPlaceholder = (typeof CONFIG_PLACEHOLDERS)[number];
 
 export const pingSchema = z.object({ type: z.literal("ping") });
 
+/**
+ * Bring the containers on a machine in line with what the hub wants.
+ *
+ * The hub renders the compose file and sends its bytes, rather than sending a
+ * desired set for the machine to render. Two reasons: the rendered file is then
+ * the auditable artifact and the same on every machine, and the hub can compare
+ * a fresh render against the sha256 the host read back off disk to decide
+ * whether a converge is needed at all. That comparison is why the render has to
+ * be a pure function of the instance rows — anything conditional in it turns a
+ * reconnect into a container recreate.
+ *
+ * Carries the whole desired set every time, never a delta. That makes it
+ * idempotent, makes drift self-correcting, and means a machine that missed one
+ * catches up on the next rather than needing a replay.
+ */
+export const hostConvergeSchema = z.object({
+  type: z.literal("host_converge"),
+  /** Correlates the result, since a converge outlives the beat that asked. */
+  requestId: z.string(),
+  project: z.string(),
+  dir: z.string(),
+  /** The rendered compose file. */
+  compose: z.string(),
+  /**
+   * How many containers may be started at once.
+   *
+   * `docker compose up` starts every service simultaneously, and ten Androids
+   * coming up together on sixteen cores is the OOM the sizing advice warns
+   * about. Low by default; it only costs time on a first provisioning.
+   */
+  batchSize: z.number().int().positive().default(2),
+  /**
+   * Whether containers under the project that the file does not name may be
+   * removed.
+   *
+   * False until a machine has converged once. A machine running the
+   * hand-written compose file has containers holding real device identities,
+   * and an empty desired set would make every one of them an orphan.
+   */
+  removeOrphans: z.boolean().default(false),
+});
+
 export const serverMessageSchema = z.discriminatedUnion("type", [
   welcomeSchema,
   installJobSchema,
@@ -640,6 +702,7 @@ export const serverMessageSchema = z.discriminatedUnion("type", [
   logStreamStopSchema,
   execCommandSchema,
   pingSchema,
+  hostConvergeSchema,
 ]);
 export type ServerMessage = z.infer<typeof serverMessageSchema>;
 

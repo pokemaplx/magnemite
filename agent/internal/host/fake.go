@@ -6,6 +6,7 @@ import (
 	"os"
 	"runtime"
 	"strconv"
+	"strings"
 	"sync"
 
 	"magnemite/agent/internal/proto"
@@ -124,4 +125,81 @@ func FakeInstancesFromEnv(def int) int {
 		return def
 	}
 	return n
+}
+
+// Converge is the fake's half of a converge: everything except the docker call
+// is the real path. The file is genuinely written, its sha256 genuinely read
+// back off disk, and the service list genuinely parsed out of the rendered
+// bytes -- so a renderer that emitted something compose could not read, or a
+// hash the hub then disagreed with, still fails here.
+func (f *FakeReporter) Converge(ctx context.Context, req proto.HostConverge) proto.HostConvergeResult {
+	result := proto.HostConvergeResult{
+		Type:      "host_converge_result",
+		RequestID: req.RequestID,
+	}
+
+	_, sum, err := writeCompose(req.Dir, req.Compose)
+	if err != nil {
+		result.Error = err.Error()
+		return result
+	}
+	result.ComposeSha256 = sum
+
+	services, err := composeServices(req.Compose)
+	if err != nil {
+		result.Error = err.Error()
+		return result
+	}
+
+	if os.Getenv("MAGNEMITE_FAKE_CONVERGE_ERROR") != "" {
+		result.Error = os.Getenv("MAGNEMITE_FAKE_CONVERGE_ERROR")
+		result.Output = "fake docker: " + result.Error
+		return result
+	}
+
+	// The containers the hub asked for become the containers this machine
+	// reports, which is what makes the dashboard's running/desired count real
+	// in fake mode rather than a constant.
+	f.mu.Lock()
+	f.containers = nil
+	for _, name := range services {
+		limit := uint64(4) * 1024 * 1024 * 1024
+		restarts := 0
+		f.containers = append(f.containers, proto.ContainerStat{
+			Name:          req.Project + "-" + name,
+			State:         "running",
+			Serial:        serialFromCompose(req.Compose, name),
+			RestartCount:  &restarts,
+			MemLimitBytes: &limit,
+			Image:         "magnemite/redroid:1",
+		})
+	}
+	f.mu.Unlock()
+
+	result.Ok = true
+	result.Output = "fake docker: converged " + strconv.Itoa(len(services)) + " services"
+	return result
+}
+
+// serialFromCompose finds the serial the rendered file gives one service, so a
+// fake container matches its instance row the way a real one does.
+func serialFromCompose(compose, service string) string {
+	lines := strings.Split(compose, "\n")
+	for i, line := range lines {
+		if strings.TrimSpace(line) != service+":" {
+			continue
+		}
+		for _, rest := range lines[i+1:] {
+			trimmed := strings.TrimSpace(rest)
+			// The next service at the same level ends this one's block.
+			if trimmed != "" && !strings.HasPrefix(rest, "    ") {
+				break
+			}
+			if serial := serialFromCmd([]string{strings.TrimPrefix(trimmed, "- ")}); serial != "" {
+				return serial
+			}
+		}
+		break
+	}
+	return ""
 }
