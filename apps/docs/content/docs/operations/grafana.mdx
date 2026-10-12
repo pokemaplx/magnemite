@@ -128,12 +128,11 @@ same table, which is the
 `cpuPercent`, memory, swap and storage stay perfectly good per instance; only
 load and temperature belong to the machine.
 
-<Callout type="info" title="The shipped dashboards do not filter on kind at all">
-  Both JSON files in `deploy/grafana/` were written when every device was hardware. The **Fleet**
-  panels aggregate over the whole fleet, so a VPS's load average and its disk are averaged in with
-  the boxes' — add `d.kind = 'BOX'` to those queries. The **Per Device** dashboard is fine either
-  way: it draws one device at a time, and picking a machine from the variable is a reasonable thing
-  to want.
+<Callout type="info" title="The shipped Fleet dashboard filters on kind; your own panels have to too">
+  Every panel in `magnemite-fleet.json` now carries `d.kind = 'BOX'`. Without it a VPS's load
+  average and its disk are averaged in with the boxes', and the fleet size is inflated by the
+  machines running it. **Per Device** is deliberately left alone: it draws one device at a time, and
+  picking a machine from the variable is a reasonable thing to want.
 </Callout>
 
 ## How far back it goes

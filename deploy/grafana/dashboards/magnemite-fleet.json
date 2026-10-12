@@ -18,7 +18,7 @@
         "target": {
           "format": "table",
           "rawQuery": true,
-          "rawSql": "SELECT e.at AS time, CONCAT(d.name, ': ', e.message) AS text, e.signal AS tags FROM `MonitorEvent` e JOIN `Device` d ON d.id = e.deviceId WHERE $__timeFilter(e.at) AND e.action IS NOT NULL ORDER BY e.at"
+          "rawSql": "SELECT e.at AS time, CONCAT(d.name, ': ', e.message) AS text, e.signal AS tags FROM `MonitorEvent` e JOIN `Device` d ON d.id = e.deviceId WHERE d.kind = 'BOX' AND $__timeFilter(e.at) AND e.action IS NOT NULL ORDER BY e.at"
         }
       }
     ]
@@ -69,7 +69,7 @@
           "refId": "A",
           "format": "table",
           "rawQuery": true,
-          "rawSql": "SELECT COUNT(*) AS `online` FROM `Device` d WHERE d.status = 'ONLINE' AND d.approved = 1 AND ('__ALL__' IN (${group:sqlstring}) OR d.groupId IN (${group:sqlstring}))"
+          "rawSql": "SELECT COUNT(*) AS `online` FROM `Device` d WHERE d.kind = 'BOX' AND d.status = 'ONLINE' AND d.approved = 1 AND ('__ALL__' IN (${group:sqlstring}) OR d.groupId IN (${group:sqlstring}))"
         }
       ]
     },
@@ -102,7 +102,7 @@
           "refId": "A",
           "format": "table",
           "rawQuery": true,
-          "rawSql": "SELECT COUNT(*) AS `offline` FROM `Device` d WHERE d.status <> 'ONLINE' AND d.approved = 1 AND ('__ALL__' IN (${group:sqlstring}) OR d.groupId IN (${group:sqlstring}))"
+          "rawSql": "SELECT COUNT(*) AS `offline` FROM `Device` d WHERE d.kind = 'BOX' AND d.status <> 'ONLINE' AND d.approved = 1 AND ('__ALL__' IN (${group:sqlstring}) OR d.groupId IN (${group:sqlstring}))"
         }
       ]
     },
@@ -124,7 +124,7 @@
           "refId": "A",
           "format": "table",
           "rawQuery": true,
-          "rawSql": "SELECT COUNT(DISTINCT d.agentVersion) AS `versions` FROM `Device` d WHERE d.approved = 1 AND d.agentVersion IS NOT NULL AND ('__ALL__' IN (${group:sqlstring}) OR d.groupId IN (${group:sqlstring}))"
+          "rawSql": "SELECT COUNT(DISTINCT d.agentVersion) AS `versions` FROM `Device` d WHERE d.kind = 'BOX' AND d.approved = 1 AND d.agentVersion IS NOT NULL AND ('__ALL__' IN (${group:sqlstring}) OR d.groupId IN (${group:sqlstring}))"
         }
       ]
     },
@@ -159,7 +159,7 @@
           "refId": "A",
           "format": "table",
           "rawQuery": true,
-          "rawSql": "SELECT COUNT(*) AS `actions` FROM `MonitorEvent` e JOIN `Device` d ON d.id = e.deviceId WHERE $__timeFilter(e.at) AND e.action IS NOT NULL AND ('__ALL__' IN (${group:sqlstring}) OR d.groupId IN (${group:sqlstring}))"
+          "rawSql": "SELECT COUNT(*) AS `actions` FROM `MonitorEvent` e JOIN `Device` d ON d.id = e.deviceId WHERE d.kind = 'BOX' AND $__timeFilter(e.at) AND e.action IS NOT NULL AND ('__ALL__' IN (${group:sqlstring}) OR d.groupId IN (${group:sqlstring}))"
         }
       ]
     },
@@ -193,7 +193,7 @@
           "refId": "A",
           "format": "time_series",
           "rawQuery": true,
-          "rawSql": "SELECT $__timeGroupAlias(s.at, $__interval), AVG(s.loadAvg1 / NULLIF(s.cpuCount, 0)) AS `fleet average`, MAX(s.loadAvg1 / NULLIF(s.cpuCount, 0)) AS `worst box` FROM `DeviceMetricSample` s JOIN `Device` d ON d.id = s.deviceId WHERE $__timeFilter(s.at) AND ('__ALL__' IN (${group:sqlstring}) OR d.groupId IN (${group:sqlstring})) GROUP BY 1 ORDER BY 1"
+          "rawSql": "SELECT $__timeGroupAlias(s.at, $__interval), AVG(s.loadAvg1 / NULLIF(s.cpuCount, 0)) AS `fleet average`, MAX(s.loadAvg1 / NULLIF(s.cpuCount, 0)) AS `worst box` FROM `DeviceMetricSample` s JOIN `Device` d ON d.id = s.deviceId WHERE d.kind = 'BOX' AND $__timeFilter(s.at) AND ('__ALL__' IN (${group:sqlstring}) OR d.groupId IN (${group:sqlstring})) GROUP BY 1 ORDER BY 1"
         }
       ]
     },
@@ -228,7 +228,7 @@
           "refId": "A",
           "format": "time_series",
           "rawQuery": true,
-          "rawSql": "SELECT $__timeGroupAlias(s.at, $__interval), AVG(100 * (1 - s.memAvailableBytes / NULLIF(s.memTotalBytes, 0))) AS `fleet average`, MAX(100 * (1 - s.memAvailableBytes / NULLIF(s.memTotalBytes, 0))) AS `worst box` FROM `DeviceMetricSample` s JOIN `Device` d ON d.id = s.deviceId WHERE $__timeFilter(s.at) AND ('__ALL__' IN (${group:sqlstring}) OR d.groupId IN (${group:sqlstring})) GROUP BY 1 ORDER BY 1"
+          "rawSql": "SELECT $__timeGroupAlias(s.at, $__interval), AVG(100 * (1 - s.memAvailableBytes / NULLIF(s.memTotalBytes, 0))) AS `fleet average`, MAX(100 * (1 - s.memAvailableBytes / NULLIF(s.memTotalBytes, 0))) AS `worst box` FROM `DeviceMetricSample` s JOIN `Device` d ON d.id = s.deviceId WHERE d.kind = 'BOX' AND $__timeFilter(s.at) AND ('__ALL__' IN (${group:sqlstring}) OR d.groupId IN (${group:sqlstring})) GROUP BY 1 ORDER BY 1"
         }
       ]
     },
@@ -261,7 +261,7 @@
           "refId": "A",
           "format": "time_series",
           "rawQuery": true,
-          "rawSql": "SELECT $__timeGroupAlias(s.at, $__interval), AVG(s.cpuTempC) AS `fleet average`, MAX(s.cpuTempC) AS `hottest box` FROM `DeviceMetricSample` s JOIN `Device` d ON d.id = s.deviceId WHERE $__timeFilter(s.at) AND ('__ALL__' IN (${group:sqlstring}) OR d.groupId IN (${group:sqlstring})) GROUP BY 1 ORDER BY 1"
+          "rawSql": "SELECT $__timeGroupAlias(s.at, $__interval), AVG(s.cpuTempC) AS `fleet average`, MAX(s.cpuTempC) AS `hottest box` FROM `DeviceMetricSample` s JOIN `Device` d ON d.id = s.deviceId WHERE d.kind = 'BOX' AND $__timeFilter(s.at) AND ('__ALL__' IN (${group:sqlstring}) OR d.groupId IN (${group:sqlstring})) GROUP BY 1 ORDER BY 1"
         }
       ]
     },
@@ -295,7 +295,7 @@
           "refId": "A",
           "format": "time_series",
           "rawQuery": true,
-          "rawSql": "SELECT $__timeGroupAlias(s.at, $__interval), COUNT(DISTINCT s.deviceId) AS `reporting` FROM `DeviceMetricSample` s JOIN `Device` d ON d.id = s.deviceId WHERE $__timeFilter(s.at) AND ('__ALL__' IN (${group:sqlstring}) OR d.groupId IN (${group:sqlstring})) GROUP BY 1 ORDER BY 1"
+          "rawSql": "SELECT $__timeGroupAlias(s.at, $__interval), COUNT(DISTINCT s.deviceId) AS `reporting` FROM `DeviceMetricSample` s JOIN `Device` d ON d.id = s.deviceId WHERE d.kind = 'BOX' AND $__timeFilter(s.at) AND ('__ALL__' IN (${group:sqlstring}) OR d.groupId IN (${group:sqlstring})) GROUP BY 1 ORDER BY 1"
         }
       ]
     },
@@ -338,7 +338,7 @@
           "refId": "A",
           "format": "table",
           "rawQuery": true,
-          "rawSql": "SELECT d.name AS `device`, d.status AS `status`, g.name AS `group`, d.agentVersion AS `agent`, ROUND(100 * d.freeBytes / NULLIF(d.totalBytes, 0), 1) AS `free`, d.freeBytes AS `free bytes`, ROUND(d.loadAvg1 / NULLIF(d.cpuCount, 0), 2) AS `load per core`, d.cpuTempC AS `temp`, d.lastSeenAt AS `last seen` FROM `Device` d LEFT JOIN `DeviceGroup` g ON g.id = d.groupId WHERE d.approved = 1 AND ('__ALL__' IN (${group:sqlstring}) OR d.groupId IN (${group:sqlstring})) ORDER BY `free` ASC"
+          "rawSql": "SELECT d.name AS `device`, d.status AS `status`, g.name AS `group`, d.agentVersion AS `agent`, ROUND(100 * d.freeBytes / NULLIF(d.totalBytes, 0), 1) AS `free`, d.freeBytes AS `free bytes`, ROUND(d.loadAvg1 / NULLIF(d.cpuCount, 0), 2) AS `load per core`, d.cpuTempC AS `temp`, d.lastSeenAt AS `last seen` FROM `Device` d LEFT JOIN `DeviceGroup` g ON g.id = d.groupId WHERE d.kind = 'BOX' AND d.approved = 1 AND ('__ALL__' IN (${group:sqlstring}) OR d.groupId IN (${group:sqlstring})) ORDER BY `free` ASC"
         }
       ]
     },
@@ -372,7 +372,7 @@
           "refId": "A",
           "format": "time_series",
           "rawQuery": true,
-          "rawSql": "SELECT $__timeGroupAlias(e.at, $__interval), e.signal AS metric, COUNT(*) AS `events` FROM `MonitorEvent` e JOIN `Device` d ON d.id = e.deviceId WHERE $__timeFilter(e.at) AND ('__ALL__' IN (${group:sqlstring}) OR d.groupId IN (${group:sqlstring})) GROUP BY 1, 2 ORDER BY 1"
+          "rawSql": "SELECT $__timeGroupAlias(e.at, $__interval), e.signal AS metric, COUNT(*) AS `events` FROM `MonitorEvent` e JOIN `Device` d ON d.id = e.deviceId WHERE d.kind = 'BOX' AND $__timeFilter(e.at) AND ('__ALL__' IN (${group:sqlstring}) OR d.groupId IN (${group:sqlstring})) GROUP BY 1, 2 ORDER BY 1"
         }
       ]
     }
