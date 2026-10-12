@@ -1,0 +1,236 @@
+import Link from "next/link";
+import { notFound } from "next/navigation";
+import { prisma } from "@magnemite/db";
+import { requireUser } from "@/lib/session";
+import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { Badge } from "@/components/ui/badge";
+import {
+  Table,
+  TableBody,
+  TableCell,
+  TableHead,
+  TableHeader,
+  TableRow,
+} from "@/components/ui/table";
+import { DeviceLoadCard } from "@/components/device-load-card";
+import { OnlineDot } from "@/components/status";
+import { RelativeTime } from "@/components/relative-time";
+import { formatBytes } from "@/lib/format";
+import { loadRecentTrend } from "@/lib/metrics";
+
+export const dynamic = "force-dynamic";
+
+function num(value: bigint | null): number | null {
+  return value === null ? null : Number(value);
+}
+
+/**
+ * What an instance is doing, in the three states that have different causes.
+ *
+ * The middle one is the whole reason `RedroidInstance.deviceId` is nullable: a
+ * container that is up and whose agent has never enrolled is the commonest
+ * failure while setting a machine up, and before there were instance rows
+ * nothing could tell it apart from a container that is not running at all.
+ */
+function instanceState(containerState: string | null, deviceId: string | null) {
+  if (containerState === null) return { label: "unknown", tone: "secondary" as const };
+  if (containerState !== "running") return { label: containerState, tone: "danger" as const };
+  if (deviceId === null) return { label: "not enrolled", tone: "warning" as const };
+  return { label: "running", tone: "success" as const };
+}
+
+/**
+ * One machine: what it is, what it is spending, and what it is running.
+ *
+ * The load card is the device one, unchanged — a host is a Device, so its
+ * readings live in the same table and the same component draws them. Its
+ * history button goes to `/devices/<id>/metrics`, which works for the same
+ * reason.
+ */
+export default async function HostPage({ params }: { params: Promise<{ id: string }> }) {
+  await requireUser();
+  const { id } = await params;
+
+  const host = await prisma.device.findUnique({
+    where: { id },
+    include: {
+      redroidHost: {
+        include: {
+          defaultGroup: { select: { id: true, name: true } },
+          instances: {
+            orderBy: { index: "asc" },
+            include: {
+              device: { select: { id: true, name: true, status: true } },
+            },
+          },
+        },
+      },
+    },
+  });
+
+  // A box id here is a wrong turn rather than a missing page, but there is
+  // nothing useful to show either way.
+  if (!host || host.kind !== "HOST") notFound();
+
+  const machine = host.redroidHost;
+  const trend = await loadRecentTrend(host.id);
+  const wanted = machine?.instances.filter((i) => i.present) ?? [];
+  const running = wanted.filter((i) => i.containerState === "running").length;
+  const workers = wanted.reduce((sum, i) => sum + (i.workers ?? 0), 0);
+
+  const facts: { label: string; value: string }[] = [
+    { label: "Architecture", value: machine?.arch ?? "—" },
+    { label: "Kernel", value: machine?.kernel ?? "—" },
+    { label: "Docker", value: machine?.dockerVersion ?? "—" },
+    { label: "Cores", value: host.cpuCount === null ? "—" : String(host.cpuCount) },
+    { label: "Memory", value: formatBytes(num(host.memTotalBytes)) },
+    {
+      // Zero is a real answer here and must not read as "has not said": a
+      // machine with no swap is one the OOM killer reaches sooner, which is
+      // worth seeing rather than hiding behind a dash.
+      label: "Swap",
+      value: host.swapTotalBytes === null ? "—" : formatBytes(num(host.swapTotalBytes)),
+    },
+    { label: "Agent", value: host.agentVersion ?? "—" },
+    { label: "Serial", value: host.serial },
+  ];
+
+  return (
+    <div className="flex flex-col gap-6">
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div>
+          <h1 className="flex items-center gap-2 text-xl font-semibold tracking-tight">
+            <OnlineDot online={host.status === "ONLINE"} />
+            {host.name}
+          </h1>
+          <p className="mt-1 text-sm text-muted-foreground">
+            {wanted.length === 0
+              ? "No instances configured."
+              : `${running}/${wanted.length} instances running · ${workers} workers`}
+            {machine?.defaultGroup ? ` · new boxes join ${machine.defaultGroup.name}` : ""}
+          </p>
+        </div>
+        <div className="flex items-center gap-2">
+          {machine === null || machine.adoptedAt === null ? (
+            <Badge variant="warning">not adopted</Badge>
+          ) : null}
+          {machine?.binderOk === false ? <Badge variant="danger">binder missing</Badge> : null}
+        </div>
+      </div>
+
+      {machine?.lastError ? (
+        <Card>
+          <CardHeader>
+            <CardTitle className="text-sm">Last failure</CardTitle>
+          </CardHeader>
+          <CardContent>
+            {/* Pre-wrapped and scrollable: this is docker output, and the line
+                that explains it is rarely the first one. */}
+            <pre className="max-h-64 overflow-auto whitespace-pre-wrap text-xs text-muted-foreground">
+              {machine.lastError}
+            </pre>
+            <p className="mt-2 text-xs text-muted-foreground">
+              <RelativeTime value={machine.lastErrorAt} />
+            </p>
+          </CardContent>
+        </Card>
+      ) : null}
+
+      <div className="grid gap-4 md:grid-cols-2">
+        <Card>
+          <CardHeader>
+            <CardTitle className="text-sm">Machine</CardTitle>
+          </CardHeader>
+          <CardContent>
+            <dl className="grid grid-cols-2 gap-x-4 gap-y-2 text-sm">
+              {facts.map((fact) => (
+                <div key={fact.label} className="contents">
+                  <dt className="text-muted-foreground">{fact.label}</dt>
+                  <dd className="truncate font-medium" title={fact.value}>
+                    {fact.value}
+                  </dd>
+                </div>
+              ))}
+            </dl>
+          </CardContent>
+        </Card>
+
+        <DeviceLoadCard
+          load={{
+            deviceId: host.id,
+            loadAvg1: host.loadAvg1,
+            loadAvg5: host.loadAvg5,
+            loadAvg15: host.loadAvg15,
+            cpuCount: host.cpuCount,
+            memTotalBytes: num(host.memTotalBytes),
+            memAvailableBytes: num(host.memAvailableBytes),
+            freeBytes: num(host.freeBytes),
+            totalBytes: num(host.totalBytes),
+          }}
+          trend={trend}
+        />
+      </div>
+
+      <Card>
+        <CardHeader>
+          <CardTitle className="text-sm">Instances</CardTitle>
+        </CardHeader>
+        <CardContent className="px-0 pb-0">
+          {wanted.length === 0 ? (
+            <p className="px-6 pb-6 text-sm text-muted-foreground">
+              Nothing configured to run here yet.
+            </p>
+          ) : (
+            <Table>
+              <TableHeader>
+                <TableRow>
+                  <TableHead align="right">#</TableHead>
+                  <TableHead>Box</TableHead>
+                  <TableHead>Container</TableHead>
+                  <TableHead align="right">Workers</TableHead>
+                  <TableHead align="right">Restarts</TableHead>
+                  <TableHead>Reported</TableHead>
+                </TableRow>
+              </TableHeader>
+              <TableBody>
+                {wanted.map((instance) => {
+                  const state = instanceState(instance.containerState, instance.deviceId);
+                  return (
+                    <TableRow key={instance.id}>
+                      <TableCell align="right" className="tabular-nums text-muted-foreground">
+                        {instance.index}
+                      </TableCell>
+                      <TableCell>
+                        {instance.device ? (
+                          <Link href={`/devices/${instance.device.id}`} className="font-medium">
+                            {instance.device.name}
+                          </Link>
+                        ) : (
+                          <span className="font-mono text-xs text-muted-foreground">
+                            {instance.serial}
+                          </span>
+                        )}
+                      </TableCell>
+                      <TableCell>
+                        <Badge variant={state.tone}>{state.label}</Badge>
+                      </TableCell>
+                      <TableCell align="right">{instance.workers ?? "—"}</TableCell>
+                      <TableCell align="right">
+                        {/* A climbing count is what separates crash-looping
+                            from merely idle. */}
+                        {instance.restartCount ?? "—"}
+                      </TableCell>
+                      <TableCell>
+                        <RelativeTime value={instance.reportedAt} />
+                      </TableCell>
+                    </TableRow>
+                  );
+                })}
+              </TableBody>
+            </Table>
+          )}
+        </CardContent>
+      </Card>
+    </div>
+  );
+}

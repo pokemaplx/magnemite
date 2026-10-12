@@ -52,6 +52,10 @@ CREATE INDEX "Device_kind_status_idx" ON "Device"("kind", "status");
 -- CreateTable
 CREATE TABLE "RedroidHost" (
     "deviceId" TEXT NOT NULL,
+    "arch" TEXT,
+    "kernel" TEXT,
+    "dockerVersion" TEXT,
+    "binderOk" BOOLEAN,
     "project" TEXT NOT NULL DEFAULT 'magnemite-redroid',
     "dir" TEXT NOT NULL DEFAULT '/etc/magnemite/redroid',
     "appliedSha256" TEXT,

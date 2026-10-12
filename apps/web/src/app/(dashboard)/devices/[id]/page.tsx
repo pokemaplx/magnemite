@@ -1,6 +1,6 @@
 import type { ReactNode } from "react";
 import Link from "next/link";
-import { notFound } from "next/navigation";
+import { notFound, redirect } from "next/navigation";
 import { ArrowLeft, RadioTower } from "lucide-react";
 import { prisma } from "@magnemite/db";
 import { requireUser } from "@/lib/session";
@@ -71,6 +71,10 @@ export default async function DevicePage({ params }: { params: Promise<{ id: str
   ]);
 
   if (!device) notFound();
+  // A machine is a Device, so this page would render for one -- with a MITM
+  // column, a scanner card and install controls that mean nothing on a VPS.
+  // It has its own page; send it there rather than showing a box-shaped one.
+  if (device.kind === "HOST") redirect(`/hosts/${device.id}`);
 
   const online = device.status === "ONLINE";
 

@@ -531,6 +531,27 @@ model RedroidHost {
   deviceId String @id
   device   Device @relation(fields: [deviceId], references: [id], onDelete: Cascade)
 
+  // --- what the machine said about itself -----------------------------------
+  // Facts with no Device equivalent. The readings -- CPU, memory, swap, disk
+  // -- are on the Device like any box's; these are the things only a Linux
+  // host has.
+  /// `uname -m`. Recorded rather than assumed: arm64 is a hard requirement
+  /// (the fleet's bundles carry an arm64-v8a split and the agent matches the
+  /// ABI exactly), the bootstrap refuses anything else, and this is the
+  /// evidence of what it found.
+  arch          String?
+  /// `uname -r`. The one fact behind the trap that costs a whole machine:
+  /// `linux-modules-extra` is per kernel version, so an apt upgrade that
+  /// installs a new kernel leaves binder behind and every container fails to
+  /// come up after the reboot. Seeing the kernel move is how that is spotted.
+  kernel        String?
+  dockerVersion String?
+  /// Whether the binder devices Android needs were actually present, as
+  /// opposed to the modprobe having been run. Redroid's own docs disagree
+  /// about whether a modern kernel needs the module at all, so the bootstrap
+  /// checks the end state and this records it.
+  binderOk      Boolean?
+
   /// `docker compose -p` and the directory the rendered file is written to.
   /// Everything the hub renders lives under one project name, which is what
   /// makes --remove-orphans safe: it can only ever remove containers

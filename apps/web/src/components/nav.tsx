@@ -10,6 +10,7 @@ import {
   Package,
   PanelLeft,
   Rocket,
+  Server,
   Settings,
   Binoculars,
   Upload,
@@ -27,7 +28,10 @@ type NavLink = { href: string; label: string; icon: typeof LayoutGrid };
 /** Grouped the way the work is: look at the fleet, ship to it, then configure it. */
 const SECTIONS: { label?: string; links: NavLink[] }[] = [
   {
-    links: [{ href: "/", label: "Fleet", icon: LayoutGrid }],
+    links: [
+      { href: "/", label: "Fleet", icon: LayoutGrid },
+      { href: "/hosts", label: "Machines", icon: Server },
+    ],
   },
   {
     label: "Deployment",
