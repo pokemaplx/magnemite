@@ -12,6 +12,28 @@ import { z } from "zod";
  */
 export const PROTOCOL_VERSION = 1;
 
+/**
+ * A list that survives arriving as `null`.
+ *
+ * Go marshals a **nil slice as `null`**, not as `[]`, and `.default([])` only
+ * fires on `undefined` — so one nil slice makes the whole frame fail
+ * validation, and the hub drops frames whole. That is not a cosmetic loss: a
+ * heartbeat carries the box's liveness as well as its readings, so a machine
+ * whose agent could not list packages went offline on the dashboard while
+ * sitting there perfectly healthy, with the reason only in the hub's log.
+ *
+ * It happened exactly once and the cost was a day, so every list on a frame an
+ * agent sends goes through this rather than through `.default([])`. Absent,
+ * null and empty all mean the same thing here — nothing to report — and none
+ * of them is worth losing the readings around it.
+ */
+function listOf<T extends z.ZodTypeAny>(schema: T) {
+  return z
+    .array(schema)
+    .nullish()
+    .transform((value) => value ?? []);
+}
+
 /** Mirrors the JobState enum in the Prisma schema. */
 export const jobStateSchema = z.enum([
   "QUEUED",
@@ -104,7 +126,7 @@ export const deviceMetricsSchema = z.object({
   freeBytes: z.number().nonnegative().nullish(),
   totalBytes: z.number().nonnegative().nullish(),
   uptimeSeconds: z.number().int().nonnegative().nullish(),
-  packages: z.array(packageInfoSchema).default([]),
+  packages: listOf(packageInfoSchema),
   /**
    * Set when `packages` is the whole third-party inventory rather than just
    * the tracked apps. Only a complete list is evidence that an app was
@@ -164,7 +186,7 @@ export const deviceMetricsSchema = z.object({
    * everything above. Empty on agents old enough not to gather it, and empty
    * for an app that simply is not running.
    */
-  processes: z.array(processStatsSchema).default([]),
+  processes: listOf(processStatsSchema),
 
   /**
    * What the box saw when it ran the monitor spec from its `welcome`.
@@ -184,8 +206,8 @@ export const deviceMetricsSchema = z.object({
    */
   monitorRan: z.boolean().default(false),
   foregroundPackage: z.string().nullish(),
-  anrPackages: z.array(z.string()).default([]),
-  checks: z.array(monitorCheckResultSchema).default([]),
+  anrPackages: listOf(z.string()),
+  checks: listOf(monitorCheckResultSchema),
 });
 
 // ---------------------------------------------------------------------------
@@ -270,11 +292,16 @@ export const hostInfoSchema = z.object({
    */
   composeSha256: z.string().nullish(),
   /**
-   * Every container under the project, running or not. An empty array is a
-   * real answer (a machine with nothing on it); absent means this agent does
-   * not report containers.
+   * Every container under the project, running or not.
+   *
+   * Empty and absent mean the same thing here, and deliberately so: Go sends a
+   * nil slice as `null`, and treating that as a third state cost a machine its
+   * whole heartbeat once already. What separates "a machine with nothing on
+   * it" from "docker could not be asked" is `dockerVersion` being empty, which
+   * is the one signal the agent sets before it gives up — and it is what the
+   * hub gates on before it writes anything about containers.
    */
-  containers: z.array(containerStatSchema).default([]),
+  containers: listOf(containerStatSchema),
 });
 export type HostInfo = z.infer<typeof hostInfoSchema>;
 
@@ -294,7 +321,7 @@ export const helloSchema = z.object({
    * arithmetic reads a backported build as too old, and the failure mode is a
    * message sent to a box that silently drops it.
    */
-  capabilities: z.array(z.string()).default([]),
+  capabilities: listOf(z.string()),
   /** Set only by an agent in host mode. Absent from every box. */
   host: hostInfoSchema.nullish(),
 });
@@ -372,7 +399,7 @@ export const logBundleResultSchema = z.object({
 export const logLinesSchema = z.object({
   type: z.literal("log_lines"),
   streamId: z.string(),
-  lines: z.array(z.string()).default([]),
+  lines: listOf(z.string()),
   dropped: z.number().int().nonnegative().default(0),
 });
 

@@ -1,8 +1,14 @@
 package sys
 
 import (
+	"context"
+	"encoding/json"
+	"errors"
+	"strings"
 	"testing"
 	"time"
+
+	"magnemite/agent/internal/proto"
 )
 
 // A plausible /proc/1/stat. Field 22, the starttime, is 4523 ticks — 45.23s at
@@ -307,5 +313,48 @@ func TestCPURate(t *testing.T) {
 				t.Errorf("cpuRate() = %v, want nil (%s)", *got, tc.wantNil)
 			}
 		})
+	}
+}
+
+// hostLike is a System that answers like a machine rather than a box: it has
+// /proc readings and refuses every Android question, which is exactly what
+// internal/sys.Host does.
+type hostLike struct{ System }
+
+func (hostLike) Disk(string) (uint64, uint64, error)        { return 1 << 30, 1 << 31, nil }
+func (hostLike) LoadAvg() (float64, float64, float64)       { return 0.1, 0.2, 0.3 }
+func (hostLike) Memory() (uint64, uint64)                   { return 1 << 33, 1 << 32 }
+func (hostLike) Temperatures() (float64, float64)           { return 0, 0 }
+func (hostLike) Swap() (uint64, uint64, bool)               { return 0, 0, true }
+func (hostLike) UptimeSeconds() int64                       { return 42 }
+func (hostLike) CPUCount() int                              { return 4 }
+func (hostLike) CPUPercent() *float64                       { return nil }
+func (hostLike) ProcessStats([]string) []proto.ProcessStats { return nil }
+func (hostLike) PackageInfo(context.Context, string) (proto.PackageInfo, error) {
+	return proto.PackageInfo{}, errors.New("not android")
+}
+func (hostLike) ThirdPartyPackages(context.Context) ([]proto.PackageInfo, error) {
+	return nil, errors.New("not android")
+}
+
+// A nil slice marshals as JSON `null`, `packages` has no omitempty, and the
+// hub's schema wants an array — so this is what had a healthy machine reading
+// as offline: every frame it sent was dropped whole, liveness included.
+func TestMetricsAlwaysSendsPackagesAsAnArray(t *testing.T) {
+	m := Metrics(context.Background(), hostLike{}, []string{"com.nianticlabs.pokemongo"}, true)
+
+	if m.Packages == nil {
+		t.Fatal("Packages is nil, which marshals as null")
+	}
+
+	data, err := json.Marshal(m)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if !strings.Contains(string(data), `"packages":[]`) {
+		t.Errorf("want \"packages\":[] on the wire, got %s", data)
+	}
+	if strings.Contains(string(data), `"packages":null`) {
+		t.Error(`"packages":null is the frame the hub drops`)
 	}
 }

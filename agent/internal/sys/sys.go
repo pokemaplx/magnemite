@@ -1287,6 +1287,17 @@ func Metrics(ctx context.Context, s System, packages []string, withInventory boo
 		CPUTempC:          cpuTemp,
 		BatteryTempC:      batteryTemp,
 		CPUPercent:        s.CPUPercent(),
+		// Empty rather than nil, because `packages` has no omitempty: a nil
+		// slice marshals as JSON `null`, and the hub's schema takes an array.
+		// A host lists nothing -- PackageInfo and ThirdPartyPackages both
+		// refuse, by design -- so it sent null on every beat, and the hub
+		// dropped the whole frame. The frame carries liveness too, so the
+		// machine read as offline while sitting there perfectly healthy.
+		//
+		// The hub tolerates null now as well. This is the other half: the
+		// agent should say "nothing installed" rather than "no answer", which
+		// on a machine is the truth.
+		Packages: []proto.PackageInfo{},
 		// Same cost class as the readings above — a handful of small /proc
 		// reads for the tracked apps — so it rides every beat rather than
 		// waiting for the inventory pass.
