@@ -31,6 +31,10 @@ RUN set -e; \
 # downloaded by the machine: it would need a token to fetch anything, and at
 # that point it has none.
 COPY agent/host/bootstrap.sh /out/bootstrap.sh
+# And what builds the Redroid image on a machine. The hub pushes these three
+# over the same SSH connection, because the tag is local and there is no
+# registry to pull it from -- so the machine builds it itself, once.
+COPY agent/redroid/Dockerfile agent/redroid/magnemite-start.sh agent/redroid/magnemite.rc /out/redroid/
 
 FROM node:22-alpine AS build
 # pnpm is baked into the image below with `corepack install`: with only

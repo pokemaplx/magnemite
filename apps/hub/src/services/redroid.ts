@@ -5,6 +5,7 @@ import { env } from "../env.js";
 import { log } from "../log.js";
 import { getConnection, sendTo } from "../registry.js";
 import { renderCompose } from "./redroidCompose.js";
+import { REDROID_IMAGE } from "../version.js";
 
 /**
  * The last host report per machine, in memory.
@@ -365,7 +366,7 @@ export async function convergeHost(
       // value that has broken every deployment of this at least once.
       serverUrl: env.MAGNEMITE_PUBLIC_URL.replace(/\/$/, ""),
       enrollToken: token,
-      image: host.image ?? "magnemite/redroid:1",
+      image: host.image ?? REDROID_IMAGE,
       memLimitBytes: host.memLimitBytes ?? BigInt(settings.memLimitBytes),
       cpuset: host.cpuset,
       gpuMode: host.gpuMode ?? settings.gpuMode,

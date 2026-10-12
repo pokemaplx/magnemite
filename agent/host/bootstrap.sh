@@ -167,6 +167,39 @@ else
 	fi
 fi
 
+# --- 5b. the Redroid image --------------------------------------------------
+#
+# Built here rather than pulled, because there is nothing to pull from: the tag
+# is local and this project publishes no registry. Without this step a freshly
+# provisioned machine enrols, reports, and then fails its first converge with
+# "pull access denied" on an image that was never going to exist.
+#
+# It is the same build `make redroid` does -- the base image plus the agent
+# binary, the start script and the init service -- and it is skipped when the
+# tag is already there, so re-running this is cheap.
+if [ -n "${MAGNEMITE_IMAGE:-}" ] && [ -d ./redroid ]; then
+	if docker image inspect "$MAGNEMITE_IMAGE" >/dev/null 2>&1; then
+		step image ok "$MAGNEMITE_IMAGE already built"
+	else
+		# The build context is this directory: the Dockerfile copies
+		# bin/magnemite-agent-linux-arm64 and redroid/*, so the binary has to
+		# sit where it expects rather than where it was pushed.
+		mkdir -p ./bin
+		cp "$AGENT_BIN" ./bin/magnemite-agent-linux-arm64
+		if docker build -f ./redroid/Dockerfile -t "$MAGNEMITE_IMAGE" . >/tmp/magnemite-build.log 2>&1; then
+			step image ok "built $MAGNEMITE_IMAGE"
+		else
+			# Not fatal to the bootstrap: the machine is otherwise ready and
+			# will enrol. The converge is what fails, and it says why -- which
+			# is a better place to find out than here, where the operator is
+			# not watching a 780 MB pull.
+			step image warn "could not build $MAGNEMITE_IMAGE (see /tmp/magnemite-build.log)"
+		fi
+	fi
+else
+	step image warn "no image build requested"
+fi
+
 # --- 6. the agent, its config and its unit ----------------------------------
 [ -f "$AGENT_BIN" ] || die agent "no agent binary at $AGENT_BIN"
 install -D -m 0755 "$AGENT_BIN" "$INSTALL_BIN"

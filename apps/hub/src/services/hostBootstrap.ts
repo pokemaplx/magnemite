@@ -5,6 +5,7 @@ import { generateToken, hashToken, prisma } from "@magnemite/db";
 import { env } from "../env.js";
 import { log } from "../log.js";
 import { clampError } from "./redroid.js";
+import { REDROID_IMAGE } from "../version.js";
 
 /**
  * Provisioning a machine over one outbound SSH connection.
@@ -92,9 +93,21 @@ async function run(id: string, serial: string, name: string, access: SshAccess):
     const token = await hostToken(name);
 
     await withConnection(access, async (client) => {
-      await exec(client, `mkdir -p ${REMOTE_DIR} && chmod 700 ${REMOTE_DIR}`);
+      await exec(client, `mkdir -p ${REMOTE_DIR}/redroid && chmod 700 ${REMOTE_DIR}`);
       await upload(client, binary, `${REMOTE_DIR}/magnemite-agent`, 0o755);
       await upload(client, script, `${REMOTE_DIR}/bootstrap.sh`, 0o755);
+
+      // The three files that build the Redroid image, because there is nothing
+      // to pull: the tag is local and this project publishes no registry.
+      // Without them a provisioned machine enrols, reports, and then fails its
+      // first converge on an image that was never going to exist.
+      for (const [name, mode] of [
+        ["Dockerfile", 0o644],
+        ["magnemite-start.sh", 0o755],
+        ["magnemite.rc", 0o644],
+      ] as const) {
+        await upload(client, await redroidFile(name), `${REMOTE_DIR}/redroid/${name}`, mode);
+      }
 
       // The token is passed in the environment rather than on the command
       // line, so it does not land in the machine's process list where any
@@ -106,6 +119,9 @@ async function run(id: string, serial: string, name: string, access: SshAccess):
           `MAGNEMITE_SERIAL=${shellQuote(serial)}`,
           `MAGNEMITE_NAME=${shellQuote(name)}`,
           `MAGNEMITE_TOKEN=${shellQuote(token)}`,
+          // The tag the compose file will name. One value from one place, so
+          // the machine cannot build one image and be asked to run another.
+          `MAGNEMITE_IMAGE=${shellQuote(REDROID_IMAGE)}`,
           `AGENT_BIN=./magnemite-agent`,
           "sh ./bootstrap.sh",
         ].join(" "),
@@ -308,6 +324,20 @@ async function agentBinary(): Promise<Buffer> {
     throw new Error(
       `no arm64 agent at ${file} — this hub image was built without the Go stage, so it has no binary to install`,
     );
+  }
+}
+
+/**
+ * One of the files that build the Redroid image, out of the hub's own image.
+ *
+ * Beside the agent builds, which is where the hub's Dockerfile puts them.
+ */
+async function redroidFile(name: string): Promise<Buffer> {
+  const file = path.join(env.AGENT_BIN_DIR, "redroid", name);
+  try {
+    return await fs.readFile(file);
+  } catch {
+    throw new Error(`no ${name} at ${file} — this hub image cannot build the Redroid image`);
   }
 }
 

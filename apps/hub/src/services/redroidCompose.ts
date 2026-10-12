@@ -1,3 +1,5 @@
+import { REDROID_IMAGE } from "../version.js";
+
 /**
  * Renders the compose file for one machine.
  *
@@ -186,3 +188,6 @@ function assertRenderable(host: RenderHost, instances: RenderInstance[]): void {
 }
 
 export { serviceName as composeServiceName };
+
+/** Re-exported so callers take the tag from one place. */
+export { REDROID_IMAGE as redroidImage };

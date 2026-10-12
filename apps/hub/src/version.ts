@@ -45,3 +45,20 @@ const VERSIONS = read();
 
 /** This process's own version. */
 export const HUB_VERSION = VERSIONS.hub ?? "dev";
+
+/**
+ * The Redroid image tag, from the same file.
+ *
+ * Versioned by what is *in* that image -- the base, the start script, the init
+ * service -- and deliberately not by the agent, whose binary inside is only a
+ * seed each box's own self-update replaces. A tag that moved with every agent
+ * release would change the rendered compose file and have Docker recreate every
+ * container on the machine for nothing.
+ *
+ * One place, because two halves depend on it: the bootstrap builds this tag on
+ * a new machine and the compose file names it. If they drifted, a freshly
+ * provisioned machine would build one image and be asked to run another -- and
+ * fail on a pull that cannot succeed, since the tag is local and there is no
+ * registry behind it.
+ */
+export const REDROID_IMAGE = `magnemite/redroid:${VERSIONS.redroid ?? "1"}`;
