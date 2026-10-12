@@ -284,7 +284,7 @@ export default function HomePage() {
                 Security
               </Link>
               <a
-                href="https://github.com/Rodaviva29/magnemite"
+                href="https://github.com/pokemaplx/magnemite"
                 className="hover:text-fd-foreground"
               >
                 GitHub

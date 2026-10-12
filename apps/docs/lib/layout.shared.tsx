@@ -22,7 +22,7 @@ export function baseOptions(): BaseLayoutProps {
       ),
       transparentMode: "top",
     },
-    githubUrl: "https://github.com/Rodaviva29/magnemite",
+    githubUrl: "https://github.com/pokemaplx/magnemite",
     links: [
       {
         text: "Documentation",
