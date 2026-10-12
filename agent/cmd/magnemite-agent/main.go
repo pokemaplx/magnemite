@@ -20,12 +20,22 @@ import (
 	"magnemite/agent/internal/agent"
 	"magnemite/agent/internal/certfix"
 	"magnemite/agent/internal/config"
+	hostpkg "magnemite/agent/internal/host"
 	"magnemite/agent/internal/netfix"
 	"magnemite/agent/internal/sys"
 )
 
 // Set at build time: -ldflags "-X main.version=1.2.3"
 var version = "dev"
+
+// Where a machine keeps its compose project, matching RedroidHost's defaults.
+// Constants rather than flags: the hub owns these values, and a machine that
+// disagreed with the hub about which project its containers are under would
+// have `--remove-orphans` consider all of them strangers.
+const (
+	hostProject = "magnemite-redroid"
+	hostDir     = "/etc/magnemite/redroid"
+)
 
 func main() {
 	var (
@@ -36,6 +46,8 @@ func main() {
 		workDir     = flag.String("work-dir", "", "scratch directory (default "+config.DefaultWorkDir+")")
 		serial      = flag.String("serial", "", "serial to report instead of ro.serialno")
 		rebootCmd   = flag.String("reboot-command", "", "what a reboot from the hub runs (default \"reboot\")")
+		hostMode    = flag.Bool("host", false, "run as the Linux machine that holds Redroid containers, not as a box")
+		fakeDocker  = flag.Bool("fake-docker", false, "in -host mode, stub only the docker calls")
 		fakeRoot    = flag.Bool("fake-root", false, "simulate an Android box instead of touching a real one")
 		fakeSerial  = flag.String("fake-serial", "", "serial to report in -fake-root mode")
 		showVersion = flag.Bool("version", false, "print the agent version and exit")
@@ -90,7 +102,32 @@ func main() {
 	}
 
 	var system sys.System
-	if *fakeRoot {
+	var reporter agent.HostReporter
+
+	switch {
+	case *hostMode:
+		// A machine, not a box. It is the same binary and the same socket; what
+		// changes is where the readings come from and that a host block rides
+		// along. See agent/internal/sys/host.go for why that type embeds the
+		// Android one rather than reimplementing /proc.
+		if cfg.Serial == "" {
+			log.Fatalf("-host needs a serial: the hub keys a machine on it, and one derived from the machine itself would be cloned by a VPS snapshot")
+		}
+		host := sys.NewHost(cfg.Serial)
+		system = host
+		if cfg.WorkDir == "" || cfg.WorkDir == config.DefaultWorkDir {
+			cfg.WorkDir = filepath.Join(os.TempDir(), "magnemite-host")
+		}
+		if *fakeDocker {
+			reporter = hostpkg.NewFakeReporter(hostProject, hostpkg.FakeInstancesFromEnv(0))
+			log.Printf("running in -fake-docker mode — only the docker calls are stubbed")
+		} else {
+			reporter = hostpkg.NewReporter(hostProject, hostDir, host.DiskPath())
+		}
+		log.SetPrefix("[" + cfg.Serial + "] ")
+		log.Printf("running as a Redroid host, measuring disk on %s", host.DiskPath())
+
+	case *fakeRoot:
 		serial := *fakeSerial
 		if serial == "" {
 			serial = "fake-" + filepath.Base(path)
@@ -101,7 +138,8 @@ func main() {
 		system = sys.NewFake(serial, path+".state")
 		log.SetPrefix("[" + serial + "] ")
 		log.Printf("running in fake-root mode — no real device is touched")
-	} else {
+
+	default:
 		system = sys.NewAndroid(cfg.Serial)
 		if servers := netfix.Install(); len(servers) > 0 {
 			// Android has no /etc/resolv.conf; without this every lookup fails.
@@ -129,6 +167,9 @@ func main() {
 	}
 
 	a := agent.New(cfg, system, version, path)
+	// Nil on a box, which is what keeps the host block absent from everything a
+	// box sends rather than present and empty.
+	a.Host = reporter
 	if err := a.Run(ctx); err != nil && ctx.Err() == nil {
 		log.Fatalf("agent stopped: %v", err)
 	}

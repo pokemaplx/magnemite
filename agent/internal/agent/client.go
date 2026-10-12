@@ -39,7 +39,23 @@ const (
 	// One full package inventory every 15 heartbeats — five minutes at the
 	// default rate.
 	inventoryEveryBeats = 15
+
+	// A whole beat's budget for the host block, and no more. Long enough for a
+	// `compose ps` plus an inspect per container on a loaded machine; short
+	// enough that a wedged daemon cannot stop the beat itself.
+	hostReportTimeout = 20 * time.Second
 )
+
+// HostReporter is the half of a report only a machine running containers has.
+//
+// An interface and not a concrete type so the fake can stand in: the whole
+// point of -fake-docker is that everything except the two docker calls is
+// real, and that only works if the docker calls are the seam.
+type HostReporter interface {
+	// Report is what this machine is and what containers it is holding. It is
+	// allowed to be slow -- it shells out -- and it is called once per beat.
+	Report(ctx context.Context) *proto.HostInfo
+}
 
 type Agent struct {
 	Cfg     *config.Config
@@ -47,6 +63,13 @@ type Agent struct {
 	Version string
 	// Path the config was loaded from, so a rotated token can be written back.
 	ConfigPath string
+	// Set only in host mode, and nil on every box.
+	//
+	// This is the whole of what -host changes about the client: the loop below
+	// reconnects, enrols, beats, takes a welcome, runs exec and updates itself
+	// identically either way. A machine is a Device, so none of that needed a
+	// second copy.
+	Host HostReporter
 
 	mu      sync.Mutex
 	conn    *websocket.Conn
@@ -250,7 +273,25 @@ func (a *Agent) sendHello() error {
 		Metrics:         metrics,
 		CurrentJobID:    a.currentJob(),
 		Capabilities:    proto.AgentCapabilities(),
+		Host:            a.hostReport(ctx),
 	})
+}
+
+// hostReport is nil on a box, which is what keeps the field absent from every
+// message a box sends rather than present and empty.
+//
+// Given its own timeout rather than the caller's: it shells out to docker, and
+// a daemon that has wedged must cost this beat its host block and nothing else.
+// A machine whose docker is gone still has to heartbeat -- that is the fault
+// the hub needs to see, and a beat that never arrives looks like a different
+// one.
+func (a *Agent) hostReport(ctx context.Context) *proto.HostInfo {
+	if a.Host == nil {
+		return nil
+	}
+	ctx, cancel := context.WithTimeout(ctx, hostReportTimeout)
+	defer cancel()
+	return a.Host.Report(ctx)
 }
 
 // monitorSpec is what to watch this beat, or nil when there is nothing to
@@ -358,6 +399,7 @@ func (a *Agent) heartbeatLoop(ctx context.Context) {
 				Type:         "heartbeat",
 				Metrics:      metrics,
 				CurrentJobID: a.currentJob(),
+				Host:         a.hostReport(ctx),
 			}); err != nil {
 				return
 			}
