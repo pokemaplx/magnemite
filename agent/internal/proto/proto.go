@@ -86,6 +86,20 @@ type DeviceMetrics struct {
 	MemTotalBytes     uint64  `json:"memTotalBytes,omitempty"`
 	MemAvailableBytes uint64  `json:"memAvailableBytes,omitempty"`
 
+	// Share of a single core across the whole machine, so 250 means two and a
+	// half cores spent. The only CPU figure a container actually has: inside
+	// one, /proc/loadavg is the host's, while its own cgroup accounts its CPU
+	// time exactly.
+	//
+	// All three of these are pointers for the reason ProcessCount is one, and
+	// here it matters more: an idle machine reads a genuine 0.0, and a machine
+	// with no swap reads a genuine 0 bytes. omitempty on plain values would
+	// drop both, and the hub writes an absent field as "leave what you had" --
+	// so a stale number would sit on the row forever.
+	CPUPercent     *float64 `json:"cpuPercent,omitempty"`
+	SwapTotalBytes *uint64  `json:"swapTotalBytes,omitempty"`
+	SwapFreeBytes  *uint64  `json:"swapFreeBytes,omitempty"`
+
 	// Degrees Celsius. Plenty of TV boxes expose no thermal zone at all, so
 	// omitempty here means "this box cannot say" — which the hub stores as
 	// null and the dashboard renders as an absent chart, not a zero.
@@ -120,6 +134,53 @@ type CheckResult struct {
 
 // --- agent -> hub ----------------------------------------------------------
 
+// ContainerStat is one Redroid container as the host's docker saw it.
+//
+// This is the half of an instance's state nothing inside the container can
+// see: docker stats reports neither the state nor the restart count, and a
+// process in the guest cannot ask. Everything else about a box comes from the
+// agent inside it, over its own socket.
+type ContainerStat struct {
+	Name string `json:"name"`
+	// The serial the container was started with, read back off its own command
+	// line rather than assumed -- which is what makes adopting a hand-written
+	// compose file possible at all.
+	Serial string `json:"serial,omitempty"`
+	// docker's own word: running, exited, restarting, created, paused.
+	State string `json:"state"`
+	// Pointers, same rule as everywhere else here: a container that has never
+	// restarted reports a genuine zero, and a limit of zero means unlimited.
+	RestartCount  *int    `json:"restartCount,omitempty"`
+	MemLimitBytes *uint64 `json:"memLimitBytes,omitempty"`
+	Image         string  `json:"image,omitempty"`
+}
+
+// HostInfo is what a machine says about itself, beyond the readings every
+// Device sends. Omitted entirely by a box, which is what lets the host half
+// ride the socket that already exists rather than needing one of its own.
+type HostInfo struct {
+	// uname -m. arm64 is a hard requirement, and this is the evidence of what
+	// the bootstrap found rather than an assumption.
+	Arch string `json:"arch,omitempty"`
+	// uname -r. Its own field because linux-modules-extra is per kernel
+	// version: an apt upgrade that installs a new kernel leaves binder behind
+	// and every container fails to come up after the reboot.
+	Kernel        string `json:"kernel,omitempty"`
+	DockerVersion string `json:"dockerVersion,omitempty"`
+	// Whether the binder devices Android needs were actually present, as
+	// opposed to the modprobe having been run. A pointer because false is the
+	// answer that matters and omitempty would hide it.
+	BinderOk *bool  `json:"binderOk,omitempty"`
+	Project  string `json:"project,omitempty"`
+	// sha256 of the compose file on disk, read back after writing it -- what is
+	// on the machine rather than what the hub meant, the same rule a written
+	// MITM config follows.
+	ComposeSha256 string `json:"composeSha256,omitempty"`
+	// Every container under the project, running or not. Empty is a real
+	// answer: a machine with nothing on it yet.
+	Containers []ContainerStat `json:"containers"`
+}
+
 type Hello struct {
 	Type            string        `json:"type"` // "hello"
 	ProtocolVersion int           `json:"protocolVersion"`
@@ -132,6 +193,8 @@ type Hello struct {
 	// version arithmetic reads a backported build as too old, and what that
 	// costs is a message sent to a box that silently drops it.
 	Capabilities []string `json:"capabilities,omitempty"`
+	// Set only in host mode. Absent from every box.
+	Host *HostInfo `json:"host,omitempty"`
 }
 
 // Capabilities this build reports in Hello. Add the constant next to the
@@ -149,6 +212,8 @@ type Heartbeat struct {
 	Type         string        `json:"type"` // "heartbeat"
 	Metrics      DeviceMetrics `json:"metrics"`
 	CurrentJobID string        `json:"currentJobId,omitempty"`
+	// Set only in host mode. Absent from every box.
+	Host *HostInfo `json:"host,omitempty"`
 }
 
 type JobProgress struct {

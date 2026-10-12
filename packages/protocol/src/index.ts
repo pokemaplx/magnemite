@@ -125,6 +125,32 @@ export const deviceMetricsSchema = z.object({
   memAvailableBytes: z.number().nonnegative().nullish(),
 
   /**
+   * Share of a *single* core this whole machine is spending, so 250 means two
+   * and a half cores — the same convention as `processStatsSchema`, and the
+   * one that composes.
+   *
+   * The honest version of the load average, and the only CPU figure a
+   * container has. Inside one, `/proc/loadavg` is the host's and there is
+   * nothing to scope it to; its own cgroup accounts its CPU time exactly. On
+   * hardware this is `/proc/stat` deltas and means the same thing, which is
+   * what lets a TV box and a container share one chart.
+   */
+  cpuPercent: z.number().nonnegative().nullish(),
+
+  /**
+   * Swap, which in practice only a host has. Fifty workers in a container is
+   * where a VPS runs out of RAM, and swap is what stands between that and the
+   * OOM killer taking a box down mid-scan.
+   *
+   * Zero is a real answer and means *no swap configured*, which is worth
+   * knowing. That is why the Go side sends these as pointers: `omitempty` on a
+   * plain integer would drop a genuine zero and the hub would read it as "has
+   * not said yet".
+   */
+  swapTotalBytes: z.number().nonnegative().nullish(),
+  swapFreeBytes: z.number().nonnegative().nullish(),
+
+  /**
    * Degrees Celsius off the box's thermal zones. Not every ROM exposes one —
    * plenty of TV boxes ship with an empty /sys/class/thermal — so null here
    * means "this box cannot say", which the dashboard shows as an absent chart
@@ -166,6 +192,92 @@ export const deviceMetricsSchema = z.object({
 // agent -> hub
 // ---------------------------------------------------------------------------
 
+/**
+ * One Redroid container, as the host's docker saw it a moment ago.
+ *
+ * This is the half of an instance's state that nothing inside the container
+ * can see: `docker stats` reports no container state and no restart count, and
+ * a process in the guest has no way to ask. Everything else about a box — its
+ * memory, its storage, its packages — comes from the agent inside it, over its
+ * own socket, like any other box.
+ */
+export const containerStatSchema = z.object({
+  /** The container's name, which the renderer derives from the instance index. */
+  name: z.string(),
+  /**
+   * The serial the container was started with, read back off its own command
+   * line rather than assumed. This is what matches it to an instance row, and
+   * reading it back is what makes adoption of a hand-written compose file
+   * possible at all.
+   */
+  serial: z.string().nullish(),
+  /** docker's own word: running, exited, restarting, created, paused. */
+  state: z.string(),
+  /**
+   * Climbing restart counts are what distinguish a crash-looping instance from
+   * an idle one. Null from a docker that did not say, never zero for it.
+   */
+  restartCount: z.number().int().nonnegative().nullish(),
+  /**
+   * The memory limit docker reports it actually applied.
+   *
+   * Reported rather than assumed because it is the single most consequential
+   * field in the rendered file: it is what makes a box report its own RAM
+   * instead of the machine's, and a silent miss would have every container on
+   * a host claiming the whole machine's memory. The hub compares it against
+   * what it asked for.
+   */
+  memLimitBytes: z.number().nonnegative().nullish(),
+  image: z.string().nullish(),
+});
+export type ContainerStat = z.infer<typeof containerStatSchema>;
+
+/**
+ * What a host says about itself, beyond the readings every machine sends.
+ *
+ * Optional on both `hello` and `heartbeat`, and absent from every box, which
+ * is what lets this ride the existing socket rather than needing one of its
+ * own. A host *is* a Device: same enrollment, same token, same `welcome`, same
+ * metrics, same self-update.
+ */
+export const hostInfoSchema = z.object({
+  /** `uname -m`. arm64 is a hard requirement, and this is the evidence. */
+  arch: z.string().nullish(),
+  /**
+   * `uname -r`. Worth a column of its own because `linux-modules-extra` is per
+   * kernel version: an apt upgrade that installs a new kernel leaves binder
+   * behind and every container fails to come up after the reboot. Seeing the
+   * kernel move is how that gets spotted.
+   */
+  kernel: z.string().nullish(),
+  dockerVersion: z.string().nullish(),
+  /**
+   * Whether the binder devices Android needs were actually there, as opposed
+   * to the modprobe having been run. Redroid's own documentation disagrees
+   * with itself about whether a modern kernel needs the module at all, so the
+   * end state is what gets checked.
+   */
+  binderOk: z.boolean().nullish(),
+  /** The compose project the containers below were found under. */
+  project: z.string().nullish(),
+  /**
+   * sha256 of the compose file on disk, read back after writing it.
+   *
+   * Says what is on the machine rather than what the hub meant — the same rule
+   * a written MITM config follows. The hub compares a fresh render against
+   * this to decide whether a converge is needed at all, which is why the
+   * render has to be a pure function of the instance rows.
+   */
+  composeSha256: z.string().nullish(),
+  /**
+   * Every container under the project, running or not. An empty array is a
+   * real answer (a machine with nothing on it); absent means this agent does
+   * not report containers.
+   */
+  containers: z.array(containerStatSchema).default([]),
+});
+export type HostInfo = z.infer<typeof hostInfoSchema>;
+
 export const helloSchema = z.object({
   type: z.literal("hello"),
   protocolVersion: z.number().int().default(1),
@@ -183,12 +295,16 @@ export const helloSchema = z.object({
    * message sent to a box that silently drops it.
    */
   capabilities: z.array(z.string()).default([]),
+  /** Set only by an agent in host mode. Absent from every box. */
+  host: hostInfoSchema.nullish(),
 });
 
 export const heartbeatSchema = z.object({
   type: z.literal("heartbeat"),
   metrics: deviceMetricsSchema,
   currentJobId: z.string().nullish(),
+  /** Set only by an agent in host mode. Absent from every box. */
+  host: hostInfoSchema.nullish(),
 });
 
 export const jobProgressSchema = z.object({
