@@ -83,8 +83,18 @@ module: agent ## Package the Magisk module zip into dist/
 # and are passed through only when set.
 REDROID_BASE   ?=
 MAGISK_VERSION ?=
+# The owner of the Magisk repo and the apk's md5, overridable for the same
+# reason and more carefully: the init block in the Dockerfile needs a *patched*
+# Magisk -- `--setup-sbin` and `--auto-selinux` are the fork's, not upstream's
+# -- so a MAGISK_VERSION on its own is a bump of the fork's tag, and pointing
+# MAGISK_REPO at topjohnwu builds an image that roots nothing. Set MAGISK_MD5=
+# empty to skip the integrity check when trying another version.
+MAGISK_REPO    ?=
+MAGISK_MD5     ?=
 REDROID_ARGS    = $(if $(REDROID_BASE),--build-arg REDROID=$(REDROID_BASE))
 REDROID_ARGS   += $(if $(MAGISK_VERSION),--build-arg MAGISK=$(MAGISK_VERSION))
+REDROID_ARGS   += $(if $(MAGISK_REPO),--build-arg MAGISK_REPO=$(MAGISK_REPO))
+REDROID_ARGS   += $(if $(MAGISK_MD5),--build-arg MAGISK_MD5=$(MAGISK_MD5))
 # Versioned by what is *in* the image -- the base, the start script, the .rc --
 # and deliberately not by the agent version.
 #

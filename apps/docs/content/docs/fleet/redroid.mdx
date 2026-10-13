@@ -62,7 +62,7 @@ sudo modprobe ashmem_linux
 
 ```sh
 make redroid
-# → magnemite/redroid:3
+# → magnemite/redroid:4
 ```
 
 Unlike `make module`, this takes no `SERVER` and no `TOKEN`. **The image holds
@@ -169,12 +169,39 @@ so doing it in the image keeps provisioning to one `docker build` on the
 machine: no Python, no `lzip`, nothing fetched from a third party while a
 machine is being set up.
 
-<Callout type="warn" title="Hiding is Zygisk and the DenyList now, not MagiskHide">
-  This is **upstream** Magisk, not Delta. Delta's `hide=1` does not exist here and cannot be put
-  back — there is nowhere left to download Delta from. Hiding root from a scanner's worker processes
-  is `zygisk=1` plus a DenyList, which is the mechanism upstream Magisk has had since v24. Anything
-  that was configured against MagiskHide has to be configured again.
+The apk comes from
+[`ayasa520/Magisk`](https://github.com/ayasa520/Magisk) — the script's own
+source for it, and **not** `topjohnwu/Magisk`. That is load-bearing rather than
+incidental, and it is the one thing to understand before bumping `MAGISK`.
+
+<Callout type="error" title="The init block needs the fork's Magisk, and upstream's fails silently">
+  `--setup-sbin` and `--auto-selinux` appear on every line of the hook, and **neither flag is a
+  Magisk feature**. They are patches carried by the fork, whose branch is named
+  `direct-system-install`; upstream has never had them.
+
+Point `MAGISK_REPO` at `topjohnwu` and nothing visibly breaks: the tag resolves, the apk unpacks,
+the binaries are named what the hook calls, and the image builds clean. Then every box boots with
+**no root at all** — `init` runs `--setup-sbin`, Magisk answers `Unrecognized argument`,
+`/sbin/magisk` is never created, and each later line of the hook calls a binary that does not
+exist. There is no daemon left to complain to, so nothing in `logcat` mentions root; what an
+operator sees is a scanner that installs, launches the game, reports healthy and injects nothing —
+the same silence as the two failures above, and reached a different way.
+
+`make redroid` now refuses this: the build greps the binary for both flags and fails naming the
+repo. The `test -x` asserts never caught it, because upstream's binary is called `magisk` too.
+
 </Callout>
+
+<Callout type="warn" title="Hiding is Zygisk and the DenyList now, not MagiskHide">
+  This is not Delta. Delta's `hide=1` does not exist here and cannot be put back — there is nowhere
+  left to download Delta from. Hiding root from a scanner's worker processes is `zygisk=1` plus a
+  DenyList, which is the mechanism Magisk has had since v24. Anything that was configured against
+  MagiskHide has to be configured again.
+</Callout>
+
+The apk's md5 is pinned beside the version, so a release that moves or an owner
+changed by hand fails the build instead of the fleet. Trying another version
+means moving both, or `MAGISK_MD5=` empty to skip the check.
 
 ## Run the boxes
 

@@ -43,13 +43,30 @@ ARG REDROID=redroid/redroid:12.0.0_64only-latest
 # keeps the whole thing to one `docker build` on the machine: no python, no
 # lzip, and no third-party script fetched while provisioning.
 #
-# One consequence worth knowing rather than discovering. This is **upstream**
-# Magisk, not Delta, so hiding is Zygisk and the DenyList -- `zygisk=1` and a
-# list of packages -- and not Delta's MagiskHide (`hide=1`), which no longer
-# exists anywhere to install.
+# One consequence worth knowing rather than discovering. This is not Delta, so
+# hiding is Zygisk and the DenyList -- `zygisk=1` and a list of packages -- and
+# not Delta's MagiskHide (`hide=1`), which no longer exists anywhere to install.
 #
-# Pinned rather than latest, because it runs as root on every box.
+# And it is **not upstream either**, which is the part that cost a fleet its
+# root. `--setup-sbin` and `--auto-selinux` -- on every line of the init block
+# below -- are not Magisk features. They are carried by the fork the script
+# downloads, whose branch is named `direct-system-install`, and upstream has
+# never had them. Build this against topjohnwu/Magisk and the version number
+# resolves, the apk unpacks, all three asserts below pass, and the box boots
+# with no root at all: init runs `--setup-sbin`, Magisk answers "Unrecognized
+# argument", /sbin/magisk is never created, and every later line in the hook
+# calls a binary that is not there. There is no daemon to complain, so nothing
+# in logcat says "no root" -- what the operator sees is the scanner injecting
+# nothing, which is the same silence described under the grant below.
+#
+# So the owner of this URL is load-bearing, and the md5 is what keeps a bump
+# honest: the flags have to come from the same tree as the init block.
+#
+# Pinned rather than latest, because it runs as root on every box -- and third
+# party rather than upstream, which is worth a second thought on each bump.
 ARG MAGISK=v30.7
+ARG MAGISK_REPO=ayasa520/Magisk
+ARG MAGISK_MD5=0a31050fdcfaa15f47c9dd1eb8d04fc8
 
 # Only so a later stage can read files out of the base. Android is not a Linux
 # distribution and has no /bin/sh, so nothing can be computed *in* the image --
@@ -58,6 +75,8 @@ FROM ${REDROID} AS base
 
 FROM alpine:3.20 AS magisk
 ARG MAGISK
+ARG MAGISK_REPO
+ARG MAGISK_MD5
 
 # The real one, rather than a copy written down here. It is byte-identical to
 # the version the script hardcodes today, and reading it means a change
@@ -70,7 +89,17 @@ RUN <<'SH'
 set -eu
 
 curl -fsSL -o /tmp/magisk.apk \
-    "https://github.com/topjohnwu/Magisk/releases/download/${MAGISK}/Magisk-${MAGISK}.apk"
+    "https://github.com/${MAGISK_REPO}/releases/download/${MAGISK}/Magisk-${MAGISK}.apk"
+
+# What stops a bump from quietly swapping the tree the init block needs. The
+# apk is downloaded over TLS from a tag, so this is not about interception --
+# it is about a release that moved, or an owner swapped by hand while the md5
+# below was left alone. Skipped when empty, so an experiment with another
+# version is `--build-arg MAGISK=... --build-arg MAGISK_MD5=`.
+if [ -n "${MAGISK_MD5:-}" ]; then
+    echo "${MAGISK_MD5}  /tmp/magisk.apk" | md5sum -c -
+fi
+
 unzip -o /tmp/magisk.apk 'lib/arm64-v8a/*' -d /tmp/magisk
 
 OUT=/out
@@ -89,6 +118,30 @@ done
 test -x "$OUT/system/etc/init/magisk/magisk"
 test -x "$OUT/system/etc/init/magisk/magiskpolicy"
 test -x "$OUT/system/etc/init/magisk/busybox"
+
+# And that the binary takes the flags the init block passes it, which the three
+# asserts above never checked -- they check that a file called `magisk` exists,
+# and upstream's is called that too. That gap is the whole bug: a build against
+# the wrong owner passed every test here and shipped an image that could not
+# root a single box.
+#
+# Grepped rather than run. These are Android arm64 binaries and this stage is
+# whatever the build host is, so `magisk --help` is not available to ask -- but
+# an argument parser has to carry its own flag names as strings, so their
+# absence is as legible in the binary as in the help text.
+#
+# Both, because they fail differently and only one of them is loud: without
+# `--setup-sbin` there is no /sbin/magisk and nothing roots, while
+# `--auto-selinux` missing would leave the execs running under whatever context
+# init gave them.
+for flag in setup-sbin auto-selinux; do
+    grep -qa "$flag" "$OUT/system/etc/init/magisk/magisk" || {
+        echo "this Magisk build has no --$flag, so the bootanim.rc hook below" >&2
+        echo "cannot work: ${MAGISK_REPO} ${MAGISK} is not the patched tree the" >&2
+        echo "init block is written for (upstream has never carried these)." >&2
+        exit 1
+    }
+done
 
 # The app installs itself on first boot, from here.
 install -m 0644 /tmp/magisk.apk "$OUT/system/etc/init/magisk/magisk.apk"
