@@ -1,5 +1,12 @@
 {
   "title": "Deployment",
   "icon": "Server",
-  "pages": ["docker-compose", "coolify", "redroid-bootstrap", "environment", "settings"]
+  "pages": [
+    "docker-compose",
+    "coolify",
+    "redroid-bootstrap",
+    "machine-at-home",
+    "environment",
+    "settings"
+  ]
 }

@@ -10,6 +10,7 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/com
 import { Checkbox } from "@/components/ui/checkbox";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { Select } from "@/components/ui/select";
 import {
   Table,
   TableBody,
@@ -25,6 +26,7 @@ export type TokenRow = {
   id: string;
   label: string;
   prefix: string;
+  kind: "BOX" | "HOST";
   autoApprove: boolean;
   uses: number;
   maxUses: number | null;
@@ -32,7 +34,7 @@ export type TokenRow = {
   createdAt: string;
 };
 
-type TokenState = ActionState & { token?: string };
+type TokenState = ActionState & { token?: string; kind?: "BOX" | "HOST" };
 
 export function EnrollmentSection({
   tokens,
@@ -48,6 +50,8 @@ export function EnrollmentSection({
   // Controlled only so the box can say what the tick means. Radix writes the
   // hidden `autoApprove` input either way, so the form posts the same.
   const [autoApprove, setAutoApprove] = useState(true);
+  const [kind, setKind] = useState("BOX");
+  const forHost = kind === "HOST";
 
   // The real token once there is one, so the commands below can be copied and
   // run. Before that they are still worth showing, with the placeholder the
@@ -73,6 +77,18 @@ make module SERVER=${publicUrl} TOKEN=${token}
 # Windows PowerShell
 ./scripts/build-agent.ps1 -Server ${publicUrl} -Token ${token}`;
 
+  // What to do with a *machine* token, which is a different artifact entirely:
+  // no config.json, no module zip, just the environment the bootstrap reads.
+  // Shown only after one is minted, because until then the box commands above
+  // are the ones that apply -- and pasting a machine token into either of them
+  // is a mistake nothing downstream catches.
+  const mintedHost = state.kind === "HOST";
+  const bootstrapCommand = `MAGNEMITE_SERVER=${publicUrl} \\
+MAGNEMITE_TOKEN=${token} \\
+MAGNEMITE_NAME=hel-01 \\
+MAGNEMITE_SERIAL=<any stable, unique value> \\
+sh ./bootstrap.sh`;
+
   return (
     <Card>
       <CardHeader>
@@ -81,8 +97,8 @@ make module SERVER=${publicUrl} TOKEN=${token}
           Enrollment tokens
         </CardTitle>
         <CardDescription>
-          A new box presents one of these once and gets a token of its own back. Only the hash is
-          stored, so a token is shown exactly one time.
+          A new box — or a machine being provisioned by hand — presents one of these once and gets a
+          token of its own back. Only the hash is stored, so a token is shown exactly one time.
         </CardDescription>
       </CardHeader>
 
@@ -99,30 +115,47 @@ make module SERVER=${publicUrl} TOKEN=${token}
           </div>
         ) : null}
 
-        <div className="flex flex-col gap-2">
-          <Label>Put this on the box at /data/adb/magnemite/config.json</Label>
-          <pre className="overflow-x-auto rounded-lg border border-border bg-subtle p-3 font-mono text-xs">
-            {sample}
-          </pre>
-        </div>
+        {mintedHost ? (
+          <div className="flex flex-col gap-2">
+            <Label>Give this to the bootstrap, on the machine</Label>
+            <pre className="overflow-x-auto rounded-lg border border-border bg-subtle p-3 font-mono text-xs">
+              {bootstrapCommand}
+            </pre>
+            <p className="text-xs text-muted-foreground">
+              A machine token belongs to no box: it enrols one host, once. Only the manual path
+              needs it — <strong>Machines → Add machine</strong> mints its own and nobody ever sees
+              it. The serial is identity and must never change afterwards.
+            </p>
+          </div>
+        ) : (
+          <>
+            <div className="flex flex-col gap-2">
+              <Label>Put this on the box at /data/adb/magnemite/config.json</Label>
+              <pre className="overflow-x-auto rounded-lg border border-border bg-subtle p-3 font-mono text-xs">
+                {sample}
+              </pre>
+            </div>
 
-        <div className="flex flex-col gap-2">
-          <Label>Or bake it into the Magisk module zip, to flash a batch</Label>
-          <pre className="overflow-x-auto rounded-lg border border-border bg-subtle p-3 font-mono text-xs">
-            {buildCommands}
-          </pre>
-          <p className="text-xs text-muted-foreground">
-            Either one writes that same config.json into the zip, so a flashed box enrols on its own
-            with no further typing. Server and token go together: both refuse one without the
-            other. Then flash the batch.
-          </p>
-        </div>
+            <div className="flex flex-col gap-2">
+              <Label>Or bake it into the Magisk module zip, to flash a batch</Label>
+              <pre className="overflow-x-auto rounded-lg border border-border bg-subtle p-3 font-mono text-xs">
+                {buildCommands}
+              </pre>
+              <p className="text-xs text-muted-foreground">
+                Either one writes that same config.json into the zip, so a flashed box enrols on its
+                own with no further typing. Server and token go together: both refuse one without
+                the other. Then flash the batch.
+              </p>
+            </div>
+          </>
+        )}
 
         {tokens.length > 0 ? (
           <Table containerClassName="max-h-[24rem]">
             <TableHeader>
               <TableRow>
                 <TableHead>Label</TableHead>
+                <TableHead>Enrols</TableHead>
                 <TableHead>Prefix</TableHead>
                 <TableHead>Uses</TableHead>
                 <TableHead>Auto-approve</TableHead>
@@ -137,6 +170,9 @@ make module SERVER=${publicUrl} TOKEN=${token}
                     <span className={token.revoked ? "text-muted-foreground line-through" : ""}>
                       {token.label}
                     </span>
+                  </TableCell>
+                  <TableCell className="text-xs text-muted-foreground">
+                    {token.kind === "HOST" ? "a machine" : "boxes"}
                   </TableCell>
                   <TableCell className="font-mono text-xs">{token.prefix}…</TableCell>
                   <TableCell className="font-mono text-xs">
@@ -180,6 +216,20 @@ make module SERVER=${publicUrl} TOKEN=${token}
               <Input id="token-label" name="label" placeholder="batch-2" className="w-48" />
             </div>
             <div className="flex flex-col gap-2">
+              <Label htmlFor="token-kind">Enrols</Label>
+              <Select
+                id="token-kind"
+                name="kind"
+                value={kind}
+                onValueChange={setKind}
+                className="w-40"
+                options={[
+                  { value: "BOX", label: "Boxes" },
+                  { value: "HOST", label: "A machine" },
+                ]}
+              />
+            </div>
+            <div className="flex flex-col gap-2">
               <Label htmlFor="token-uses">Max uses</Label>
               <Input
                 id="token-uses"
@@ -198,16 +248,29 @@ make module SERVER=${publicUrl} TOKEN=${token}
               <Label htmlFor="token-auto-approve">Auto-approve devices</Label>
               <label
                 htmlFor="token-auto-approve"
-                className="flex h-9 cursor-pointer items-center gap-2 rounded-lg border border-input bg-card px-3 text-sm"
+                className={
+                  "flex h-9 items-center gap-2 rounded-lg border border-input bg-card px-3 text-sm " +
+                  (forHost ? "opacity-40" : "cursor-pointer")
+                }
               >
                 <Checkbox
                   id="token-auto-approve"
                   name="autoApprove"
-                  checked={autoApprove}
+                  checked={forHost || autoApprove}
+                  disabled={forHost}
                   onCheckedChange={(value) => setAutoApprove(value === true)}
                 />
                 <span className="text-muted-foreground">
-                  {autoApprove ? "Joins the fleet" : "Waits for review"}
+                  {/* Not a choice on a machine, and saying so beats a tick
+                      nobody can clear: /internal/authz refuses an unapproved
+                      device, so a machine that enrolled pending would get a
+                      bare 401 from the edge on its first self-update with
+                      nothing anywhere to explain it. */}
+                  {forHost
+                    ? "Always, for a machine"
+                    : autoApprove
+                      ? "Joins the fleet"
+                      : "Waits for review"}
                 </span>
               </label>
             </div>

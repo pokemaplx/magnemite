@@ -29,11 +29,21 @@ box receives ◄─ its own deviceToken   ─► and deletes the enrollment
 so a lost token is not recovered, it is replaced. `make seed` also mints one on
 a fresh database.
 
-| Control          | Effect                                                                 |
-| ---------------- | ---------------------------------------------------------------------- |
-| **Max uses**     | A batch of 20 boxes gets a token good for exactly 20 enrollments.      |
-| **Auto-approve** | Off, boxes sit _pending_ until approved and receive nothing meanwhile. |
-| **Revoke**       | Stops further enrollments. Boxes already enrolled are unaffected.      |
+| Control          | Effect                                                                      |
+| ---------------- | --------------------------------------------------------------------------- |
+| **Enrols**       | Boxes, or a machine. A box token cannot bring a machine up, and vice versa. |
+| **Max uses**     | A batch of 20 boxes gets a token good for exactly 20 enrollments.           |
+| **Auto-approve** | Off, boxes sit _pending_ until approved and receive nothing meanwhile.      |
+| **Revoke**       | Stops further enrollments. Boxes already enrolled are unaffected.           |
+
+<Callout type="info" title="Machine tokens are for the manual path only">
+  **Machines → Add machine** mints its own, writes it into that machine's config over SSH and nobody
+  ever sees it — so **Enrols: A machine** is needed only when [provisioning a machine by
+  hand](/docs/deployment/redroid-bootstrap#the-manual-path). Such a token always auto-approves, and
+  the form offers no switch: `/internal/authz` refuses an unapproved device, so a machine that
+  enrolled pending would get a bare 401 from the edge on its first self-update with nothing anywhere
+  to explain it.
+</Callout>
 
 The agent rewrites `config.json` without the token as the last step of a
 successful enrollment.

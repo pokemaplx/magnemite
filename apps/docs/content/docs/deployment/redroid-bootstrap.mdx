@@ -16,7 +16,8 @@ one integration per provider and a stored credential with spending power.
 <Callout type="info" title="arm64 only">
   The fleet's `.apkm` bundles carry an `arm64-v8a` split and the agent matches ABI exactly, so an
   x86_64 machine is refused at the first step rather than half-provisioned. Any arm64 Linux with a
-  kernel that can do binder works — a VPS, an Ampere instance, a box in a rack.
+  kernel that can do binder works — a VPS, an Ampere instance, a box in a rack. A Mac is the one
+  that looks like it should and cannot: see [a machine at home](/docs/deployment/machine-at-home).
 </Callout>
 
 ## The one click
@@ -34,7 +35,7 @@ one integration per provider and a stored credential with spending power.
 | **Workers**        | Workers per instance, which is what reaches a scanner through `{{device.workers}}`        |
 
 Press **Create** and the hub opens one outbound SSH connection, pushes the agent
-binary, the bootstrap script and the three files that build the Redroid image,
+binary, the bootstrap script and the four files that build the Redroid image,
 runs the script, and follows its progress step by step. Then the machine enrolls
 itself, is adopted, and brings its instances up.
 
@@ -323,7 +324,9 @@ make agent
 ssh root@203.0.113.10 'mkdir -p /tmp/magnemite-bootstrap/redroid && chmod 700 /tmp/magnemite-bootstrap'
 scp agent/bin/magnemite-agent-linux-arm64 root@203.0.113.10:/tmp/magnemite-bootstrap/magnemite-agent
 scp agent/host/bootstrap.sh root@203.0.113.10:/tmp/magnemite-bootstrap/
-scp agent/redroid/Dockerfile agent/redroid/magnemite-start.sh agent/redroid/magnemite.rc root@203.0.113.10:/tmp/magnemite-bootstrap/redroid/
+scp agent/redroid/Dockerfile agent/redroid/magnemite-start.sh \
+  agent/redroid/magnemite-root-grant.sh agent/redroid/magnemite.rc \
+  root@203.0.113.10:/tmp/magnemite-bootstrap/redroid/
 ```
 
 ```sh title="on the machine"
@@ -334,7 +337,7 @@ MAGNEMITE_TOKEN=<host enrollment token> \
 MAGNEMITE_NAME=hel-01 \
 MAGNEMITE_SERIAL=<any stable, unique value> \
 MAGNEMITE_SSH_PORT=22 \
-MAGNEMITE_IMAGE=magnemite/redroid:1 \
+MAGNEMITE_IMAGE=magnemite/redroid:2 \
 sh ./bootstrap.sh
 ```
 
@@ -355,7 +358,7 @@ thing twice.
 | `/tmp/magnemite-bootstrap/` | Everything below, `0700`                                                                                                                            |
 | `…/magnemite-agent`         | The arm64 binary, `0755`                                                                                                                            |
 | `…/bootstrap.sh`            | This script, `0755`                                                                                                                                 |
-| `…/redroid/`                | `Dockerfile`, `magnemite-start.sh`, `magnemite.rc`                                                                                                  |
+| `…/redroid/`                | `Dockerfile`, `magnemite-start.sh`, `magnemite-root-grant.sh`, `magnemite.rc`                                                                       |
 | `…/bootstrap.env`           | The variables above, `0600` — sourced and deleted by the same command that runs the script, so the enrollment token is in no process's command line |
 
 And where it ends up:
@@ -371,9 +374,18 @@ And where it ends up:
 | `/etc/fail2ban/jail.d/magnemite.conf`                                  | The sshd jail, on the port sshd actually uses              |
 | `/swapfile`                                                            | Sized to RAM, plus its `fstab` line                        |
 
-Same artifact, two drivers. The host enrollment token comes from
-**Settings → Enrollment**; see [the machines page](/docs/fleet/redroid-hosts)
-for what happens after it enrolls.
+Same artifact, two drivers. The token comes from **Settings → Enrollment**,
+with **Enrols** set to **A machine** — a box token cannot bring a machine up
+and the only symptom is a device that never grows a Machines page. See [the
+machines page](/docs/fleet/redroid-hosts) for what happens after it enrolls.
+
+<Callout type="warn" title="Provisioned by hand means adopted by hand">
+  The one click remembers what it asked for and applies it the moment the machine dials in. A
+  machine provisioned by hand has no such record, so it enrols, appears under **Machines**, and sits
+  there marked `not adopted` — with **Adopt** and the instance count waiting on its page. Nothing is
+  wrong and the bootstrap reported every step as fine; there are simply two clicks left that the
+  form would have done.
+</Callout>
 
 <Callout type="warn" title="A serial is identity">
   Pick one and never change it. A changed serial is a new machine with a new row and no history —

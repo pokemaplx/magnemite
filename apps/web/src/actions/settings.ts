@@ -781,13 +781,19 @@ export async function deleteSourceFeed(id: string): Promise<ActionState> {
  * only its hash goes in the database.
  */
 export async function createEnrollmentToken(
-  _prev: ActionState & { token?: string },
+  _prev: ActionState & { token?: string; kind?: "BOX" | "HOST" },
   formData: FormData,
-): Promise<ActionState & { token?: string }> {
+): Promise<ActionState & { token?: string; kind?: "BOX" | "HOST" }> {
   const user = await requireOperator();
   const label = String(formData.get("label") ?? "").trim() || "untitled";
   const rawMaxUses = String(formData.get("maxUses") ?? "").trim();
   const parsedUses = Number(rawMaxUses);
+  // A machine token, for provisioning a host by hand. The one click mints its
+  // own per machine and nobody ever sees it, so this exists for the manual
+  // path -- which the bootstrap docs describe and which, without this, had
+  // nowhere to get a token from: a BOX token enrols a machine as a *box*, and
+  // the only sign is a device that never grows a Machines page.
+  const kind = formData.get("kind") === "HOST" ? ("HOST" as const) : ("BOX" as const);
 
   const token = generateToken();
   await prisma.enrollmentToken.create({
@@ -795,7 +801,12 @@ export async function createEnrollmentToken(
       label,
       tokenHash: hashToken(token),
       prefix: tokenPrefix(token),
-      autoApprove: formData.get("autoApprove") === "on",
+      kind,
+      // Forced for HOST, which is why the form offers no switch for it:
+      // `/internal/authz` refuses an unapproved device, so a machine that
+      // enrolled pending would get a bare 401 from the edge on its first
+      // self-update with nothing anywhere to say why.
+      autoApprove: kind === "HOST" ? true : formData.get("autoApprove") === "on",
       maxUses: rawMaxUses === "" ? null : Number.isFinite(parsedUses) ? parsedUses : null,
     },
   });
@@ -805,12 +816,15 @@ export async function createEnrollmentToken(
       userId: user.id,
       userEmail: user.email,
       action: "enrollmentToken.create",
-      meta: { label },
+      meta: { label, kind },
     },
   });
 
   revalidatePath("/settings");
-  return { ok: true, token, message: "Copy this now — it is not shown again." };
+  // The kind comes back so the panel can show what to *do* with the token it
+  // just printed. Pasting a machine token into a box's config.json, or into
+  // `make module`, is a plausible mistake that nothing downstream catches.
+  return { ok: true, token, kind, message: "Copy this now — it is not shown again." };
 }
 
 export async function revokeEnrollmentToken(id: string): Promise<ActionState> {
