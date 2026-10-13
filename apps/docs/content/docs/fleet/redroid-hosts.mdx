@@ -257,6 +257,41 @@ recreated one, and a container sitting at **not enrolled** for a minute or two o
 its first boot is working correctly. Read `docker logs` before concluding
 otherwise.
 
+## Removing the machine itself
+
+**Machines → the machine → Remove this machine**, which asks twice: once in the
+dialog and once by typing the machine's name. It does three things in this
+order, and the middle one is the one nobody would guess:
+
+1. **The containers and their `/data` go** — `docker compose down --volumes`
+   over the machine's own socket. Deleting only the rows would leave a VPS
+   running Androids that nothing here knows about: still scanning, still
+   costing money, invisible.
+2. **`/etc/magnemite/host.json` is removed and the agent stopped.** That file
+   holds the serial and the device token, and the agent keeps the config it
+   finds — so without this the machine would come back claiming a serial with
+   no row and a token nothing accepts, and the next **Add machine** would mint
+   a second serial the bootstrap then discards, leaving a provisioning waiting
+   for a machine that never dials in. **This is what makes adding it again
+   work.**
+3. **Then the rows**, which cascade: the machine's `RedroidHost` and every
+   `RedroidInstance` on it.
+
+<Callout type="warn" title="Why the volumes go too">
+  A box's serial is derived from its machine's row id, and the volume is named after the compose
+  service — so a machine added again gets *new* serials over the *same* volume names. A kept volume
+  would be mounted under a serial that is not the one inside it: the container boots with the
+  previous box's `config.json`, enrols as that old device, and never matches the instance row
+  waiting for the new one. Containers running, table saying `not enrolled`, for ever. The boxes keep
+  their rows and their history here; what they had on that machine does not survive it.
+</Callout>
+
+A machine that is **offline** is deleted anyway — saying "forget this" about a
+VPS that is already gone is the common case — but then none of the first two
+steps happened, and the answer says so. Its containers are still running and
+its agent still has its config, so clean it up there, or re-provisioning that
+same machine will find a config it keeps.
+
 ## Remove vs forget
 
 Two different things, and the difference is whether the box can come back:

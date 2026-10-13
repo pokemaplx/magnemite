@@ -380,3 +380,123 @@ export async function dismissBootstrap(id: string): Promise<ActionState> {
     return { error: "Could not dismiss that provisioning." };
   }
 }
+
+/**
+ * Take a machine out of the fleet, and leave it able to be added again.
+ *
+ * Three things have to happen in order, and the order is the whole design:
+ *
+ *  1. **Its containers and their volumes go.** Deleting only the rows would
+ *     leave a VPS running Androids that nothing in Magnemite knows about —
+ *     still scanning, still costing money, invisible.
+ *
+ *     The volumes go too, which is the one part that looks harsher than it is.
+ *     A box's serial is derived from its machine's row id, and the volume is
+ *     named after the compose service — so a machine added again gets new
+ *     serials over the *same* volume names. The container would then boot with
+ *     the previous box's `config.json`, enrol as that old device, and never
+ *     match the instance row waiting for the new serial: a machine whose
+ *     containers run and whose table says `not enrolled`, for ever. Left
+ *     behind, those volumes can never be matched to anything again.
+ *  2. **Its config goes.** `/etc/magnemite/host.json` holds the serial and the
+ *     device token, and the agent keeps the config it finds. Left there, the
+ *     machine would come back claiming a serial whose row no longer exists and
+ *     a token nothing accepts — and the next `Add machine` would mint a second
+ *     serial the script then discards, leaving a provisioning that waits for a
+ *     machine that never dials in. Removing it is what makes re-adding work.
+ *  3. **Then the rows.** `RedroidHost` and the instance rows cascade off the
+ *     Device, so one delete is the whole model.
+ *
+ * A machine that cannot be reached is still deleted — an operator saying
+ * "forget this" about a VPS that is already gone is the common case — but the
+ * answer says so, because then steps 1 and 2 did not happen and the machine,
+ * if it ever comes back, comes back as a stranger with containers running.
+ */
+export async function deleteHost(
+  hostId: string,
+  confirmName: string,
+): Promise<ActionState & { warning?: string }> {
+  const user = await requireOperator();
+
+  const host = await prisma.device.findUnique({
+    where: { id: hostId },
+    select: {
+      name: true,
+      serial: true,
+      kind: true,
+      redroidHost: { select: { project: true, dir: true, instances: { select: { id: true } } } },
+    },
+  });
+  if (!host || host.kind !== "HOST") return { error: "That is not a machine." };
+  // The second confirmation. Not a formality: this is the one action here that
+  // takes containers down on a machine the dashboard then forgets, so it asks
+  // for the name rather than a click somebody can give without reading.
+  if (confirmName.trim() !== host.name) {
+    return { error: `Type ${host.name} exactly to confirm.` };
+  }
+
+  let warning: string | undefined;
+  const project = host.redroidHost?.project;
+  const dir = host.redroidHost?.dir;
+  if (project && dir) {
+    // One command, because the machine stops being reachable partway through
+    // it: the last thing it does is stop the agent that is running it, which
+    // is why that part is backgrounded — the exec has to return first.
+    //
+    // `--volumes`, for the reason in the comment above: a volume this machine
+    // leaves behind can never be matched to a box again, and the next machine
+    // added here would mount it under a serial that is not the one inside it.
+    const teardown = [
+      `docker compose -p ${shellQuote(project)} --project-directory ${shellQuote(dir)} down --volumes --remove-orphans`,
+      "rm -f /etc/magnemite/host.json",
+      "systemctl disable magnemite-host >/dev/null 2>&1 || true",
+      "(sleep 3; systemctl stop magnemite-host) >/dev/null 2>&1 &",
+    ].join("; ");
+
+    try {
+      const result = await hub.execOnDevice(hostId, teardown, 300);
+      if (!result.ok) {
+        warning = `The machine answered but the teardown failed: ${result.error ?? result.output.slice(0, 300)}`;
+      }
+    } catch (err) {
+      warning =
+        err instanceof HubError && /offline/i.test(err.message)
+          ? "The machine was offline, so its containers are still running and its agent still has its config. Stop them there by hand, or it will keep running boxes nothing is watching."
+          : `Could not reach the machine: ${err instanceof Error ? err.message : String(err)}`;
+    }
+  }
+
+  try {
+    // RedroidHost and every RedroidInstance cascade off this row; a box that
+    // enrolled from one of those containers keeps its own Device row, with its
+    // instance link set to null.
+    await prisma.device.delete({ where: { id: hostId } });
+  } catch {
+    return { error: "Could not delete that machine." };
+  }
+
+  await prisma.auditLog.create({
+    data: {
+      userId: user.id,
+      userEmail: user.email,
+      action: "redroidHost.delete",
+      targetType: "Device",
+      targetId: hostId,
+      meta: {
+        name: host.name,
+        serial: host.serial,
+        instances: host.redroidHost?.instances.length ?? 0,
+        drained: warning === undefined,
+      },
+    },
+  });
+
+  revalidatePath("/hosts");
+  revalidatePath("/");
+  return { ok: true, warning };
+}
+
+/** Single-quoted for the machine's shell, which is where these land. */
+function shellQuote(value: string): string {
+  return `'${value.replaceAll("'", `'\''`)}'`;
+}

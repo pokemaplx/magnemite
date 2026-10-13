@@ -3,6 +3,7 @@ import { getRedroidSettings, planCapacity, prisma } from "@magnemite/db";
 import { requireUser } from "@/lib/session";
 import { HostScaleForm } from "@/components/host-scale-form";
 import { HostInstancesTable } from "@/components/host-instances-table";
+import { DeleteHost } from "@/components/delete-host";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { DeviceLoadCard } from "@/components/device-load-card";
@@ -103,6 +104,9 @@ export default async function HostPage({ params }: { params: Promise<{ id: strin
             <Badge variant="warning">not adopted</Badge>
           ) : null}
           {machine?.binderOk === false ? <Badge variant="danger">binder missing</Badge> : null}
+          {user.role !== "VIEWER" ? (
+            <DeleteHost hostId={host.id} name={host.name} instances={wanted.length} />
+          ) : null}
         </div>
       </div>
 
@@ -135,6 +139,16 @@ export default async function HostPage({ params }: { params: Promise<{ id: strin
           byCpu: capacity.byCpu,
           suggested: capacity.suggested,
           workersPerInstance: redroid.workersPerInstance,
+          // The CPU half's inputs, so the form can redo that division for the
+          // workers actually typed into it — the server only ever knows the
+          // number in Settings.
+          cpuCount: host.cpuCount,
+          workersPerVCpu: redroid.workersPerVCpu,
+          // Named in the sentence that explains a suggestion of zero, which is
+          // otherwise a dead end: these are fleet-wide and the machine is just
+          // smaller than they assume.
+          memLimitBytes: redroid.memLimitBytes,
+          hostReserveBytes: redroid.hostReserveBytes,
         }}
         canOperate={user.role !== "VIEWER"}
       />
