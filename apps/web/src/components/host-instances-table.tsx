@@ -140,8 +140,10 @@ export function HostInstancesTable({
                   <TableCell>
                     <Badge variant={state.tone}>{state.label}</Badge>
                   </TableCell>
-                  <TableCell align="right">{row.workers ?? "—"}</TableCell>
-                  <TableCell align="right">
+                  <TableCell align="right" className="tabular-nums">
+                    {row.workers ?? "—"}
+                  </TableCell>
+                  <TableCell align="right" className="tabular-nums">
                     {/* A climbing count is what separates crash-looping from
                         merely idle. */}
                     {row.restartCount ?? "—"}

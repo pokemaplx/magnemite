@@ -184,13 +184,15 @@ export default async function HostsPage() {
                       {adopted === null ? "not adopted yet" : host.serial}
                     </div>
                   </TableCell>
-                  <TableCell align="right">
+                  <TableCell align="right" className="tabular-nums">
                     {/* running/desired, so a machine mid-converge reads as one
                         rather than as two numbers that disagree. */}
                     {desired === 0 ? "—" : `${running}/${desired}`}
                   </TableCell>
-                  <TableCell align="right">{workers === 0 ? "—" : workers}</TableCell>
-                  <TableCell align="right">
+                  <TableCell align="right" className="tabular-nums">
+                    {workers === 0 ? "—" : workers}
+                  </TableCell>
+                  <TableCell align="right" className="tabular-nums">
                     {/* Share of a single core, as everywhere else: 250 is two
                         and a half cores spent. */}
                     {host.cpuPercent === null ? "—" : `${Math.round(host.cpuPercent)}%`}

@@ -65,14 +65,37 @@ const TableRow = React.forwardRef<HTMLTableRowElement, React.HTMLAttributes<HTML
 );
 TableRow.displayName = "TableRow";
 
+/**
+ * Which way a column's contents sit — and the reason this is a prop at all.
+ *
+ * `align` is also an ancient HTML attribute on a cell, so `<TableHead
+ * align="right">` type-checks and renders without complaint. It just does not
+ * work: a presentational attribute carries no specificity, so `text-left` in
+ * this component's own class list wins, and a header stays left over a column
+ * of right-aligned numbers. `<TableCell align="right">` *did* work, because
+ * that cell sets no text alignment of its own — so the two drifted apart and a
+ * table read as though its values were under the wrong headings.
+ *
+ * Taking the name means neither can happen: the attribute never reaches the
+ * DOM, and both cells are aligned by the same prop and the same classes.
+ */
+type Align = "left" | "right" | "center";
+
+const ALIGN: Record<Align, string> = {
+  left: "text-left",
+  right: "text-right",
+  center: "text-center",
+};
+
 const TableHead = React.forwardRef<
   HTMLTableCellElement,
-  React.ThHTMLAttributes<HTMLTableCellElement>
->(({ className, ...props }, ref) => (
+  Omit<React.ThHTMLAttributes<HTMLTableCellElement>, "align"> & { align?: Align }
+>(({ className, align = "left", ...props }, ref) => (
   <th
     ref={ref}
     className={cn(
-      "h-9 px-3 text-left align-middle text-xs font-medium text-muted-foreground",
+      "h-9 px-3 align-middle text-xs font-medium text-muted-foreground",
+      ALIGN[align],
       className,
     )}
     {...props}
@@ -82,9 +105,9 @@ TableHead.displayName = "TableHead";
 
 const TableCell = React.forwardRef<
   HTMLTableCellElement,
-  React.TdHTMLAttributes<HTMLTableCellElement>
->(({ className, ...props }, ref) => (
-  <td ref={ref} className={cn("px-3 py-2.5 align-middle", className)} {...props} />
+  Omit<React.TdHTMLAttributes<HTMLTableCellElement>, "align"> & { align?: Align }
+>(({ className, align = "left", ...props }, ref) => (
+  <td ref={ref} className={cn("px-3 py-2.5 align-middle", ALIGN[align], className)} {...props} />
 ));
 TableCell.displayName = "TableCell";
 
