@@ -504,10 +504,12 @@ model DeviceGroup {
   /// aegis config is longer than that.
   mitmConfig      String? @db.Text
 
-  devices      Device[]
-  monitorRules MonitorRule[]
+  devices           Device[]
+  monitorRules      MonitorRule[]
   /// Machines whose new containers enroll into this group.
-  redroidHosts RedroidHost[]
+  redroidHosts      RedroidHost[]
+  /// Machines still being provisioned that will enroll their containers here.
+  redroidBootstraps RedroidBootstrap[]
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -761,6 +763,20 @@ model RedroidBootstrap {
   desiredInstances Int  @default(0)
   desiredWorkers   Int?
 
+  /// The site those first containers enrol into.
+  ///
+  /// Parked here rather than set on the machine afterwards, because there is no
+  /// afterwards to set it in: the containers come up on first contact and their
+  /// boxes enrol in the same breath. By the time the machine's page can be
+  /// opened they are already in `default`, already handed that group's MITM
+  /// config by the first rollout to reach them, and already needing to be moved
+  /// by hand -- which is the work this field exists to remove.
+  ///
+  /// Null means the same as it means on a machine: no group chosen, so
+  /// enrolment falls back to `default`.
+  desiredGroupId String?
+  desiredGroup   DeviceGroup? @relation(fields: [desiredGroupId], references: [id], onDelete: SetNull)
+
   state RedroidBootstrapState @default(RUNNING)
 
   /// One entry per `::step` line the script printed: its name, whether it
@@ -781,6 +797,9 @@ model RedroidBootstrap {
 
   @@index([state])
   @@index([deviceId])
+  /// Declared rather than left to the foreign key, for the reason
+  /// `RedroidHost.defaultGroupId` says: Postgres does not index one on its own.
+  @@index([desiredGroupId])
 }
 
 // ---------------------------------------------------------------------------

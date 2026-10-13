@@ -14,6 +14,7 @@ import {
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { Select } from "@/components/ui/select";
 import { bootstrapHost } from "@/actions/hosts";
 
 /**
@@ -28,9 +29,22 @@ import { bootstrapHost } from "@/actions/hosts";
  * this feature needs no secret store, and it is worth saying on the form so
  * nobody goes looking for where it was saved.
  */
-export function AddHostDialog({ defaultWorkers }: { defaultWorkers: number }) {
+export function AddHostDialog({
+  defaultWorkers,
+  groups,
+}: {
+  defaultWorkers: number;
+  groups: { id: string; name: string }[];
+}) {
   const [open, setOpen] = useState(false);
   const [auth, setAuth] = useState<"password" | "key">("password");
+  /**
+   * Controlled, because the group has to survive the dialog being reopened
+   * after a failed run — a provisioning that fell over on the password should
+   * not quietly lose the site the operator picked, and a retry that enrols
+   * twelve boxes into `default` is not a small mistake to make twice.
+   */
+  const [groupId, setGroupId] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [pending, start] = useTransition();
 
@@ -51,6 +65,7 @@ export function AddHostDialog({ defaultWorkers }: { defaultWorkers: number }) {
           auth === "key" ? String(formData.get("passphrase") ?? "") || undefined : undefined,
         desiredInstances: Number.isInteger(instances) ? instances : 0,
         desiredWorkers: Number.isInteger(workers) && workers > 0 ? workers : null,
+        desiredGroupId: groupId || null,
       });
       if (result.error) setError(result.error);
       else setOpen(false);
@@ -146,17 +161,44 @@ export function AddHostDialog({ defaultWorkers }: { defaultWorkers: number }) {
             </div>
 
             <div className="space-y-1.5">
-              <Label htmlFor="workers">Workers per instance</Label>
-              <Input
-                id="workers"
-                name="workers"
-                defaultValue={String(defaultWorkers)}
-                inputMode="numeric"
-                className="w-28"
-              />
+              <div className="grid grid-cols-2 gap-3">
+                <div className="space-y-1.5">
+                  <Label htmlFor="workers">Workers per instance</Label>
+                  <Input
+                    id="workers"
+                    name="workers"
+                    defaultValue={String(defaultWorkers)}
+                    inputMode="numeric"
+                  />
+                </div>
+                <div className="space-y-1.5">
+                  <Label htmlFor="group">Group</Label>
+                  <Select
+                    id="group"
+                    aria-label="Group the new containers enrol into"
+                    value={groupId}
+                    onValueChange={setGroupId}
+                    disabled={pending}
+                    options={[
+                      { value: "", label: "default" },
+                      ...groups.map((group) => ({ value: group.id, label: group.name })),
+                    ]}
+                  />
+                </div>
+              </div>
               <p className="text-xs text-muted-foreground">
                 Leave instances at 0 to provision the machine without starting anything, and set the
                 number once you can see what it reports.
+              </p>
+              {/* Here rather than on the machine's page, because there is no
+                  moment in between: provisioning ends by starting the
+                  containers and their boxes enrol as they come up. Chosen
+                  afterwards, the first batch is already in `default` and has
+                  already been handed that group's MITM config. */}
+              <p className="text-xs text-muted-foreground">
+                The group decides which MITM config its boxes are given, and they enrol the moment
+                the containers come up — so it is chosen now rather than after. It can be changed on
+                the machine&apos;s page, but that only affects containers added later.
               </p>
             </div>
 

@@ -88,7 +88,16 @@ export default async function HostPage({ params }: { params: Promise<{ id: strin
   // Suggests, never decides. The memory half is a real ceiling — past it the
   // OOM killer takes boxes down instead of slowing them — and the CPU half is
   // a planning coefficient, so the form shows both and says which is which.
-  const capacity = planCapacity(redroid, host.cpuCount, host.memTotalBytes);
+  // This machine's own ceiling when it has one, the fleet's when it does not.
+  // The compose renderer has always resolved it this way (`instance ?? host ??
+  // settings`); the capacity figure used to skip the middle term, so a tuned
+  // machine was planned against a number none of its containers would get.
+  const effectiveMemLimit = Number(machine?.memLimitBytes ?? redroid.memLimitBytes);
+  const capacity = planCapacity(
+    { ...redroid, memLimitBytes: effectiveMemLimit },
+    host.cpuCount,
+    host.memTotalBytes,
+  );
   const wanted = machine?.instances.filter((i) => i.present) ?? [];
   // Every instance that ever enrolled, present or not: deleting the machine
   // deletes all of their Device rows, and a removed instance still has one.
@@ -234,6 +243,7 @@ export default async function HostPage({ params }: { params: Promise<{ id: strin
         converging={machine?.convergingSince !== null && machine !== undefined}
         instances={wanted.length}
         workers={wanted[0]?.workers ?? null}
+        memLimitBytes={machine?.memLimitBytes === null ? null : Number(machine?.memLimitBytes)}
         capacity={{
           byMemory: capacity.byMemory,
           byCpu: capacity.byCpu,
@@ -247,8 +257,9 @@ export default async function HostPage({ params }: { params: Promise<{ id: strin
           // Named in the sentence that explains a suggestion of zero, which is
           // otherwise a dead end: these are fleet-wide and the machine is just
           // smaller than they assume.
-          memLimitBytes: redroid.memLimitBytes,
+          memLimitBytes: effectiveMemLimit,
           hostReserveBytes: redroid.hostReserveBytes,
+          fleetMemLimitBytes: redroid.memLimitBytes,
           memTotalBytes: num(host.memTotalBytes),
         }}
         canOperate={user.role !== "VIEWER"}

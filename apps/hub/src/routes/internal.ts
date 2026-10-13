@@ -28,7 +28,7 @@ import {
   syncDevices,
 } from "../services/rotom.js";
 import { rerunBootstrap, startBootstrap } from "../services/hostBootstrap.js";
-import { adoptHost, convergeHost, setInstanceCount } from "../services/redroid.js";
+import { adoptHost, convergeHost, setHostMemLimit, setInstanceCount } from "../services/redroid.js";
 import { nudge } from "../services/scheduler.js";
 import { probeRemote, storeFromUrl, storeUpload } from "../services/uploads.js";
 import { pollAllSources } from "../services/sources/poller.js";
@@ -533,6 +533,20 @@ export async function internalRoutes(app: FastifyInstance) {
         // capacity is advice the form gives, and the operator may know better.
         count: z.number().int().min(0).max(64),
         workers: z.number().int().min(1).max(50).nullable().optional(),
+        // The per-machine memory ceiling. **Undefined leaves it alone and null
+        // clears it**, and the difference matters: a caller that does not know
+        // about this field must not wipe an override by omitting it.
+        //
+        // The floor is a real one -- Android 12 with a scanner in less than
+        // 512 MB does not boot, it OOMs in a loop that looks like a container
+        // that will not start.
+        memLimitBytes: z
+          .number()
+          .int()
+          .min(512 * 1024 * 1024)
+          .max(64 * 1024 * 1024 * 1024)
+          .nullable()
+          .optional(),
       })
       .safeParse(request.body);
     if (!parsed.success) {
@@ -540,6 +554,15 @@ export async function internalRoutes(app: FastifyInstance) {
     }
 
     try {
+      // Before the converge, so the file that gets rendered below is the one
+      // that carries the new ceiling. After it, the machine would be converged
+      // onto the old number and the change would wait for the next one.
+      if (parsed.data.memLimitBytes !== undefined) {
+        await setHostMemLimit(
+          id,
+          parsed.data.memLimitBytes === null ? null : BigInt(parsed.data.memLimitBytes),
+        );
+      }
       const changed = await setInstanceCount(id, parsed.data.count, parsed.data.workers ?? null);
       const converge = await convergeHost(id);
       return { ...changed, ...converge };
@@ -580,6 +603,11 @@ export async function internalRoutes(app: FastifyInstance) {
         passphrase: z.string().optional(),
         desiredInstances: z.number().int().min(0).max(64).default(0),
         desiredWorkers: z.number().int().min(1).max(50).nullable().optional(),
+        // Validated as a shape only. Whether the group still exists is the
+        // database's answer, and the foreign key is SET NULL, so a group
+        // deleted between opening the dialog and submitting it costs the
+        // default group rather than the provisioning run.
+        desiredGroupId: z.string().min(1).nullable().optional(),
       })
       // One or the other. Neither means there is no way in, and without this
       // the failure would be a timeout twenty minutes later.
@@ -598,6 +626,7 @@ export async function internalRoutes(app: FastifyInstance) {
         access: { host, port, username, password, privateKey, passphrase },
         desiredInstances: parsed.data.desiredInstances,
         desiredWorkers: parsed.data.desiredWorkers ?? null,
+        desiredGroupId: parsed.data.desiredGroupId ?? null,
       });
     } catch (err) {
       // Deliberately not logging the error object: the credential is in the

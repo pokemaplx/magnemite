@@ -10,8 +10,10 @@ import {
   hashToken,
   type HubSettingsValues,
   prisma,
+  type RedroidSettingsValues,
   tokenPrefix,
   updateHubSettings as updateHubSettingsInDb,
+  updateRedroidSettings as updateRedroidSettingsInDb,
 } from "@magnemite/db";
 import { requireOperator } from "@/lib/session";
 import { hub } from "@/lib/hub";
@@ -131,6 +133,101 @@ export async function updateHubSettings(
     message: told
       ? "Saved."
       : "Saved, but the hub could not be told, it is still running on the old values. Restart it, or save again once it is back.",
+  };
+}
+
+const GB = 1024 ** 3;
+
+/**
+ * The knobs behind the containers: how big one is, how many a machine holds,
+ * and how many start at once.
+ *
+ * Its own card and its own save, apart from the hub knobs, because nothing
+ * here is measured against the heartbeat and because these reach the fleet by
+ * a completely different road. The hub keeps no copy of them -- `readGroup`
+ * goes to the table on every read -- so there is no cache to drop and no
+ * `refreshSettings` call below.
+ *
+ * What there is instead is a delay nobody should have to discover: two of
+ * these are rendered into each machine's compose file, and docker applies them
+ * when a container is **created**. Saving changes the plan immediately and the
+ * running containers not at all, until each machine is re-applied. That is
+ * deliberately not done here -- recreating every container on every machine is
+ * not a thing a Save button should do without being asked.
+ */
+export async function updateRedroidSettings(
+  _prev: ActionState,
+  formData: FormData,
+): Promise<ActionState> {
+  const user = await requireOperator();
+
+  const num = (name: string) => {
+    const parsed = Number(formData.get(name));
+    return Number.isFinite(parsed) ? parsed : null;
+  };
+
+  const memLimitGb = num("memLimitGb");
+  const hostReserveGb = num("hostReserveGb");
+  const workersPerInstance = num("workersPerInstance");
+  const workersPerVCpu = num("workersPerVCpu");
+  const startBatchSize = num("startBatchSize");
+  const gpuMode = String(formData.get("gpuMode") ?? "").trim();
+
+  if (
+    memLimitGb === null ||
+    hostReserveGb === null ||
+    workersPerInstance === null ||
+    workersPerVCpu === null ||
+    startBatchSize === null
+  ) {
+    return { error: "Every field needs a number." };
+  }
+  // The floor is where Android stops booting rather than where it gets slow:
+  // Android 12 and a scanner in less than half a gigabyte OOMs in a loop that
+  // reads as a container that will not start.
+  if (memLimitGb < 0.5 || memLimitGb > 64) {
+    return { error: "Memory per container must be between 0.5 and 64 GB." };
+  }
+  // Zero is allowed and means hold nothing back, which is a real answer on a
+  // machine that runs nothing else.
+  if (hostReserveGb < 0 || hostReserveGb > 64) {
+    return { error: "Reserved for the machine must be between 0 and 64 GB." };
+  }
+  if (!Number.isInteger(workersPerInstance) || workersPerInstance < 1 || workersPerInstance > 50) {
+    // 50 is where the scanners stop being happy, and on some licences it is
+    // also the contractual ceiling.
+    return { error: "Workers per container must be a whole number between 1 and 50." };
+  }
+  if (!Number.isInteger(workersPerVCpu) || workersPerVCpu < 1 || workersPerVCpu > 200) {
+    return { error: "Workers per vCPU must be a whole number between 1 and 200." };
+  }
+  if (!Number.isInteger(startBatchSize) || startBatchSize < 1 || startBatchSize > 32) {
+    return { error: "Containers started at once must be a whole number between 1 and 32." };
+  }
+  if (!gpuMode) return { error: "Pick a GPU mode." };
+
+  const patch: Partial<RedroidSettingsValues> = {
+    memLimitBytes: Math.round(memLimitGb * GB),
+    hostReserveBytes: Math.round(hostReserveGb * GB),
+    workersPerInstance,
+    workersPerVCpu,
+    startBatchSize,
+    gpuMode,
+  };
+  await updateRedroidSettingsInDb(patch);
+
+  await prisma.auditLog.create({
+    data: { userId: user.id, userEmail: user.email, action: "settings.redroid", meta: patch },
+  });
+
+  revalidatePath("/settings");
+  // The capacity figure on every machine's page is computed from these, so it
+  // is stale the moment they move.
+  revalidatePath("/hosts");
+  return {
+    ok: true,
+    message:
+      "Saved. The memory ceiling reaches a machine's containers when it is next re-applied — docker sets it as they are created.",
   };
 }
 

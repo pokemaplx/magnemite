@@ -56,7 +56,7 @@ export default async function HostsPage() {
     orderBy: [{ status: "asc" }, { name: "asc" }],
   });
 
-  const [redroid, running] = await Promise.all([
+  const [redroid, running, groups] = await Promise.all([
     getRedroidSettings(),
     // Machines being provisioned, which have no Device row yet -- that is the
     // whole reason the bootstrap has a table of its own. Shown here so a
@@ -65,6 +65,13 @@ export default async function HostsPage() {
       where: { state: { in: ["RUNNING", "WAITING", "FAILED"] } },
       orderBy: { startedAt: "desc" },
       take: 10,
+    }),
+    // For the group picker on the add dialog. The containers come up at the end
+    // of provisioning and their boxes enrol straight into whatever this says,
+    // so it is chosen before the run rather than after it.
+    prisma.deviceGroup.findMany({
+      select: { id: true, name: true },
+      orderBy: { name: "asc" },
     }),
   ]);
 
@@ -92,7 +99,7 @@ export default async function HostsPage() {
           </p>
         </div>
         {user.role !== "VIEWER" ? (
-          <AddHostDialog defaultWorkers={redroid.workersPerInstance} />
+          <AddHostDialog defaultWorkers={redroid.workersPerInstance} groups={groups} />
         ) : null}
       </div>
 

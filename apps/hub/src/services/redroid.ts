@@ -296,6 +296,29 @@ export function mintSerial(hostId: string, index: number): string {
  * brings the same box back with everything it had. Deleting is what "forget"
  * does, and it is a different button.
  */
+/**
+ * The memory ceiling every container on one machine is given.
+ *
+ * Per machine rather than fleet-wide because that is where the hardware is.
+ * The number in Settings is sized for a machine that holds several containers,
+ * and lowering it so a 4 GB VPS fits one would hand that same smaller ceiling
+ * to every machine that did not need it. This is the override the compose
+ * renderer has always read — `instance ?? host ?? settings` — with nothing
+ * until now able to write the middle one.
+ *
+ * Null clears it and goes back to inheriting Settings.
+ *
+ * Takes effect on the next converge and not before: this is `mem_limit` in the
+ * rendered file, and docker applies it when the container is created. The
+ * caller converges, so a Save that changes only this still recreates them.
+ */
+export async function setHostMemLimit(hostId: string, bytes: bigint | null): Promise<void> {
+  await prisma.redroidHost.update({
+    where: { deviceId: hostId },
+    data: { memLimitBytes: bytes },
+  });
+}
+
 export async function setInstanceCount(
   hostId: string,
   count: number,

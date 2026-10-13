@@ -162,6 +162,7 @@ export async function startBootstrap(input: {
   access: SshAccess;
   desiredInstances: number;
   desiredWorkers: number | null;
+  desiredGroupId: string | null;
 }): Promise<{ id: string; serial: string }> {
   const serial = `host-${generateToken().slice(0, 10).toLowerCase()}`;
 
@@ -172,6 +173,7 @@ export async function startBootstrap(input: {
       address: `${input.access.username}@${input.access.host}`,
       desiredInstances: input.desiredInstances,
       desiredWorkers: input.desiredWorkers,
+      desiredGroupId: input.desiredGroupId,
       state: "RUNNING",
     },
   });
@@ -305,7 +307,13 @@ async function run(id: string, serial: string, name: string, access: SshAccess):
 export async function claimBootstrap(deviceId: string, serial: string): Promise<void> {
   const row = await prisma.redroidBootstrap.findUnique({
     where: { serial },
-    select: { id: true, state: true, desiredInstances: true, desiredWorkers: true },
+    select: {
+      id: true,
+      state: true,
+      desiredInstances: true,
+      desiredWorkers: true,
+      desiredGroupId: true,
+    },
   });
   if (!row || row.state === "DONE") return;
 
@@ -315,9 +323,17 @@ export async function claimBootstrap(deviceId: string, serial: string): Promise<
   });
 
   // Known-empty, so adopting is a fact rather than an assumption.
+  //
+  // The group travels in the same write, and the ordering is the whole point:
+  // the containers are started below, their boxes enrol as they come up, and
+  // enrolment reads `defaultGroupId` off this row. Set it afterwards and every
+  // box of the first batch is already in `default`.
   await prisma.redroidHost.update({
     where: { deviceId },
-    data: { adoptedAt: new Date() },
+    data: {
+      adoptedAt: new Date(),
+      ...(row.desiredGroupId ? { defaultGroupId: row.desiredGroupId } : {}),
+    },
   });
 
   log.info(

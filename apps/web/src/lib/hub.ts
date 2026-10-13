@@ -241,10 +241,14 @@ export const hub = {
    * machine, and "I changed the number and nothing happened" would be the
    * normal experience.
    */
-  scaleHost: (id: string, count: number, workers: number | null) =>
+  /**
+   * `memLimitBytes` undefined leaves the machine's override alone; null clears
+   * it back to the fleet-wide setting.
+   */
+  scaleHost: (id: string, count: number, workers: number | null, memLimitBytes?: number | null) =>
     call<{ added: number; removed: number; sent: boolean; reason?: string }>(
       `/internal/hosts/${id}/scale`,
-      { count, workers },
+      { count, workers, ...(memLimitBytes === undefined ? {} : { memLimitBytes }) },
     ),
   /**
    * Import the containers a machine already has.
@@ -271,6 +275,7 @@ export const hub = {
     passphrase?: string;
     desiredInstances: number;
     desiredWorkers: number | null;
+    desiredGroupId: string | null;
   }) => call<{ id: string; serial: string }>("/internal/hosts/bootstrap", input),
   /** Re-send the file. `force` sends it even when the hash already matches. */
   convergeHost: (id: string, force = false) =>

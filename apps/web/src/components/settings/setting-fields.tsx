@@ -50,6 +50,8 @@ export function NumberField({
   label,
   value,
   min,
+  max,
+  step,
   hint,
   unit = "seconds",
   disabled,
@@ -59,6 +61,13 @@ export function NumberField({
   label: string;
   value: number;
   min: number;
+  max?: number;
+  /**
+   * Browsers validate against this, and the default is 1 — so a field that is
+   * legitimately fractional (gigabytes, where 2.5 is a real answer) refuses
+   * what the operator typed unless it says so.
+   */
+  step?: number | "any";
   hint: ReactNode;
   unit?: string;
   disabled: boolean;
@@ -78,6 +87,8 @@ export function NumberField({
           name={name}
           type="number"
           min={min}
+          max={max}
+          step={step}
           defaultValue={value}
           disabled={disabled}
           onChange={

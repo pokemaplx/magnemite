@@ -33,6 +33,7 @@ export async function scaleHost(
   hostId: string,
   count: number,
   workers: number | null,
+  memLimitBytes?: number | null,
 ): Promise<ActionState & { reason?: string }> {
   const user = await requireOperator();
 
@@ -44,9 +45,20 @@ export async function scaleHost(
     // several containers rather than one big one.
     return { error: "Workers must be between 1 and 50." };
   }
+  // Undefined is "do not touch", null is "go back to the fleet-wide number".
+  // Only a real value is range-checked, and the floor is where Android stops
+  // booting rather than where it gets slow.
+  if (memLimitBytes !== undefined && memLimitBytes !== null) {
+    if (!Number.isInteger(memLimitBytes) || memLimitBytes < 512 * 1024 * 1024) {
+      return { error: "Memory per container must be at least 512 MB." };
+    }
+    if (memLimitBytes > 64 * 1024 * 1024 * 1024) {
+      return { error: "64 GB for one container is past anything sensible." };
+    }
+  }
 
   try {
-    const result = await hub.scaleHost(hostId, count, workers);
+    const result = await hub.scaleHost(hostId, count, workers, memLimitBytes);
     await prisma.auditLog.create({
       data: {
         userId: user.id,
@@ -54,7 +66,7 @@ export async function scaleHost(
         action: "redroidHost.scale",
         targetType: "RedroidHost",
         targetId: hostId,
-        meta: { count, workers, added: result.added, removed: result.removed },
+        meta: { count, workers, memLimitBytes, added: result.added, removed: result.removed },
       },
     });
     revalidateHost(hostId);
@@ -245,6 +257,12 @@ export async function setHostGroup(hostId: string, groupId: string | null): Prom
  * row, not in the log, and not in the audit entry below — which records the
  * machine, its address and who asked, because that is what an audit trail is
  * for and a password is not.
+ *
+ * The group is asked for here rather than left for the machine's page, because
+ * the run ends by starting the containers and their boxes enrol as they come
+ * up. There is no window in which to set it afterwards: by the time the page
+ * exists, the first batch is already in `default` and already carrying that
+ * group's MITM config.
  */
 export async function bootstrapHost(input: {
   name: string;
@@ -256,6 +274,7 @@ export async function bootstrapHost(input: {
   passphrase?: string;
   desiredInstances: number;
   desiredWorkers: number | null;
+  desiredGroupId: string | null;
 }): Promise<ActionState & { id?: string }> {
   const user = await requireOperator();
 
@@ -318,6 +337,9 @@ export async function bootstrapHost(input: {
           // The address, which identifies the machine. Never the credential.
           address: `${username}@${host}`,
           desiredInstances: input.desiredInstances,
+          // Which site its boxes will come up in, which is a decision and not
+          // a detail: it picks the MITM config they are handed.
+          desiredGroupId: input.desiredGroupId,
         },
       },
     });
