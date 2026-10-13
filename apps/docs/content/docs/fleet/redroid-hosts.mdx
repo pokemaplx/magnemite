@@ -106,8 +106,16 @@ keeps its row, and counting it would make a drained machine look broken.
   `/devices/<id>/metrics`. Both work for the same reason: a machine is a Device,
   so its readings are in the same table and the same component draws them.
 - **Instances** — one row per container: index, the box it enrolled as, container
-  state, workers, restarts, and when the machine last reported. A climbing
-  restart count is what separates a crash-looping instance from an idle one.
+  state, **CPU and memory**, workers, restarts, and when the machine last
+  reported. A climbing restart count is what separates a crash-looping instance
+  from an idle one.
+
+  The CPU and memory are the box's **own**, measured inside its own cgroup and
+  reported by its own agent — not the machine's total divided up, and not
+  `docker stats` read from outside. That is what makes this the answer to
+  "where is this machine's CPU going": the column is per container, and the box
+  page behind each name breaks that container down per app. The machine's own
+  Load card above is the other end of the same question.
 
 ## The instance states
 

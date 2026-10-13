@@ -39,7 +39,20 @@ export default async function HostPage({ params }: { params: Promise<{ id: strin
           instances: {
             orderBy: { index: "asc" },
             include: {
-              device: { select: { id: true, name: true, status: true } },
+              device: {
+                select: {
+                  id: true,
+                  name: true,
+                  status: true,
+                  // What the container measured about itself. cpuPercent is
+                  // its own cgroup's, which is the only CPU figure a box in a
+                  // container actually has -- /proc/loadavg there is the whole
+                  // machine's and says nothing about this one.
+                  cpuPercent: true,
+                  memTotalBytes: true,
+                  memAvailableBytes: true,
+                },
+              },
             },
           },
         },
@@ -209,7 +222,13 @@ export default async function HostPage({ params }: { params: Promise<{ id: strin
               // and the formatter takes either.
               reportedAt: instance.reportedAt?.toISOString() ?? null,
               device: instance.device
-                ? { id: instance.device.id, name: instance.device.name }
+                ? {
+                    id: instance.device.id,
+                    name: instance.device.name,
+                    cpuPercent: instance.device.cpuPercent,
+                    memTotalBytes: num(instance.device.memTotalBytes),
+                    memAvailableBytes: num(instance.device.memAvailableBytes),
+                  }
                 : null,
             }))}
           />

@@ -16,6 +16,7 @@ import {
 } from "@/components/ui/table";
 import { RelativeTime } from "@/components/relative-time";
 import { removeInstance, setHostGroup } from "@/actions/hosts";
+import { formatBytes } from "@/lib/format";
 
 export type InstanceRow = {
   id: string;
@@ -25,7 +26,14 @@ export type InstanceRow = {
   containerState: string | null;
   restartCount: number | null;
   reportedAt: string | null;
-  device: { id: string; name: string } | null;
+  device: {
+    id: string;
+    name: string;
+    /** The container's own cgroup, as a share of one core. */
+    cpuPercent: number | null;
+    memTotalBytes: number | null;
+    memAvailableBytes: number | null;
+  } | null;
 };
 
 /**
@@ -43,6 +51,16 @@ export type InstanceRow = {
  * refills, because closing it would rewrite serials and a changed serial is a
  * new box with no history.
  */
+/**
+ * Used of total, which is the way round an operator reads a container: not
+ * "is there room" — the machine's own card answers that — but "which of these
+ * is heavy".
+ */
+function memoryUsed(device: InstanceRow["device"]): string {
+  if (!device || device.memTotalBytes === null || device.memAvailableBytes === null) return "—";
+  return `${formatBytes(device.memTotalBytes - device.memAvailableBytes)} / ${formatBytes(device.memTotalBytes)}`;
+}
+
 function stateOf(containerState: string | null, deviceId: string | null) {
   if (containerState === null) return { label: "unknown", tone: "secondary" as const };
   if (containerState !== "running") return { label: containerState, tone: "danger" as const };
@@ -114,6 +132,8 @@ export function HostInstancesTable({
               <TableHead align="right">#</TableHead>
               <TableHead>Box</TableHead>
               <TableHead>Container</TableHead>
+              <TableHead align="right">CPU</TableHead>
+              <TableHead align="right">Memory</TableHead>
               <TableHead align="right">Workers</TableHead>
               <TableHead align="right">Restarts</TableHead>
               <TableHead>Reported</TableHead>
@@ -139,6 +159,18 @@ export function HostInstancesTable({
                   </TableCell>
                   <TableCell>
                     <Badge variant={state.tone}>{state.label}</Badge>
+                  </TableCell>
+                  {/* Measured by the box itself, from inside its own cgroup —
+                      which is why these are per container rather than a slice
+                      of the machine's total guessed from outside. A box that
+                      has not reported leaves them blank rather than zero. */}
+                  <TableCell align="right" className="tabular-nums">
+                    {row.device == null || row.device.cpuPercent === null
+                      ? "—"
+                      : `${Math.round(row.device.cpuPercent)}%`}
+                  </TableCell>
+                  <TableCell align="right" className="tabular-nums">
+                    {memoryUsed(row.device)}
                   </TableCell>
                   <TableCell align="right" className="tabular-nums">
                     {row.workers ?? "—"}
