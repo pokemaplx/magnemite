@@ -122,7 +122,18 @@ export const ACTION_COMMANDS: Partial<Record<MonitorAction, string>> = {
     "am force-stop {pkg}; rm -rf /data/data/{pkg}/cache; sleep 2; monkey -p {pkg} -c android.intent.category.LAUNCHER 1",
   // 66 is ENTER, which is what dismisses an ANR dialog.
   SEND_KEYEVENT: "input keyevent 66",
-  START_SERVICE: "am startservice {pkg}",
+  // Was `am startservice {pkg}`, which could not work twice over: a package
+  // name is not a service, so there was nothing for `am` to start, and even
+  // spelled out as a component a plain `startservice` from the background is
+  // refused on Android 8 and later with "app is in background uid null".
+  //
+  // A rule knows the package and not the service inside it, so launching the
+  // app is the only thing that can be written generically — and it is what
+  // starts the service in practice, because a scanner starts its own on
+  // launch. `monkey` rather than `am start`, because it needs no component
+  // either, and because it takes the app out of the stopped state a
+  // `force-stop` leaves behind: Android delivers nothing to a stopped package.
+  START_SERVICE: "monkey -p {pkg} -c android.intent.category.LAUNCHER 1",
   SHELL: "",
 };
 

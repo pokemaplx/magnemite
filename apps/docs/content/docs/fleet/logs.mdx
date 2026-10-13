@@ -51,12 +51,24 @@ use, invoked by hand. The dialog keeps the ones people were opening adb for:
 ```sh
 am force-stop com.nianticlabs.pokemongo
 am force-stop com.pokemod.aegis
-am startservice com.pokemod.aegis/com.pokemod.aegis.services.MappingService
+monkey -p com.pokemod.aegis -c android.intent.category.LAUNCHER 1; sleep 3;   am start-foreground-service com.pokemod.aegis/com.pokemod.aegis.services.MappingService
 ```
+
+<Callout type="info" title="Why the third one is three commands">
+  Each part is there because the shorter version was tried on a box and did not work. `monkey` takes
+  the app out of the stopped state the `force-stop` above left it in — Android delivers no intent to
+  a stopped package, so the obvious "stop it, then start the mapping" pair could never have worked.
+  `start-foreground-service` rather than `startservice`, because a plain service start from the
+  background is refused on Android 8 and later with `app is in background uid null`. And the
+  foreground variant *on its own* is the worst of the three: it exits 0 and starts nothing.
+
+A box that has never run Aegis needs it started by hand once before any of this works.
+
+</Callout>
 
 Anything else can be typed; `Ctrl`/`Cmd`+`Enter` runs it. Output is stdout and
 stderr together, capped at 64 KB with the **tail** kept, because the end is the
-part that says what happened. 
+part that says what happened.
 
 60 seconds and the box gives up (a command that
 needs longer belongs in a script on the box).

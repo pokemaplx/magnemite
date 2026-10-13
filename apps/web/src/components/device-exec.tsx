@@ -35,8 +35,25 @@ const SUGGESTIONS: { label: string; command: string; hint: string }[] = [
   },
   {
     label: "Start Aegis mapping",
-    command: "am startservice com.pokemod.aegis/com.pokemod.aegis.services.MappingService",
-    hint: "Brings the mapping service back after a stop.",
+    // Three commands, and each one is there because the shorter versions were
+    // tried on a box and did not work.
+    //
+    //   monkey  takes the app out of the stopped state that `force-stop` --
+    //           the suggestion right above this one -- put it in. Android
+    //           delivers no intent to a stopped package, so without this the
+    //           documented "stop it, then start the mapping" sequence could
+    //           never have worked.
+    //   sleep   because the service start lands before the app is up otherwise.
+    //   start-foreground-service, not startservice: a plain `startservice`
+    //           from the background is refused outright on Android 8 and later
+    //           with "app is in background uid null".
+    //
+    // The foreground variant on its own exits 0 and starts nothing, which is
+    // the worst of the three: a button that reports success and does not work.
+    command:
+      "monkey -p com.pokemod.aegis -c android.intent.category.LAUNCHER 1; sleep 3; " +
+      "am start-foreground-service com.pokemod.aegis/com.pokemod.aegis.services.MappingService",
+    hint: "After a stop. A box that has never run Aegis needs it started by hand once first.",
   },
 ];
 

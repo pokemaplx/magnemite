@@ -138,20 +138,20 @@ never reaches the reboot. A rung already spent is not spent again — except the
 **last** one, which repeats at the cooldown, because there is nothing stronger
 left to try.
 
-| Action                                 | What it runs                                          |
-| -------------------------------------- | ----------------------------------------------------- |
-| Only tell me                           | nothing                                               |
-| Restart the app                        | `am force-stop {pkg}` then relaunch                   |
-| Kill the app                           | `am force-stop {pkg}`                                 |
-| Clear the cache and restart            | force-stop, delete `/data/data/{pkg}/cache`, relaunch |
-| Send ENTER                             | `input keyevent 66` — dismisses an ANR dialog         |
-| Start the service                      | `am startservice …`                                   |
-| Run a command                          | whatever you type                                     |
-| Reboot the box                         | the same reboot the device page sends                 |
-| Restart the scanner in Rotom           | Rotom's own `restart` action                          |
-| Drop the scanner's connection in Rotom | Rotom's `disconnect` — the box reconnects             |
-| Reboot the box through Rotom           | Rotom's own `reboot` action                           |
-| Restart one Redroid container          | from the machine that runs it, not from inside it     |
+| Action                                 | What it runs                                                                                                         |
+| -------------------------------------- | -------------------------------------------------------------------------------------------------------------------- |
+| Only tell me                           | nothing                                                                                                              |
+| Restart the app                        | `am force-stop {pkg}` then relaunch                                                                                  |
+| Kill the app                           | `am force-stop {pkg}`                                                                                                |
+| Clear the cache and restart            | force-stop, delete `/data/data/{pkg}/cache`, relaunch                                                                |
+| Send ENTER                             | `input keyevent 66` — dismisses an ANR dialog                                                                        |
+| Start the service                      | `monkey -p … LAUNCHER` — a rule knows the package, not the service inside it, and a scanner starts its own on launch |
+| Run a command                          | whatever you type                                                                                                    |
+| Reboot the box                         | the same reboot the device page sends                                                                                |
+| Restart the scanner in Rotom           | Rotom's own `restart` action                                                                                         |
+| Drop the scanner's connection in Rotom | Rotom's `disconnect` — the box reconnects                                                                            |
+| Reboot the box through Rotom           | Rotom's own `reboot` action                                                                                          |
+| Restart one Redroid container          | from the machine that runs it, not from inside it                                                                    |
 
 **Restart one Redroid container** is the host-side counterpart of _restart the
 app_: the smallest thing that fixes a wedged instance. `Reboot the box` is
