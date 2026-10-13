@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo, useRef, useState, useTransition } from "react";
+import { useEffect, useMemo, useRef, useState, useTransition } from "react";
 import { useRouter } from "next/navigation";
 import {
   AlertTriangle,
@@ -193,6 +193,19 @@ export function ManualInstall({
    */
   const [configOverride, setConfigOverride] = useState<string | null>(null);
   const [configError, setConfigError] = useState<string | null>(null);
+  /**
+   * Exactly what was last seeded in, so the box can keep following the device
+   * selection until somebody types.
+   *
+   * It has to: this card sits above the three steps, so the override is opened
+   * before any box is picked — and which group's config to start from is a
+   * question only the picked boxes can answer. Without this it would seed from
+   * the tie-break and never look again.
+   *
+   * The comparison against the text is what makes it safe. The first keystroke
+   * makes them differ, and from then on nothing overwrites what was typed.
+   */
+  const [seededText, setSeededText] = useState<string | null>(null);
   const [note, setNote] = useState("");
 
   // --- from a link ---------------------------------------------------------
@@ -328,6 +341,13 @@ export function ManualInstall({
     const distinct = new Set(withConfig.map((group) => group.mitmConfig)).size;
     return { text: winner.mitmConfig!, from: winner.name, others: distinct - 1 };
   }, [configuredGroups, devices, picked]);
+
+  useEffect(() => {
+    if (configOverride === null || configOverride !== seededText) return;
+    if (overrideSeed.text === seededText) return;
+    setConfigOverride(overrideSeed.text);
+    setSeededText(overrideSeed.text);
+  }, [overrideSeed.text, configOverride, seededText]);
 
   /**
    * How many of the picked boxes actually have a config written, which is not
@@ -696,7 +716,10 @@ export function ManualInstall({
             configOverride === null ? (
               <button
                 type="button"
-                onClick={() => setConfigOverride(overrideSeed.text)}
+                onClick={() => {
+                  setConfigOverride(overrideSeed.text);
+                  setSeededText(overrideSeed.text);
+                }}
                 className="self-start text-xs text-muted-foreground underline underline-offset-4 hover:text-foreground"
               >
                 Use a different config for this deploy…
@@ -711,6 +734,7 @@ export function ManualInstall({
                     size="sm"
                     onClick={() => {
                       setConfigOverride(null);
+                      setSeededText(null);
                       setConfigError(null);
                     }}
                   >
