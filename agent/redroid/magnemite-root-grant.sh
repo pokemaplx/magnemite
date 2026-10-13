@@ -76,4 +76,24 @@ if [ -n "$live" ]; then
 	magisk --sqlite "DELETE FROM policies WHERE uid NOT IN (${live%,})" || true
 fi
 
+# And read it back, because `magisk --sqlite` exits 0 whatever the SQL did.
+#
+# The daemon discards the statement's result and the client returns 0 at the
+# end-of-output marker, so a REPLACE that failed -- a full /data, or a Magisk
+# that rebuilt the `policies` table again, which it has done before -- is
+# indistinguishable from one that worked. `set -e` never fires, and the line
+# below would announce a grant that is not there.
+#
+# That is the exact failure this script exists to remove, and `logging=0` above
+# means there is no su log to check it against either. `case` rather than
+# `grep -q`, so no match cannot abort under `set -e`, and empty output -- a
+# read that failed too -- falls through and fails closed.
+case $(magisk --sqlite "SELECT policy FROM policies WHERE uid=$uid" 2>&1) in
+*policy=2*) ;;
+*)
+	echo "could not grant root to $pkg (uid $uid): the policy row did not take" >&2
+	exit 1
+	;;
+esac
+
 echo "granted root to $pkg (uid $uid)"

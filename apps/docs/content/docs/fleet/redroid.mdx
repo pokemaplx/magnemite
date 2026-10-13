@@ -91,6 +91,12 @@ is **running, reported healthy, and doing nothing at all**.
   policy after each install — only where the image ships
   `/system/bin/magnemite-root-grant`, which is nowhere else.
 
+  The same uid change happens on **hardware**, and nothing here fixes it: an
+  install that falls back to uninstall-and-reinstall is just as unattended
+  there, and a Magisk module ships no helper to reconcile with. The difference
+  is only that a box with a screen _can_ be answered — by somebody who knows
+  to.
+
 <Callout type="warn" title="An existing machine does not get this by itself">
   The image tag moves when what is *in* the image changes — `redroid=` in `VERSION` — so a machine
   provisioned from now on builds the new one and is fine. A machine that already exists has only the

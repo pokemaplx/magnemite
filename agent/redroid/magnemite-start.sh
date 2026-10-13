@@ -63,9 +63,20 @@ fi
 # exist and neither works: a symlink to Android's toybox answers "Unknown
 # command busybox" (toybox picks its applet from argv[0]), and Debian's
 # busybox-static is built without pgrep, which is the one the injector needs.
+#
+# Two tests, and the second is what makes an upgrade land. "Has pgrep" alone
+# is satisfied by the busybox already there, so bumping MAGISK in the image
+# would never reach a box whose /data survived -- which is every box, since
+# that volume outliving the container is the whole point of seeding. The agent
+# binary above has the same problem and solves it with a version marker; this
+# compares the two binaries' own banners, which needs no marker at all.
 BUSYBOX_SEED=/system/bin/magnemite-busybox
 BUSYBOX=/data/adb/magisk/busybox
-if [ -x "$BUSYBOX_SEED" ] && ! "$BUSYBOX" --list 2>/dev/null | grep -qx pgrep; then
+BUSYBOX_SEEDV=$("$BUSYBOX_SEED" 2>/dev/null | head -1)
+BUSYBOX_HAVEV=$("$BUSYBOX" 2>/dev/null | head -1)
+if [ -x "$BUSYBOX_SEED" ] &&
+	{ [ "$BUSYBOX_SEEDV" != "$BUSYBOX_HAVEV" ] ||
+		! "$BUSYBOX" --list 2>/dev/null | grep -qx pgrep; }; then
 	# To the log and not to stdout: init sends a service's output to
 	# /dev/null, so an echo here is written nowhere -- and a seed that failed
 	# would look exactly like one that was never needed.

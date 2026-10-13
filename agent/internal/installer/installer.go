@@ -327,6 +327,12 @@ func (i *Installer) waitForSystem(ctx context.Context, rep Reporter) error {
 // exists: nothing changes it at runtime.
 var rootGrantHelper = "/system/bin/magnemite-root-grant"
 
+// What every Redroid image has had since before the helper existed, and no
+// piece of hardware ever has. It is how a box whose image is older than this
+// agent is told apart from a TV box: on the first, the missing helper is a
+// stale image and worth saying; on the second it is the design.
+var redroidMarker = "/system/bin/magnemite-start.sh"
+
 // How long that helper gets. It reads one package list and writes one row.
 const rootGrantTimeout = 30 * time.Second
 
@@ -353,6 +359,17 @@ func (i *Installer) grantRoot(pkg string, rep Reporter) {
 		return
 	}
 	if _, err := os.Stat(rootGrantHelper); err != nil {
+		// Silent on hardware, which is the overwhelming majority and where
+		// there is nothing to grant. Loud on a container whose image predates
+		// the helper, because there the scanner has just lost its root and
+		// nothing else will say so -- and the fix is rebuilding that image,
+		// which is not something a job log can do but is something it can
+		// name.
+		if _, marker := os.Stat(redroidMarker); marker == nil {
+			rep.Log(proto.LevelWarn, fmt.Sprintf(
+				"no %s on this box: its Redroid image is older than this agent, so %s keeps no root across this install",
+				rootGrantHelper, pkg))
+		}
 		return
 	}
 

@@ -34,8 +34,11 @@ func (l *logSpy) Log(level, message string)    { l.lines = append(l.lines, level
 func TestGrantRootOnlyRunsWhereTheHelperExists(t *testing.T) {
 	// Restored, because it is package state: a later test in this package
 	// would otherwise find it pointing into a temp directory that is gone.
-	original := rootGrantHelper
-	t.Cleanup(func() { rootGrantHelper = original })
+	original, originalMarker := rootGrantHelper, redroidMarker
+	t.Cleanup(func() { rootGrantHelper, redroidMarker = original, originalMarker })
+	// Absent, so the "no helper" case below is a TV box rather than a stale
+	// image. The stale-image case has a test of its own.
+	redroidMarker = filepath.Join(t.TempDir(), "no-marker")
 
 	helper := filepath.Join(t.TempDir(), "magnemite-root-grant")
 	if err := os.WriteFile(helper, []byte("#!/system/bin/sh\n"), 0o755); err != nil {
@@ -101,5 +104,35 @@ func TestGrantRootOnlyRunsWhereTheHelperExists(t *testing.T) {
 				t.Errorf("a failure should warn, got %q", logs.lines[0])
 			}
 		})
+	}
+}
+
+// A container whose image predates the helper has just lost its scanner's
+// root, and the job log is the only place that can say so. Hardware in the
+// same position is silent on purpose, which is what the marker separates.
+func TestGrantRootNamesAStaleRedroidImage(t *testing.T) {
+	original, originalMarker := rootGrantHelper, redroidMarker
+	t.Cleanup(func() { rootGrantHelper, redroidMarker = original, originalMarker })
+
+	dir := t.TempDir()
+	marker := filepath.Join(dir, "magnemite-start.sh")
+	if err := os.WriteFile(marker, []byte("#!/system/bin/sh\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	rootGrantHelper = filepath.Join(dir, "absent")
+	redroidMarker = marker
+
+	spy := &shellSpy{}
+	logs := &logSpy{}
+	(&Installer{Sys: spy}).grantRoot("com.pokemod.aegis", logs)
+
+	if len(spy.cmds) != 0 {
+		t.Fatalf("nothing to run, but ran %v", spy.cmds)
+	}
+	if len(logs.lines) != 1 || !strings.HasPrefix(strings.ToLower(logs.lines[0]), "warn") {
+		t.Fatalf("want one warning, got %v", logs.lines)
+	}
+	if !strings.Contains(logs.lines[0], "older than this agent") {
+		t.Errorf("the warning does not say why: %q", logs.lines[0])
 	}
 }
