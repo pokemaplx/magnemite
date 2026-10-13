@@ -58,6 +58,12 @@ type Converger interface {
 	Converge(ctx context.Context, req proto.HostConverge) proto.HostConvergeResult
 }
 
+// Bootstrapper re-runs the provisioning script on a machine already up. Its
+// own interface for the reason Converger is one: the fake stands in for it.
+type Bootstrapper interface {
+	Run(ctx context.Context, req proto.HostBootstrap) proto.HostBootstrapResult
+}
+
 type HostReporter interface {
 	// Report is what this machine is and what containers it is holding. It is
 	// allowed to be slow -- it shells out -- and it is called once per beat.
@@ -73,6 +79,9 @@ type Agent struct {
 	// Brings the containers in line with what the hub asked for. Nil on a box,
 	// and nil in host mode until docker is wired up.
 	Converger Converger
+	// Runs the bootstrap again on command. Nil on a box, which is what makes
+	// a misdirected request a log line rather than a shell.
+	Bootstrapper Bootstrapper
 	// Set only in host mode, and nil on every box.
 	//
 	// This is the whole of what -host changes about the client: the loop below
@@ -458,6 +467,35 @@ func (a *Agent) handle(ctx context.Context, data []byte) {
 		if !msg.Approved {
 			log.Printf("waiting for an operator to approve this device in the dashboard")
 		}
+
+	case "host_bootstrap":
+		// Only a machine has a bootstrap to re-run. A box ignoring this is the
+		// protocol's rule working; saying so is what stops a misdirected one
+		// being silent.
+		if a.Bootstrapper == nil {
+			log.Printf("ignoring host_bootstrap: this agent is not running in -host mode")
+			return
+		}
+		var req proto.HostBootstrap
+		if json.Unmarshal(data, &req) != nil {
+			return
+		}
+		// Its own goroutine, like the converge: this is apt, a kernel module
+		// and possibly an image build, and the read loop has to keep taking
+		// frames -- including the pings that stop the hub deciding the machine
+		// has gone while it is working.
+		go func() {
+			log.Printf("re-running the bootstrap (%d files, image %s)", len(req.Files), req.Image)
+			result := a.Bootstrapper.Run(ctx, req)
+			if result.Ok {
+				log.Printf("bootstrap %s done: %d steps", req.RequestID, len(result.Steps))
+			} else {
+				log.Printf("bootstrap %s failed: %s", req.RequestID, result.Error)
+			}
+			if err := a.send(result); err != nil {
+				log.Printf("could not report the bootstrap: %v", err)
+			}
+		}()
 
 	case "host_converge":
 		// Only a machine has containers to converge. A box ignoring this is the

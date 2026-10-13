@@ -27,7 +27,7 @@ import {
   rotomEnabled,
   syncDevices,
 } from "../services/rotom.js";
-import { startBootstrap } from "../services/hostBootstrap.js";
+import { rerunBootstrap, startBootstrap } from "../services/hostBootstrap.js";
 import { adoptHost, convergeHost, setInstanceCount } from "../services/redroid.js";
 import { nudge } from "../services/scheduler.js";
 import { probeRemote, storeFromUrl, storeUpload } from "../services/uploads.js";
@@ -618,6 +618,24 @@ export async function internalRoutes(app: FastifyInstance) {
    * where the machine and the hub agree on paper and the containers still are
    * not what they should be.
    */
+  /**
+   * Run the provisioning script again on a machine that is already up.
+   *
+   * The files travel with the request, so this is how a *fixed* image reaches
+   * a machine that already exists — the copies on the machine are the ones
+   * being replaced. It returns as soon as the request is sent: the run itself
+   * is minutes, and what it did lands on the machine's row when it reports.
+   */
+  app.post("/internal/hosts/:id/bootstrap", async (request, reply) => {
+    const { id } = request.params as { id: string };
+    try {
+      return await rerunBootstrap(id);
+    } catch (err) {
+      log.error({ err, hostId: id }, "bootstrap re-run failed");
+      return reply.status(500).send({ error: err instanceof Error ? err.message : String(err) });
+    }
+  });
+
   app.post("/internal/hosts/:id/converge", async (request, reply) => {
     const { id } = request.params as { id: string };
     const force = (request.body as { force?: boolean } | undefined)?.force === true;

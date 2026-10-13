@@ -1,3 +1,4 @@
+import type { ReactNode } from "react";
 import { notFound } from "next/navigation";
 import { getRedroidSettings, planCapacity, prisma } from "@magnemite/db";
 import { requireUser } from "@/lib/session";
@@ -66,6 +67,17 @@ export default async function HostPage({ params }: { params: Promise<{ id: strin
   if (!host || host.kind !== "HOST") notFound();
 
   const machine = host.redroidHost;
+  // Written by the agent, so it is read defensively: a row from a hub that is
+  // older than this column, or one somebody edited, must not throw the page.
+  const bootstrapSteps = Array.isArray(machine?.bootstrapSteps)
+    ? (machine.bootstrapSteps as { name: string; ok: boolean; detail: string }[])
+    : [];
+  // Asked for and not yet answered. The hub writes the time when it sends the
+  // request and the verdict only when the machine reports, so these two
+  // together are the only thing that separates "working" from "finished" —
+  // and without saying so the page shows the last run's steps as if they were
+  // this one's.
+  const bootstrapRunning = machine?.bootstrapRanAt != null && machine.bootstrapOk === null;
   const [trend, redroid, groups] = await Promise.all([
     loadRecentTrend(host.id),
     getRedroidSettings(),
@@ -81,7 +93,7 @@ export default async function HostPage({ params }: { params: Promise<{ id: strin
   const running = wanted.filter((i) => i.containerState === "running").length;
   const workers = wanted.reduce((sum, i) => sum + (i.workers ?? 0), 0);
 
-  const facts: { label: string; value: string }[] = [
+  const facts: { label: string; value: string; node?: ReactNode }[] = [
     { label: "Architecture", value: machine?.arch ?? "—" },
     { label: "Kernel", value: machine?.kernel ?? "—" },
     { label: "Docker", value: machine?.dockerVersion ?? "—" },
@@ -95,6 +107,25 @@ export default async function HostPage({ params }: { params: Promise<{ id: strin
       value: host.swapTotalBytes === null ? "—" : formatBytes(num(host.swapTotalBytes)),
     },
     { label: "Agent", value: host.agentVersion ?? "—" },
+    {
+      // What the kernel row is for, answered: whether the setup has been run
+      // against the kernel now booted. "never" is the honest answer for every
+      // machine provisioned before this existed.
+      label: "Setup last run",
+      // A relative time, like every other time on these pages: a server
+      // component's toLocaleString() renders the *server's* timezone, which on
+      // a fleet run from another country is quietly the wrong hour.
+      value: machine?.bootstrapRanAt == null ? "never since provisioning" : "",
+      node:
+        machine?.bootstrapRanAt == null ? null : (
+          <>
+            <RelativeTime value={machine.bootstrapRanAt} />{" "}
+            <span className="text-muted-foreground">
+              · {bootstrapRunning ? "running" : machine.bootstrapOk ? "ok" : "failed"}
+            </span>
+          </>
+        ),
+    },
     { label: "Serial", value: host.serial },
   ];
 
@@ -142,6 +173,53 @@ export default async function HostPage({ params }: { params: Promise<{ id: strin
         </Card>
       ) : null}
 
+      {bootstrapRunning || bootstrapSteps.length > 0 ? (
+        <Card>
+          <CardHeader>
+            <CardTitle className="flex flex-wrap items-baseline gap-2 text-sm">
+              <span>
+                {bootstrapRunning
+                  ? "Setup running"
+                  : `Last setup run · ${machine?.bootstrapOk ? "finished" : "failed"}`}
+              </span>
+              {/* When, always: steps with no date read as this minute's, and
+                  three-week-old ones are the dangerous case. */}
+              <span className="text-xs font-normal text-muted-foreground">
+                <RelativeTime value={machine?.bootstrapRanAt ?? null} />
+              </span>
+            </CardTitle>
+          </CardHeader>
+          <CardContent>
+            {/* One line per `::step` the script printed, which is how a run
+                that failed says which stage rather than just failing. */}
+            {bootstrapRunning ? (
+              <p className="mb-3 text-sm text-muted-foreground">
+                Working. It takes a few minutes — apt, the kernel module, and an image build when
+                the tag is one this machine does not have. The steps appear when it reports.
+              </p>
+            ) : null}
+            {!bootstrapRunning && machine?.bootstrapOk ? (
+              <p className="mb-3 text-sm text-muted-foreground">
+                If this rebuilt the image, the containers are still on the old one until you{" "}
+                <strong>Re-apply</strong>: the compose file did not change, so nothing recreates
+                them by itself.
+              </p>
+            ) : null}
+            <ol className="space-y-1 text-sm">
+              {bootstrapSteps.map((step, index) => (
+                <li key={`${step.name}-${index}`} className="flex items-baseline gap-2">
+                  <span className={step.ok ? "text-success" : "text-destructive"}>
+                    {step.ok ? "✓" : "✗"}
+                  </span>
+                  <span className="w-24 shrink-0 font-medium">{step.name}</span>
+                  <span className="text-muted-foreground">{step.detail}</span>
+                </li>
+              ))}
+            </ol>
+          </CardContent>
+        </Card>
+      ) : null}
+
       <HostScaleForm
         hostId={host.id}
         adopted={machine?.adoptedAt !== null && machine !== null}
@@ -179,7 +257,7 @@ export default async function HostPage({ params }: { params: Promise<{ id: strin
                 <div key={fact.label} className="contents">
                   <dt className="text-muted-foreground">{fact.label}</dt>
                   <dd className="truncate font-medium" title={fact.value}>
-                    {fact.value}
+                    {fact.node ?? fact.value}
                   </dd>
                 </div>
               ))}

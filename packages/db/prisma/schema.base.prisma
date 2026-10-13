@@ -594,6 +594,16 @@ model RedroidHost {
   lastError   String?   @db.Text
   lastErrorAt DateTime?
 
+  /// What re-running the bootstrap last reported, one entry per `::step` line.
+  ///
+  /// Json for the reason RedroidBootstrap.steps is: a short fixed list written
+  /// once, and the one shape that works on both providers. Null on a machine
+  /// that has never been asked -- which is every machine provisioned before
+  /// this existed, and is why the page says "never" rather than "no steps".
+  bootstrapSteps  Json?
+  bootstrapRanAt  DateTime?
+  bootstrapOk     Boolean?
+
   // --- defaults every instance on this machine inherits --------------------
   // Here as well as in Settings because a 32GB Ampere and an 8GB VPS want
   // different answers, and a box wants neither. Null falls back to the

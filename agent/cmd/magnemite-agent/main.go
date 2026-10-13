@@ -104,6 +104,7 @@ func main() {
 	var system sys.System
 	var reporter agent.HostReporter
 	var converger agent.Converger
+	var bootstrapper agent.Bootstrapper
 
 	switch {
 	case *hostMode:
@@ -127,6 +128,11 @@ func main() {
 			real := hostpkg.NewReporter(hostProject, hostDir, host.DiskPath())
 			reporter, converger = real, real.Docker
 		}
+		// Real in both modes, including -fake-docker: the fake exists to stub
+		// the two docker calls, and nothing here is one. A fake fleet on a
+		// laptop that was asked to re-run its bootstrap should fail the way a
+		// machine without the script would, not pretend.
+		bootstrapper = &hostpkg.Bootstrapper{}
 		log.SetPrefix("[" + cfg.Serial + "] ")
 		log.Printf("running as a Redroid host, measuring disk on %s", host.DiskPath())
 
@@ -174,6 +180,7 @@ func main() {
 	// box sends rather than present and empty.
 	a.Host = reporter
 	a.Converger = converger
+	a.Bootstrapper = bootstrapper
 	if err := a.Run(ctx); err != nil && ctx.Err() == nil {
 		log.Fatalf("agent stopped: %v", err)
 	}

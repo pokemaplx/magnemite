@@ -263,11 +263,26 @@ forgotten.
 
 ## The kernel trap, and re-running
 
-The replacement for automatic upgrades is doing it on purpose. When a machine
-takes a new kernel, the modules have to be installed for **that** kernel, which
-is what re-running the bootstrap does: it reaches the copy on the machine over
-the agent's own socket — no SSH, no credential — and skips everything already
-satisfied.
+The replacement for automatic upgrades is doing it on purpose: **Re-run setup**
+on the machine's page. It reaches the machine over the agent's own socket — no
+SSH, no credential — and skips everything already satisfied, so the module is
+reinstalled for the kernel that is now booted and nothing else moves.
+
+The script and the files that build the Redroid image **travel with the
+request**, rather than the copies left on the machine being used. That is not
+an optimisation: a re-run whose point is to deliver a fixed image cannot be
+done with the files from the day the machine was provisioned, because those are
+the ones being replaced. It is also what makes this the way a new image reaches
+a machine that already exists — the image step builds a tag the machine does
+not have yet, and skips one it does.
+
+Nothing about the machine's identity is sent: no token, no serial, no server
+URL. It keeps its own `/etc/magnemite/host.json`, and the script leaves an
+existing one alone, so re-running cannot make a machine enrol twice.
+
+The steps it printed land on the machine's page, the same `::step` markers the
+first provisioning showed — so a re-run that failed says which stage, not just
+that it failed.
 
 The signature to look for is a whole machine going wrong at once right after a
 reboot: `HOST_DOCKER_DOWN`, or every instance down together. The **Kernel** fact

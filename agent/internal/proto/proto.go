@@ -205,6 +205,52 @@ type HostConverge struct {
 	RemoveOrphans bool `json:"removeOrphans"`
 }
 
+// HostBootstrap asks a machine to run the bootstrap again.
+//
+// The script is already on the machine -- it installs itself there for exactly
+// this -- but it is sent again, and so are the files that build the Redroid
+// image. A re-run whose point is to deliver a *fixed* image cannot use the
+// copies from the day the machine was provisioned: those are the ones being
+// replaced.
+type HostBootstrap struct {
+	Type      string `json:"type"` // "host_bootstrap"
+	RequestID string `json:"requestId"`
+	Script    string `json:"script"`
+	// Written into a redroid/ directory beside the script. The script looks
+	// for it relative to its working directory, so where these land decides
+	// whether the image is rebuilt at all.
+	Files []BootstrapFile `json:"files,omitempty"`
+	Image string          `json:"image"`
+	// The whole run: apt, a kernel module, possibly an image build.
+	TimeoutSeconds int `json:"timeoutSeconds"`
+}
+
+type BootstrapFile struct {
+	Name    string `json:"name"`
+	Content string `json:"content"`
+	// Octal as a string, the way a config file's mode travels.
+	Mode string `json:"mode,omitempty"`
+}
+
+// BootstrapStep is one `::step` line the script printed. Parsed on the machine
+// rather than at the hub, because over this path there is no SSH stream for
+// the hub to read -- but it is the same script and the same markers.
+type BootstrapStep struct {
+	Name   string `json:"name"`
+	Ok     bool   `json:"ok"`
+	Detail string `json:"detail,omitempty"`
+}
+
+type HostBootstrapResult struct {
+	Type      string `json:"type"` // "host_bootstrap_result"
+	RequestID string `json:"requestId"`
+	Ok        bool   `json:"ok"`
+	// Never nil: a run that printed no step at all still sends [], because a
+	// nil slice is JSON null and the hub's schema takes an array.
+	Steps []BootstrapStep `json:"steps"`
+	Error string          `json:"error,omitempty"`
+}
+
 // HostConvergeResult is what the machine did about it.
 type HostConvergeResult struct {
 	Type      string `json:"type"` // "host_converge_result"

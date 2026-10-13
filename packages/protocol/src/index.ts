@@ -417,6 +417,31 @@ export const execResultSchema = z.object({
 export const pongSchema = z.object({ type: z.literal("pong") });
 
 /**
+ * One `::step` line the bootstrap script printed.
+ *
+ * The same three fields the hub parses out of its stdout over SSH, because it
+ * is the same script and the same markers — a stage that fails has to say
+ * which one and why, whichever way it was started.
+ */
+export const bootstrapStepSchema = z.object({
+  name: z.string(),
+  /** A warning is not a failure: swap that could not be made leaves a machine that runs. */
+  ok: z.boolean(),
+  detail: z.string().default(""),
+});
+
+/** What re-running the bootstrap did. */
+export const hostBootstrapResultSchema = z.object({
+  type: z.literal("host_bootstrap_result"),
+  requestId: z.string(),
+  ok: z.boolean(),
+  steps: listOf(bootstrapStepSchema),
+  /** Capped by the agent: this rides the socket and a frame is 1 MB. */
+  error: z.string().nullish(),
+});
+export type HostBootstrapResult = z.infer<typeof hostBootstrapResultSchema>;
+
+/**
  * What the machine did about it.
  *
  * `output` is docker's own, capped by the agent: a frame is 1 MB and the
@@ -448,6 +473,7 @@ export const agentMessageSchema = z.discriminatedUnion("type", [
   execResultSchema,
   pongSchema,
   hostConvergeResultSchema,
+  hostBootstrapResultSchema,
 ]);
 export type AgentMessage = z.infer<typeof agentMessageSchema>;
 
@@ -698,6 +724,45 @@ export const pingSchema = z.object({ type: z.literal("ping") });
  * idempotent, makes drift self-correcting, and means a machine that missed one
  * catches up on the next rather than needing a replay.
  */
+/**
+ * Run the bootstrap again on a machine that is already up.
+ *
+ * The script is already on the machine — it installs itself there for exactly
+ * this — but it is **sent again** rather than invoked where it sits, and so are
+ * the files that build the Redroid image. A re-run whose point is to deliver a
+ * fixed image cannot be done with the copies from the day the machine was
+ * provisioned: those are the ones being replaced.
+ *
+ * Nothing here is a credential. The machine keeps its own config, and the
+ * script leaves an existing `/etc/magnemite/host.json` alone — re-running must
+ * not make a machine enrol a second time.
+ */
+export const hostBootstrapSchema = z.object({
+  type: z.literal("host_bootstrap"),
+  /** Correlates the result, since a run outlives the beat that asked. */
+  requestId: z.string(),
+  /** The bootstrap script itself, as the hub has it now. */
+  script: z.string(),
+  /**
+   * What builds the Redroid image, written into a `redroid/` directory beside
+   * the script. The script looks for it relative to its working directory, so
+   * where these land is what decides whether the image is rebuilt at all.
+   */
+  files: listOf(
+    z.object({
+      name: z.string(),
+      content: z.string(),
+      /** Octal, as a string, the way the config file's mode travels. */
+      mode: z.string().default("0644"),
+    }),
+  ),
+  /** The tag to build. A machine with that tag already skips the build. */
+  image: z.string(),
+  /** Seconds the whole run may take: apt, a kernel module, an image build. */
+  timeoutSeconds: z.number().int().positive().default(1800),
+});
+export type HostBootstrap = z.infer<typeof hostBootstrapSchema>;
+
 export const hostConvergeSchema = z.object({
   type: z.literal("host_converge"),
   /** Correlates the result, since a converge outlives the beat that asked. */
@@ -738,6 +803,7 @@ export const serverMessageSchema = z.discriminatedUnion("type", [
   execCommandSchema,
   pingSchema,
   hostConvergeSchema,
+  hostBootstrapSchema,
 ]);
 export type ServerMessage = z.infer<typeof serverMessageSchema>;
 

@@ -336,7 +336,17 @@ if [ -n "${MAGNEMITE_IMAGE:-}" ] && [ -d ./redroid ]; then
 		# bin/magnemite-agent-linux-arm64 and redroid/*, so the binary has to
 		# sit where it expects rather than where it was pushed.
 		mkdir -p ./bin
-		cp "$AGENT_BIN" ./bin/magnemite-agent-linux-arm64
+		# Guarded, and that guard is the difference between this step warning
+		# and the whole script dying two steps early. `set -e` is on, a failed
+		# cp exits 1, and the binary is not always beside the script: a re-run
+		# over the agent's socket sends no binary, because the machine already
+		# has one and the agent updates itself. Without this, a re-run that has
+		# to *build* a tag -- which is the re-run an image bump needs -- never
+		# reaches `docker build`, never prints an image step, and stops before
+		# the stages after it.
+		if [ -f "$AGENT_BIN" ]; then
+			cp "$AGENT_BIN" ./bin/magnemite-agent-linux-arm64
+		fi
 		if docker build -f ./redroid/Dockerfile -t "$MAGNEMITE_IMAGE" . >/tmp/magnemite-build.log 2>&1; then
 			step image ok "built $MAGNEMITE_IMAGE"
 		else
@@ -441,6 +451,28 @@ fi
 step harden ok "$FIREWALL, $BANS"
 
 # --- 6. the agent, its config and its unit ----------------------------------
+#
+# Skipped whole when the agent is the one running this.
+#
+# A re-run over the socket comes from the agent itself, and three things in
+# here are wrong in that case. There is no binary beside the script -- the
+# agent updates itself over /files/*, so none is sent and the check below would
+# `die` on every re-run. The config is already written and must not be touched.
+# And the restart at the end would stop the service whose cgroup this script is
+# running in: systemd would kill the run mid-way, and the result would never
+# reach the hub that asked for it.
+#
+# The copy of the script is still refreshed below, which is the one part of
+# this step a re-run genuinely wants.
+if [ -n "${MAGNEMITE_SKIP_AGENT:-}" ]; then
+	mkdir -p "$LIB_DIR"
+	[ "$(readlink -f "$0" 2>/dev/null || echo "$0")" = "$LIB_DIR/bootstrap.sh" ] ||
+		install -m 0755 "$0" "$LIB_DIR/bootstrap.sh" 2>/dev/null || true
+	step agent ok "left running (re-run)"
+	step done ok "the machine is as this script leaves it"
+	exit 0
+fi
+
 [ -f "$AGENT_BIN" ] || die agent "no agent binary at $AGENT_BIN"
 install -D -m 0755 "$AGENT_BIN" "$INSTALL_BIN"
 mkdir -p "$LIB_DIR"

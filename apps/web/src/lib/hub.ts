@@ -275,6 +275,9 @@ export const hub = {
   /** Re-send the file. `force` sends it even when the hash already matches. */
   convergeHost: (id: string, force = false) =>
     call<{ sent: boolean; reason?: string }>(`/internal/hosts/${id}/converge`, { force }),
+  /** Re-run the provisioning script, with the files that build the image. */
+  rerunBootstrap: (id: string) =>
+    call<{ sent: boolean; reason?: string }>(`/internal/hosts/${id}/bootstrap`, {}),
 };
 
 export const HUB_BASE_URL = HUB_URL;

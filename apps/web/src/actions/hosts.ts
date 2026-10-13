@@ -500,3 +500,43 @@ export async function deleteHost(
 function shellQuote(value: string): string {
   return `'${value.replaceAll("'", `'\''`)}'`;
 }
+
+/**
+ * Run the provisioning script again on a machine that is already up.
+ *
+ * The one repair that cannot be done any other way through the dashboard. It
+ * reinstalls the kernel module for the kernel that is *now* running — which an
+ * `apt upgrade` silently invalidates, taking every container down after the
+ * reboot with nothing to explain it — and it rebuilds the Redroid image, which
+ * is how a fixed image reaches a machine that already exists.
+ *
+ * Returns as soon as the request is sent. The run is minutes of apt and an
+ * image build, and what it did lands on the machine's row when it reports.
+ */
+export async function rerunBootstrap(hostId: string): Promise<ActionState & { reason?: string }> {
+  const user = await requireOperator();
+  try {
+    const result = await hub.rerunBootstrap(hostId);
+    await prisma.auditLog.create({
+      data: {
+        userId: user.id,
+        userEmail: user.email,
+        action: "redroidHost.bootstrap.rerun",
+        targetType: "Device",
+        targetId: hostId,
+        meta: { sent: result.sent, reason: result.reason ?? null },
+      },
+    });
+    revalidateHost(hostId);
+    // "Done" would be a lie: what finished is the asking. The run is apt, a
+    // kernel module and possibly an image build, and the steps land on this
+    // page when the machine reports them.
+    return result.sent
+      ? { ok: true, reason: "Running now. It takes a few minutes; the steps appear here after." }
+      : { ok: true, reason: result.reason };
+  } catch (err) {
+    return {
+      error: err instanceof HubError ? err.message : "Could not ask that machine to re-run it.",
+    };
+  }
+}

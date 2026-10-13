@@ -14,6 +14,7 @@ import { applyMetrics, markOffline, markOnline, trackedPackages } from "../servi
 import { ACTIVE_STATES, applyProgress, completeJob, logJobEvent } from "../services/jobs.js";
 import { specForDevice } from "../services/monitor.js";
 import { applyHostReport, recordConvergeResult } from "../services/redroid.js";
+import { recordBootstrapResult } from "../services/hostBootstrap.js";
 import { nudge } from "../services/scheduler.js";
 
 export const WS_PATH = "/ws/device";
@@ -254,6 +255,10 @@ async function handleMessage(ws: WebSocket, deviceId: string, ip: string | null,
 
     case "host_converge_result":
       await recordConvergeResult(deviceId, msg);
+      break;
+
+    case "host_bootstrap_result":
+      await recordBootstrapResult(deviceId, msg);
       break;
 
     case "heartbeat": {

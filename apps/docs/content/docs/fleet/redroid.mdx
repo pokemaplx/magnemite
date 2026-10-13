@@ -97,13 +97,16 @@ is **running, reported healthy, and doing nothing at all**.
   is only that a box with a screen _can_ be answered — by somebody who knows
   to.
 
-<Callout type="warn" title="An existing machine does not get this by itself">
+<Callout type="warn" title="An existing machine needs to be told">
   The image tag moves when what is *in* the image changes — `redroid=` in `VERSION` — so a machine
-  provisioned from now on builds the new one and is fine. A machine that already exists has only the
-  old tag, and nothing rebuilds it: the bootstrap's image step **skips a tag it already has**, and
-  there is no way to re-run the bootstrap from the dashboard yet. Its next converge will ask for a
-  tag it does not have and fail loudly — the containers keep running and the error is on the machine
-  page — until somebody rebuilds the image there and re-applies.
+  provisioned from now on builds the new one. A machine that already exists does **not** rebuild by
+  itself: the bootstrap's image step skips a tag it already has. **Re-run setup** on its page is
+  what builds the new one — the script and the files that build the image travel with that request,
+  so it is the current image rather than the one from the day the machine was provisioned.
+
+Two steps, not one. Building the image does not move the containers onto it, because the compose
+file did not change: **Re-apply** afterwards is what recreates them.
+
 </Callout>
 
 <Callout type="warn" title="What both failures look like">

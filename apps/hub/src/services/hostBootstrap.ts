@@ -1,10 +1,13 @@
+import { randomUUID } from "node:crypto";
 import fs from "node:fs/promises";
 import path from "node:path";
 import { Client, type ConnectConfig } from "ssh2";
+import type { HostBootstrapResult } from "@magnemite/protocol";
 import { generateToken, hashToken, prisma } from "@magnemite/db";
 import { env } from "../env.js";
 import { log } from "../log.js";
 import { clampError } from "./redroid.js";
+import { getConnection, sendTo } from "../registry.js";
 import { REDROID_IMAGE } from "../version.js";
 
 /**
@@ -36,6 +39,16 @@ const REMOTE_DIR = "/tmp/magnemite-bootstrap";
  * answering does not hold a row in RUNNING forever.
  */
 const SSH_TIMEOUT_MS = 20 * 60 * 1000;
+
+/**
+ * How long a re-run over the socket may take.
+ *
+ * Longer than the SSH half's, because it can include an image build on a
+ * machine that is also running containers. It is also what decides when an
+ * in-flight run is written off as lost: past it, asking again is the right
+ * move rather than something to refuse.
+ */
+const BOOTSTRAP_TIMEOUT_SECONDS = 30 * 60;
 
 /**
  * Fails bootstraps that nothing is working on any more.
@@ -446,6 +459,29 @@ async function agentBinary(): Promise<Buffer> {
  *
  * Beside the agent builds, which is where the hub's Dockerfile puts them.
  */
+/**
+ * The files that build the Redroid image, for a re-run over the socket.
+ *
+ * The same four the SSH path pushes, and the same list the two Dockerfiles
+ * name — see the comment on the upload loop above. Their modes travel with
+ * them because one of them is a script.
+ */
+async function redroidFiles(): Promise<{ name: string; content: string; mode: string }[]> {
+  const wanted = [
+    ["Dockerfile", "0644"],
+    ["magnemite-start.sh", "0755"],
+    ["magnemite-root-grant.sh", "0755"],
+    ["magnemite.rc", "0644"],
+  ] as const;
+  return Promise.all(
+    wanted.map(async ([name, mode]) => ({
+      name,
+      content: (await redroidFile(name)).toString("utf8"),
+      mode,
+    })),
+  );
+}
+
 async function redroidFile(name: string): Promise<Buffer> {
   const file = path.join(env.AGENT_BIN_DIR, "redroid", name);
   try {
@@ -522,4 +558,119 @@ export function parseStep(line: string): BootstrapStep | null {
 
 function shellQuote(value: string): string {
   return `'${value.replaceAll("'", `'\\''`)}'`;
+}
+
+// ---------------------------------------------------------------------------
+// Re-running the bootstrap
+// ---------------------------------------------------------------------------
+
+/**
+ * Ask a machine to run its provisioning script again.
+ *
+ * Over its own socket, with no SSH and no credential — which is the whole
+ * reason the script installs a copy of itself on each machine. What it covers
+ * is the one failure in this feature that happens with nobody touching
+ * anything: `linux-modules-extra` is per kernel version, so a kernel upgrade
+ * leaves binder behind and every container stops coming up after the reboot.
+ *
+ * **The files travel with the request**, and that is not an optimisation. The
+ * copies on the machine are from the day it was provisioned, and a re-run
+ * whose point is to deliver a fixed image cannot be done with the very files
+ * being replaced. The script also looks for `./redroid` relative to where it
+ * runs, so sending it alone would re-run everything except the image build.
+ *
+ * No token, no server URL, no serial: the machine's own config already holds
+ * those and the script keeps an existing one. Re-running must not make a
+ * machine enrol a second time.
+ */
+export async function rerunBootstrap(
+  deviceId: string,
+): Promise<{ sent: boolean; reason?: string }> {
+  const host = await prisma.redroidHost.findUnique({
+    where: { deviceId },
+    select: { deviceId: true, image: true, bootstrapRanAt: true, bootstrapOk: true },
+  });
+  if (!host) return { sent: false, reason: "that machine has not enrolled yet" };
+
+  // One at a time, refused here rather than on the machine. The agent refuses
+  // a second run too, but by then it has been recorded as a failed one and the
+  // first run's steps are gone -- so the operator would be told about a
+  // failure that is really their own second click.
+  //
+  // `bootstrapOk` null with a time set is the in-flight state: set when the
+  // request goes out, filled when the machine reports. Past the ceiling it is
+  // not in flight any more, it is lost, and asking again is right.
+  if (host.bootstrapRanAt && host.bootstrapOk === null) {
+    const running = Date.now() - host.bootstrapRanAt.getTime();
+    if (running < BOOTSTRAP_TIMEOUT_SECONDS * 1000) {
+      return {
+        sent: false,
+        reason: `already running, started ${Math.round(running / 60000)} minutes ago`,
+      };
+    }
+  }
+  if (!getConnection(deviceId)) {
+    // Deliberately not queued. A bootstrap is minutes of apt and an image
+    // build, and one that starts the moment a machine reconnects — possibly
+    // in the middle of the night, possibly because it just rebooted — is not
+    // something to begin without somebody watching.
+    return { sent: false, reason: "offline — the machine has to be up to run it" };
+  }
+
+  const [script, files] = await Promise.all([bootstrapScript(), redroidFiles()]);
+
+  // The machine's own pin when it has one, the fleet's tag otherwise -- the
+  // same resolution convergeHost does, so a machine held on an older image on
+  // purpose is not quietly dragged forward by a re-run.
+  const image = host.image ?? REDROID_IMAGE;
+
+  const requestId = randomUUID();
+  const sent = sendTo(deviceId, {
+    type: "host_bootstrap",
+    requestId,
+    script: script.toString("utf8"),
+    files,
+    image,
+    timeoutSeconds: BOOTSTRAP_TIMEOUT_SECONDS,
+  });
+  if (!sent) return { sent: false, reason: "the machine did not take the request" };
+
+  // Marked in flight before anything can report. Without this the page shows
+  // the *previous* run's steps while this one works -- stale green while
+  // something is happening, which is the version of "no feedback" that
+  // actively misleads.
+  await prisma.redroidHost.update({
+    where: { deviceId },
+    data: { bootstrapRanAt: new Date(), bootstrapOk: null, bootstrapSteps: [] },
+  });
+
+  log.info({ deviceId, requestId, image }, "bootstrap re-run dispatched");
+  return { sent: true };
+}
+
+/** Stores what a re-run reported. */
+export async function recordBootstrapResult(
+  deviceId: string,
+  result: HostBootstrapResult,
+): Promise<void> {
+  await prisma.redroidHost.update({
+    where: { deviceId },
+    data: {
+      bootstrapSteps: result.steps,
+      bootstrapRanAt: new Date(),
+      bootstrapOk: result.ok,
+      // Shares the field the converge failures use, so the machine page has
+      // one place that answers "what went wrong here last" rather than two
+      // that each answer half -- and a run that worked **clears** it, because
+      // a machine just repaired still showing "Last failure" is how an
+      // operator stops believing that card at all.
+      ...(result.ok
+        ? { lastError: null, lastErrorAt: null }
+        : {
+            lastError: clampError(result.error ?? "the bootstrap failed"),
+            lastErrorAt: new Date(),
+          }),
+    },
+  });
+  log.info({ deviceId, ok: result.ok, steps: result.steps.length }, "bootstrap re-run reported");
 }

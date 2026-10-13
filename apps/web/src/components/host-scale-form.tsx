@@ -3,9 +3,10 @@
 import { useMemo, useState, useTransition } from "react";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { ConfirmDialog } from "@/components/ui/confirm-dialog";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { adoptHost, convergeHost, scaleHost } from "@/actions/hosts";
+import { adoptHost, convergeHost, rerunBootstrap, scaleHost } from "@/actions/hosts";
 import { formatBytes } from "@/lib/format";
 
 /**
@@ -112,6 +113,7 @@ export function HostScaleForm({
 }) {
   const [count, setCount] = useState(String(instances));
   const [workerCount, setWorkerCount] = useState(String(workers ?? capacity.workersPerInstance));
+  const [confirmRerun, setConfirmRerun] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [pending, start] = useTransition();
@@ -230,6 +232,11 @@ export function HostScaleForm({
             </Button>
           ) : null}
           {canOperate ? (
+            <Button variant="ghost" onClick={() => setConfirmRerun(true)} disabled={pending}>
+              Re-run setup
+            </Button>
+          ) : null}
+          {canOperate ? (
             <Button
               variant="ghost"
               onClick={() => run(() => convergeHost(hostId))}
@@ -277,6 +284,23 @@ export function HostScaleForm({
 
         {error ? <p className="text-sm text-destructive">{error}</p> : null}
         {message ? <p className="text-sm text-muted-foreground">{message}</p> : null}
+
+        {/* Asked, because this is half an hour of apt and docker running as
+            root on a machine that is working, started by a button that looks
+            exactly like the two beside it. */}
+        <ConfirmDialog
+          open={confirmRerun}
+          onOpenChange={setConfirmRerun}
+          title="Run the setup script again?"
+          description="It reinstalls the kernel module for the kernel running now — which an apt upgrade silently invalidates — and rebuilds the Redroid image when the tag is one this machine does not have. It takes up to half an hour, runs as root, and leaves the containers and the agent alone. Everything already satisfied is skipped."
+          confirmLabel="Run it"
+          pendingLabel="Asking…"
+          pending={pending}
+          onConfirm={() => {
+            setConfirmRerun(false);
+            run(() => rerunBootstrap(hostId));
+          }}
+        />
       </CardContent>
     </Card>
   );
