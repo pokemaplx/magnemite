@@ -563,10 +563,18 @@ export async function internalRoutes(app: FastifyInstance) {
   app.post("/internal/hosts/bootstrap", async (request, reply) => {
     const parsed = z
       .object({
-        name: z.string().min(1).max(64),
-        host: z.string().min(1),
+        // Trimmed here, at the boundary every caller crosses: a pasted
+        // address carries a leading space often enough, and `.min(1)` is
+        // happy with it -- the failure then arrives from getaddrinfo as
+        // `ENOTFOUND  1.2.3.4`, where the only clue is a double space.
+        //
+        // The credentials below are deliberately *not* trimmed. A password
+        // may legitimately begin or end with a space, and a private key is
+        // passed to a parser that cares about its own bytes.
+        name: z.string().trim().min(1).max(64),
+        host: z.string().trim().min(1),
         port: z.number().int().min(1).max(65535).optional(),
-        username: z.string().min(1),
+        username: z.string().trim().min(1),
         password: z.string().min(1).optional(),
         privateKey: z.string().min(1).optional(),
         passphrase: z.string().optional(),

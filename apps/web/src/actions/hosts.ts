@@ -259,12 +259,37 @@ export async function bootstrapHost(input: {
 }): Promise<ActionState & { id?: string }> {
   const user = await requireOperator();
 
+  // Trimmed, and then *used* trimmed. Checking `input.host.trim()` while
+  // sending `input.host` is what turned a pasted leading space into
+  // `getaddrinfo ENOTFOUND  1.2.3.4` -- a twenty-minute provisioning that
+  // failed on an address whose only visible defect was a double space.
+  //
+  // Not the password, the key or the passphrase: a password may begin or end
+  // with a space on purpose, and a key belongs to its parser byte for byte.
   const name = input.name.trim();
+  const host = input.host.trim();
+  const username = input.username.trim();
+
   if (!name) return { error: "Give the machine a name." };
-  if (!input.host.trim()) return { error: "Where should it connect?" };
-  if (!input.username.trim()) return { error: "Which user should it log in as?" };
+  if (!host) return { error: "Where should it connect?" };
+  if (!username) return { error: "Which user should it log in as?" };
   if (!input.password && !input.privateKey) {
     return { error: "A password or a private key is needed to reach the machine." };
+  }
+
+  // The two pastes that look right and are not, each named with the field to
+  // fix. Worth catching here because the alternative is a resolver error that
+  // says nothing about which box on the form was wrong.
+  if (host.includes("@")) {
+    return { error: "Only the address goes here — the login user has its own field." };
+  }
+  if (/\s/.test(host)) {
+    return { error: "That address has a space in it." };
+  }
+  // Exactly one colon, so a bare IPv6 address is not mistaken for host:port.
+  const [address, maybePort, ...rest] = host.split(":");
+  if (address && maybePort && rest.length === 0 && /^[0-9]+$/.test(maybePort)) {
+    return { error: `Put the port in its own field: address ${address}, port ${maybePort}.` };
   }
   if (input.desiredInstances < 0 || input.desiredInstances > 64) {
     return { error: "Instances must be between 0 and 64." };
@@ -280,7 +305,7 @@ export async function bootstrapHost(input: {
   if (clash) return { error: `There is already a machine called ${name}.` };
 
   try {
-    const { id } = await hub.bootstrapHost({ ...input, name });
+    const { id } = await hub.bootstrapHost({ ...input, name, host, username });
     await prisma.auditLog.create({
       data: {
         userId: user.id,
@@ -291,7 +316,7 @@ export async function bootstrapHost(input: {
         meta: {
           name,
           // The address, which identifies the machine. Never the credential.
-          address: `${input.username}@${input.host}`,
+          address: `${username}@${host}`,
           desiredInstances: input.desiredInstances,
         },
       },
