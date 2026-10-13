@@ -33,8 +33,14 @@ own, whose kernel ships no `binder_linux` and will not take one.
 ## What to run instead
 
 **A Linux VM on the Mac.** The machine Magnemite manages is the VM; the Mac is
-the hypervisor and Magnemite never knows it exists. UTM, Lima and Parallels all
-run one on Apple Silicon.
+the hypervisor and Magnemite never knows it exists. This is also Redroid's own
+answer to the question — its maintainer's reply to "how do I run this on an M2"
+is _set up a VM and run it there_
+([redroid-doc#609](https://github.com/remote-android/redroid-doc/issues/609)).
+
+**Parallels Desktop** and **UTM** are both reported working with an Ubuntu arm64
+guest. **OrbStack is not**: its Linux machines are containers on a shared
+LinuxKit kernel, which is the same wall Docker Desktop hits.
 
 What the VM needs:
 
@@ -42,6 +48,7 @@ What the VM needs:
 | ----------------------------------- | ------------------------------------------------------------------------------------------------------- |
 | **arm64**                           | A `linux/arm64` guest. The fleet's bundles carry an `arm64-v8a` split and the agent matches ABI exactly |
 | **Debian or Ubuntu**                | The bootstrap installs with `apt-get`, and gets `binder_linux` from `linux-modules-extra-$(uname -r)`   |
+| **A 64-bit-only image**             | Not the fleet's default, and the one thing on this page that is not just configuration — see below      |
 | **RAM**                             | Whatever you give the VM is what the capacity planner divides up — the Mac's total is invisible to it   |
 | **Reachable once**                  | The hub needs one outbound SSH connection to it, and only for provisioning. See below                   |
 | **Its own IP, or a forwarded port** | A NAT'd VM is fine; a bridged one is simpler                                                            |
@@ -138,6 +145,47 @@ And `MAGNEMITE_SERVER` is the **hub's** URL, which is not the dashboard's.
   so it enrols, appears under **Machines**, and sits there marked `not adopted` — with **Adopt** and
   the instance count waiting for you on its page. That is two clicks, and nobody guesses them from a
   bootstrap that reported every step as fine.
+</Callout>
+
+## Apple Silicon runs no 32-bit ARM code, and the fleet's image has some
+
+This is the one item on this page that is not configuration, and the only part
+of a Mac VM that is harder than a VPS once provisioning is done.
+
+An arm64 Android normally ships two zygotes, 64-bit and 32-bit, because AOSP
+expects to run 32-bit apps. An Ampere or Graviton VPS obliges. **Apple Silicon
+cannot** — it executes no AArch32 at all, at any privilege level — so the
+32-bit half has nothing to run on. Redroid publishes `_64only` images for
+exactly this reason, and its maintainer's standing advice for Apple Silicon is
+to use one.
+
+The fleet's image is not one of them. It builds on
+`abing7k/redroid:a11_magisk_arm`, which is Android 11 from
+`redroid/redroid:11.0.0-latest` — and upstream has `_64only` variants from
+Android **12** up, never for 11. There is no prebuilt Magisk-prerooted 64-bit-only
+Android 11 anywhere, because there is no Android 11 to build it from.
+
+<Callout type="warn" title="It will look like a network problem">
+  The reported symptom on an M1 under Parallels is a container that runs and an `adb` that never
+  connects ([redroid-doc#336](https://github.com/remote-android/redroid-doc/issues/336)) — Android
+  never finishes booting, so nothing inside it answers. Here that surfaces as an instance marked
+  **running, not enrolled**: the container is up, the agent in it never dialled out. That row is
+  worth trusting. It is the state the instances table exists to tell apart, and on a Mac it points
+  at the image rather than at the network.
+</Callout>
+
+The escape hatch is already in the data model: **the image is per machine**, so
+one Mac VM can run a different Android from every VPS without touching them.
+Building that image means a 64-only base at Android 12 or newer with
+[`ayasa520/redroid-script`](https://github.com/ayasa520/redroid-script), which
+takes `12.0.0_64only` as a target, then this repo's `agent/redroid/Dockerfile`
+layered on top of the result.
+
+<Callout type="info" title="There is no UI for it yet">
+  `RedroidHost.image` and `RedroidHost.gpuMode` are both per-machine columns and neither has a field
+  on the machine's page, so overriding one today is an `UPDATE` in psql followed by a **Re-run
+  setup** to build the tag and a converge to move the containers onto it. Worth knowing before
+  planning around it.
 </Callout>
 
 ## Two things that bite a machine at home and not a VPS
