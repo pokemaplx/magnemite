@@ -301,16 +301,22 @@ order, and the middle one is the one nobody would guess:
    a second serial the bootstrap then discards, leaving a provisioning waiting
    for a machine that never dials in. **This is what makes adding it again
    work.**
-3. **Then the rows**, which cascade: the machine's `RedroidHost` and every
-   `RedroidInstance` on it.
+3. **Then the rows** — the machine's `RedroidHost` and every `RedroidInstance`
+   on it, which cascade, **and the `Device` row of every box that enrolled from
+   one of those containers**, which does not. Step 1 destroyed the volume
+   holding each one's identity, so deleting the machine forgets all of its
+   instances; those rows are deleted the same way **Forget** deletes one. Any
+   install in progress on them is cancelled first.
 
 <Callout type="warn" title="Why the volumes go too">
   A box's serial is derived from its machine's row id, and the volume is named after the compose
   service — so a machine added again gets *new* serials over the *same* volume names. A kept volume
   would be mounted under a serial that is not the one inside it: the container boots with the
   previous box's `config.json`, enrols as that old device, and never matches the instance row
-  waiting for the new one. Containers running, table saying `not enrolled`, for ever. The boxes keep
-  their rows and their history here; what they had on that machine does not survive it.
+  waiting for the new one. Containers running, table saying `not enrolled`, for ever. Which is also
+  why the boxes' own rows go: once the volume is gone there is no identity left for any of them to
+  come back with, and a kept row would be one permanently offline box in the fleet table per
+  instance.
 </Callout>
 
 A machine that is **offline** is deleted anyway — saying "forget this" about a
@@ -323,10 +329,11 @@ same machine will find a config it keeps.
 
 Two different things, and the difference is whether the box can come back:
 
-| Action     | The container | The volume | The Device row | What it means          |
-| ---------- | ------------- | ---------- | -------------- | ---------------------- |
-| **Remove** | destroyed     | **kept**   | **kept**       | Desired state "gone"   |
-| **Forget** | destroyed     | destroyed  | destroyed      | This box never existed |
+| Action                 | The container | The volume | The Device row | What it means          |
+| ---------------------- | ------------- | ---------- | -------------- | ---------------------- |
+| **Remove**             | destroyed     | **kept**   | **kept**       | Desired state "gone"   |
+| **Forget**             | destroyed     | destroyed  | destroyed      | This box never existed |
+| **Remove the machine** | all destroyed | destroyed  | destroyed      | Forget, for every box  |
 
 Remove sets `present = false` and keeps the instance row, so **re-adding that
 index brings the same box back** — same serial, same Device, same history, same

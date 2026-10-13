@@ -372,11 +372,22 @@ export async function syncRotom(): Promise<ActionState> {
 /**
  * Removing a device drops its token, so the box goes quiet until it is
  * re-enrolled. Its job history goes with it.
+ *
+ * Boxes only. A machine deleted through here would cascade its `RedroidHost`
+ * and instance rows away without any of the three things `deleteHost` does
+ * first -- its containers would keep running, and `/etc/magnemite/host.json`
+ * would still hold a serial whose row is gone, which is what stops the machine
+ * from ever being added again. Not reachable from the UI, where the fleet
+ * lists boxes and a machine's device page redirects to `/hosts`, but this is a
+ * server action and therefore an endpoint.
  */
 export async function deleteDevice(deviceId: string): Promise<ActionState> {
   const user = await requireOperator();
   const device = await prisma.device.findUnique({ where: { id: deviceId } });
   if (!device) return { error: "Device not found." };
+  if (device.kind === "HOST") {
+    return { error: "That is a machine. Remove it from its own page, so its containers go too." };
+  }
 
   await prisma.device.delete({ where: { id: deviceId } });
   await prisma.auditLog.create({

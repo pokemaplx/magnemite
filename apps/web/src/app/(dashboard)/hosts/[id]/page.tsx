@@ -90,6 +90,9 @@ export default async function HostPage({ params }: { params: Promise<{ id: strin
   // a planning coefficient, so the form shows both and says which is which.
   const capacity = planCapacity(redroid, host.cpuCount, host.memTotalBytes);
   const wanted = machine?.instances.filter((i) => i.present) ?? [];
+  // Every instance that ever enrolled, present or not: deleting the machine
+  // deletes all of their Device rows, and a removed instance still has one.
+  const enrolledBoxes = machine?.instances.filter((i) => i.deviceId).length ?? 0;
   const running = wanted.filter((i) => i.containerState === "running").length;
   const workers = wanted.reduce((sum, i) => sum + (i.workers ?? 0), 0);
 
@@ -150,7 +153,12 @@ export default async function HostPage({ params }: { params: Promise<{ id: strin
           ) : null}
           {machine?.binderOk === false ? <Badge variant="danger">binder missing</Badge> : null}
           {user.role !== "VIEWER" ? (
-            <DeleteHost hostId={host.id} name={host.name} instances={wanted.length} />
+            <DeleteHost
+              hostId={host.id}
+              name={host.name}
+              instances={wanted.length}
+              boxes={enrolledBoxes}
+            />
           ) : null}
         </div>
       </div>

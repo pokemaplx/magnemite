@@ -112,6 +112,40 @@ export async function convergeHost(hostId: string): Promise<ActionState & { reas
 }
 
 /**
+ * The job states a device can be busy in.
+ *
+ * Shared by the two places here that destroy a container: a job mid-install on
+ * a box that is about to stop existing has to be cancelled, or it sits in the
+ * queue until the stall timeout re-queues it to a box that is no longer there.
+ * The hub has its own `ACTIVE_STATES` and this is deliberately not imported
+ * from it -- that is another app, and the web app reaches the hub over HTTP.
+ */
+const ACTIVE_JOB_STATES = [
+  "QUEUED",
+  "DISPATCHED",
+  "DOWNLOADING",
+  "EXTRACTING",
+  "INSTALLING",
+  "VERIFYING",
+] as const;
+
+/**
+ * Cancels whatever those devices are in the middle of, before their containers
+ * go. Best effort by design: a cancel that fails must not stop the removal,
+ * because the container is going either way.
+ */
+async function cancelActiveJobs(deviceIds: string[]): Promise<void> {
+  if (deviceIds.length === 0) return;
+  const active = await prisma.job.findMany({
+    where: { deviceId: { in: deviceIds }, state: { in: [...ACTIVE_JOB_STATES] } },
+    select: { id: true },
+  });
+  for (const job of active) {
+    await hub.cancelJob(job.id).catch(() => undefined);
+  }
+}
+
+/**
  * Remove one container, or forget it entirely.
  *
  * The two are different operations and the difference is the whole point.
@@ -135,24 +169,8 @@ export async function removeInstance(
   });
   if (!instance) return { error: "That instance is no longer there." };
 
-  // A job mid-install on a box whose container is about to be destroyed would
-  // sit in the queue until the stall timeout re-queued it to a box that no
-  // longer exists. Cancelled first, so the rollout shows a cancellation rather
-  // than a mystery.
-  if (instance.deviceId) {
-    const active = await prisma.job.findMany({
-      where: {
-        deviceId: instance.deviceId,
-        state: {
-          in: ["QUEUED", "DISPATCHED", "DOWNLOADING", "EXTRACTING", "INSTALLING", "VERIFYING"],
-        },
-      },
-      select: { id: true },
-    });
-    for (const job of active) {
-      await hub.cancelJob(job.id).catch(() => undefined);
-    }
-  }
+  // Cancelled first, so the rollout shows a cancellation rather than a mystery.
+  await cancelActiveJobs(instance.deviceId ? [instance.deviceId] : []);
 
   try {
     if (forget) {
@@ -404,8 +422,15 @@ export async function dismissBootstrap(id: string): Promise<ActionState> {
  *     a token nothing accepts — and the next `Add machine` would mint a second
  *     serial the script then discards, leaving a provisioning that waits for a
  *     machine that never dials in. Removing it is what makes re-adding work.
- *  3. **Then the rows.** `RedroidHost` and the instance rows cascade off the
- *     Device, so one delete is the whole model.
+ *  3. **Then the rows, including each instance's own box.** `RedroidHost` and
+ *     the instance rows cascade off the Device, but a box that enrolled from
+ *     one of those containers has a `Device` row of its own that does not --
+ *     and step 1 just destroyed the volume holding its identity. Its serial
+ *     was minted `rd-<host>-NN` for a host row that is about to disappear, so
+ *     nothing will ever present it again. Left behind it is one permanently
+ *     offline box in the fleet table per instance, which is the same reason
+ *     Forget deletes a row: deleting a machine forgets all of its instances at
+ *     once, so it has to delete them the same way.
  *
  * A machine that cannot be reached is still deleted — an operator saying
  * "forget this" about a VPS that is already gone is the common case — but the
@@ -424,7 +449,9 @@ export async function deleteHost(
       name: true,
       serial: true,
       kind: true,
-      redroidHost: { select: { project: true, dir: true, instances: { select: { id: true } } } },
+      redroidHost: {
+        select: { project: true, dir: true, instances: { select: { id: true, deviceId: true } } },
+      },
     },
   });
   if (!host || host.kind !== "HOST") return { error: "That is not a machine." };
@@ -466,11 +493,24 @@ export async function deleteHost(
     }
   }
 
+  const boxIds = (host.redroidHost?.instances ?? [])
+    .map((instance) => instance.deviceId)
+    .filter((id): id is string => id !== null);
+
+  // Over HTTP to the hub, so before the transaction rather than inside it.
+  await cancelActiveJobs(boxIds);
+
   try {
-    // RedroidHost and every RedroidInstance cascade off this row; a box that
-    // enrolled from one of those containers keeps its own Device row, with its
-    // instance link set to null.
-    await prisma.device.delete({ where: { id: hostId } });
+    // One transaction, because a half-deleted machine is worse than either
+    // outcome: boxes gone with the machine still listed, or the reverse.
+    //
+    // The boxes go first only because it reads in the order it happens --
+    // RedroidInstance.deviceId is SetNull, so either order works, and the
+    // host's own delete is what cascades RedroidHost and the instance rows.
+    await prisma.$transaction([
+      prisma.device.deleteMany({ where: { id: { in: boxIds } } }),
+      prisma.device.delete({ where: { id: hostId } }),
+    ]);
   } catch {
     return { error: "Could not delete that machine." };
   }
@@ -486,6 +526,7 @@ export async function deleteHost(
         name: host.name,
         serial: host.serial,
         instances: host.redroidHost?.instances.length ?? 0,
+        boxes: boxIds.length,
         drained: warning === undefined,
       },
     },
