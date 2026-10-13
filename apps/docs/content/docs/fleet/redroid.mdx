@@ -62,7 +62,7 @@ sudo modprobe ashmem_linux
 
 ```sh
 make redroid
-# → magnemite/redroid:4
+# → magnemite/redroid:5
 ```
 
 Unlike `make module`, this takes no `SERVER` and no `TOKEN`. **The image holds
@@ -71,8 +71,22 @@ token are properties passed to each container at run time.
 
 ### What the image fixes that a container cannot fix for itself
 
-Two of them, and both were found the hard way: each one leaves a scanner that
-is **running, reported healthy, and doing nothing at all**.
+Three of them, and all three were found the hard way: each one leaves a scanner
+that is **running, reported healthy, and doing nothing at all**. They are
+listed in the order they bite, and the third hides behind the second — a
+granted root that the app can never ask for looks exactly like no grant.
+
+- **A `su` an app can reach.** `--setup-sbin` puts Magisk's applets in `/sbin`,
+  and `/sbin` is **not** on the PATH the zygote gives apps. What _is_ on it is
+  the base image's own stub at `/system/xbin/su`, mode `-rwsr-x--- root shell`
+  — executable by uid 0 and the `shell` group, and by no app. So
+  `exec("su")` dies with `EACCES` before Magisk is involved: **magiskd logs no
+  request and SELinux logs no denial**, and the scanner falls back to an
+  unprivileged shell that cannot traverse `/data/adb` (0700, root). The image
+  ships `/system/bin/su` as a symlink to the binary, and `/system/bin` comes
+  before `/system/xbin`, so it wins the lookup without replacing the base's
+  file. The prerooted base this replaced had Magisk inside `/system` already,
+  which is why this only appeared once the injection became ours.
 
 - **Magisk's busybox.** The scanner's injector calls
   `/data/adb/magisk/busybox` by absolute path, and this base image gives root

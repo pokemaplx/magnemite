@@ -143,6 +143,34 @@ for flag in setup-sbin auto-selinux; do
     }
 done
 
+# --- su where an app can actually reach it.
+#
+# `--setup-sbin` puts magisk and its applets in /sbin, and **/sbin is not on
+# the PATH the zygote hands to apps**. On this base that PATH is
+#
+#   /product/bin:/apex/*/bin:/system_ext/bin:/system/bin:/system/xbin:/odm/bin:...
+#
+# so an app calling exec("su") never sees /sbin/su. What it does see is the
+# base image's own stub at /system/xbin/su -- 11 KB, `-rwsr-x--- root shell`,
+# which is execute for uid 0 and for the group `shell` and for nobody else. An
+# app is in neither, so the exec dies with EACCES before Magisk is involved at
+# all: magiskd logs no request, SELinux logs no denial, and the scanner quietly
+# carries on with an unprivileged shell that cannot traverse /data/adb (0700,
+# root). That is the third way to reach the same silence as the busybox seed and
+# the root grant, and it is why a granted `policy=2` was not enough.
+#
+# /system/bin comes before /system/xbin in that PATH, so a `su` here wins the
+# lookup without touching the base's file. A symlink rather than a copy, and
+# pointing at the binary rather than at /sbin/su: Magisk picks its applet from
+# argv[0], which is `su` however the caller spells the path, and the mode that
+# matters is the target's 0755 and not the link's.
+#
+# The prerooted base this replaced had Magisk integrated into /system and so
+# never had this problem -- which is exactly why it did not show up until the
+# injection became ours.
+mkdir -p "$OUT/system/bin"
+ln -s /sbin/magisk "$OUT/system/bin/su"
+
 # The app installs itself on first boot, from here.
 install -m 0644 /tmp/magisk.apk "$OUT/system/etc/init/magisk/magisk.apk"
 
