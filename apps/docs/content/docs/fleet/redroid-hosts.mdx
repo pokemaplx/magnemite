@@ -105,6 +105,25 @@ keeps its row, and counting it would make a drained machine look broken.
 - **Load** — the device load card, unchanged, and its history button goes to
   `/devices/<id>/metrics`. Both work for the same reason: a machine is a Device,
   so its readings are in the same table and the same component draws them.
+- **Where it goes** — the same total taken apart: one line per container, then
+  **everything else**, which is the machine's own reading minus the sum of the
+  containers' — docker, the agent, the kernel. It needs no measurement of its
+  own; the subtraction is the whole feature.
+
+  That last line is the one worth reading. A machine busier than its containers
+  explain is a different problem from a machine with one hot box, and the page
+  could not tell them apart before: it had the total above and the parts below,
+  with nobody subtracting.
+
+  <Callout type="info" title="Three things it does not smooth over">
+    A container that has not enrolled **reports nothing**, and says so on its own line instead of
+    being left out — its spend is real and lands in the rest, so a large rest may be a box that
+    never came up. The readings are **not simultaneous**: each box and the machine report on their
+    own heartbeat, so the parts need not add up to the whole exactly. And when the parts were
+    measured at a busier moment than the whole, the rest is shown as nothing rather than as a
+    negative quantity.
+  </Callout>
+
 - **Instances** — one row per container: index, the box it enrolled as, container
   state, **CPU and memory**, workers, restarts, and when the machine last
   reported. A climbing restart count is what separates a crash-looping instance

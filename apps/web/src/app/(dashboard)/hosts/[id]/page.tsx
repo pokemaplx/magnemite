@@ -4,6 +4,7 @@ import { requireUser } from "@/lib/session";
 import { HostScaleForm } from "@/components/host-scale-form";
 import { HostInstancesTable } from "@/components/host-instances-table";
 import { DeleteHost } from "@/components/delete-host";
+import { HostSpendCard } from "@/components/host-spend-card";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { DeviceLoadCard } from "@/components/device-load-card";
@@ -200,6 +201,31 @@ export default async function HostPage({ params }: { params: Promise<{ id: strin
           trend={trend}
         />
       </div>
+
+      {/* The Load card above is the total; this is the same total taken
+          apart, from readings that were already arriving. Between them they
+          separate "one box is hot" from "this machine is busy with something
+          that is not a box", which the page could not tell apart before. */}
+      <HostSpendCard
+        cpuCount={host.cpuCount}
+        hostCpuPercent={host.cpuPercent}
+        memTotalBytes={num(host.memTotalBytes)}
+        memUsedBytes={
+          host.memTotalBytes === null || host.memAvailableBytes === null
+            ? null
+            : num(host.memTotalBytes)! - num(host.memAvailableBytes)!
+        }
+        rows={wanted.map((instance) => ({
+          index: instance.index,
+          label: instance.device?.name ?? instance.serial,
+          enrolled: instance.device !== null,
+          cpuPercent: instance.device?.cpuPercent ?? null,
+          memUsedBytes:
+            instance.device?.memTotalBytes == null || instance.device?.memAvailableBytes == null
+              ? null
+              : num(instance.device.memTotalBytes)! - num(instance.device.memAvailableBytes)!,
+        }))}
+      />
 
       <Card>
         <CardHeader>
