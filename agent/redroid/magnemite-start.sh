@@ -50,6 +50,35 @@ if [ ! -x "$BIN" ] && [ -x "$BIN.old" ]; then
 	mv "$BIN.old" "$BIN"
 fi
 
+# --- Magisk's busybox, seeded the same way and for the same reason.
+#
+# The scanner's injector calls /data/adb/magisk/busybox by absolute path, and
+# this image's Magisk gives root without ever putting one there -- that
+# directory is empty on a fresh box. What the operator sees when it is missing
+# is not an error about busybox: the shell's failure is substituted into the
+# injector's command line, and the scanner reports "Cannot parse integer value
+# for -p" while looking otherwise healthy.
+#
+# Checked by applet rather than by existence, because the two near misses both
+# exist and neither works: a symlink to Android's toybox answers "Unknown
+# command busybox" (toybox picks its applet from argv[0]), and Debian's
+# busybox-static is built without pgrep, which is the one the injector needs.
+BUSYBOX_SEED=/system/bin/magnemite-busybox
+BUSYBOX=/data/adb/magisk/busybox
+if [ -x "$BUSYBOX_SEED" ] && ! "$BUSYBOX" --list 2>/dev/null | grep -qx pgrep; then
+	# To the log and not to stdout: init sends a service's output to
+	# /dev/null, so an echo here is written nowhere -- and a seed that failed
+	# would look exactly like one that was never needed.
+	echo "[magnemite] seeding Magisk busybox" >>"$LOG"
+	mkdir -p /data/adb/magisk
+	# Removed first: what is there may be a symlink, and cp would follow it
+	# into /system, which is read-only -- so the copy would fail rather than
+	# replace the thing that is broken.
+	rm -f "$BUSYBOX"
+	cp "$BUSYBOX_SEED" "$BUSYBOX" && chmod 0755 "$BUSYBOX" ||
+		echo "[magnemite] could not seed $BUSYBOX" >>"$LOG"
+fi
+
 # --- Enrollment comes from properties, which Redroid takes on the docker
 # command line. Nothing is baked into the image, so one image serves every
 # fleet and holds no secret.

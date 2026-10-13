@@ -83,13 +83,17 @@ REDROID_BASE ?= abing7k/redroid:a11_magisk_arm
 # rendered `image:` line, and make compose recreate every container on the
 # machine: a full Android cold boot each, to deliver a binary the containers
 # would have swapped in seconds with a syscall.Exec.
+# Which Magisk the image takes its busybox from. Pinned rather than latest,
+# because it is a binary that runs as root on every box, and the one that is
+# pinned is the one that was proven on a machine.
+MAGISK_VERSION ?= v30.7
 REDROID_VERSION ?= $(shell awk -F= '/^redroid=/ { print $$2 }' VERSION)
 REDROID_TAG     ?= magnemite/redroid:$(REDROID_VERSION)
 
 .PHONY: redroid
 redroid: agent ## Build the Redroid image with the agent baked in (arm64 host)
 	docker build -f agent/redroid/Dockerfile --build-arg REDROID=$(REDROID_BASE) \
-		-t $(REDROID_TAG) agent
+		--build-arg MAGISK=$(MAGISK_VERSION) -t $(REDROID_TAG) agent
 	@echo "Image: $(REDROID_TAG)"
 
 # Narrow every compose target to one service: `make build up SERVICE=web`

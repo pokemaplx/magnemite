@@ -185,13 +185,20 @@ async function run(id: string, serial: string, name: string, access: SshAccess):
       await upload(client, binary, `${REMOTE_DIR}/magnemite-agent`, 0o755);
       await upload(client, script, `${REMOTE_DIR}/bootstrap.sh`, 0o755);
 
-      // The three files that build the Redroid image, because there is nothing
-      // to pull: the tag is local and this project publishes no registry.
-      // Without them a provisioned machine enrols, reports, and then fails its
-      // first converge on an image that was never going to exist.
+      // Everything that builds the Redroid image, because there is nothing to
+      // pull: the tag is local and this project publishes no registry. Without
+      // them a provisioned machine enrols, reports, and then fails its first
+      // converge on an image that was never going to exist.
+      //
+      // This list and the Dockerfile's COPY lines have to agree. A file the
+      // Dockerfile names and this does not makes `docker build` fail on a
+      // machine nobody is watching — the bootstrap only *warns* on a failed
+      // image build, by design, so the first symptom is a converge that cannot
+      // find the image, minutes later and somewhere else.
       for (const [name, mode] of [
         ["Dockerfile", 0o644],
         ["magnemite-start.sh", 0o755],
+        ["magnemite-root-grant.sh", 0o755],
         ["magnemite.rc", 0o644],
       ] as const) {
         await upload(client, await redroidFile(name), `${REMOTE_DIR}/redroid/${name}`, mode);

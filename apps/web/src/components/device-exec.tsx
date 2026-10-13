@@ -55,6 +55,15 @@ const SUGGESTIONS: { label: string; command: string; hint: string }[] = [
       "am start-foreground-service com.pokemod.aegis/com.pokemod.aegis.services.MappingService",
     hint: "After a stop. A box that has never run Aegis needs it started by hand once first.",
   },
+  {
+    label: "Grant Aegis root",
+    // The same helper the agent runs after an install, by hand for the box no
+    // install is going to touch: a rollout skips a box already on the target
+    // version, and the grant rides the install. Only on a Redroid box -- on
+    // hardware the file is not there and this says so.
+    command: "/system/bin/magnemite-root-grant com.pokemod.aegis",
+    hint: "Redroid only. Magisk keys root on the uid, and a reinstall changes it.",
+  },
 ];
 
 type Result = { output: string; failed: boolean; message: string } | null;

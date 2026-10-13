@@ -69,6 +69,45 @@ Unlike `make module`, this takes no `SERVER` and no `TOKEN`. **The image holds
 no secret**, so one image serves every fleet — the hub URL and the enrollment
 token are properties passed to each container at run time.
 
+### What the image fixes that a container cannot fix for itself
+
+Two of them, and both were found the hard way: each one leaves a scanner that
+is **running, reported healthy, and doing nothing at all**.
+
+- **Magisk's busybox.** The scanner's injector calls
+  `/data/adb/magisk/busybox` by absolute path, and this base image gives root
+  without ever putting one there — that directory is empty on a fresh box. The
+  image carries Magisk's own build and the start script seeds it into `/data`,
+  which is a volume and therefore survives nothing the image does. It is
+  checked by **applet**, not by existence, because the two obvious substitutes
+  both exist and neither works: a symlink to Android's `toybox` answers
+  `Unknown command busybox`, and Debian's `busybox-static` is built without
+  `pgrep`.
+- **The root grant.** Magisk keys its su policy on the **uid**, Android gives a
+  package a new uid when it is installed fresh rather than updated, and a
+  request nobody answers times out as a _deny_ that is then written down. On
+  hardware a person taps Grant; a container has no screen. So **every rollout
+  that reinstalls the scanner revokes its root**, and the agent reconciles the
+  policy after each install — only where the image ships
+  `/system/bin/magnemite-root-grant`, which is nowhere else.
+
+<Callout type="warn" title="An existing machine does not get this by itself">
+  The image tag moves when what is *in* the image changes — `redroid=` in `VERSION` — so a machine
+  provisioned from now on builds the new one and is fine. A machine that already exists has only the
+  old tag, and nothing rebuilds it: the bootstrap's image step **skips a tag it already has**, and
+  there is no way to re-run the bootstrap from the dashboard yet. Its next converge will ask for a
+  tag it does not have and fail loudly — the containers keep running and the error is on the machine
+  page — until somebody rebuilds the image there and re-applies.
+</Callout>
+
+<Callout type="warn" title="What both failures look like">
+  Not a crash, not a restart loop, not an OOM. The injector shells out, the shell fails, and the
+  failure text is substituted into the injector's command line as a parameter — so the scanner
+  reports `Cannot parse integer value for -p` and carries on relaunching the game. Nothing says
+  "no root" and nothing says "no busybox". `docker exec <container> logcat -b crash -d` and the
+  `Injecting:` lines are where it is legible.
+</Callout>
+
 The tag comes from the `redroid=` line of `VERSION`, and deliberately **not**
 from the agent's. The agent inside is only a seed that each box's own
 self-update replaces, so a tag that moved with every agent release would change

@@ -230,7 +230,19 @@ func (i *Installer) Run(ctx context.Context, job proto.InstallJob, rep Reporter)
 		return Result{InstallMode: mode, DataWiped: dataWiped, Err: verr}
 	}
 
-	// --- 8. config -------------------------------------------------------
+	// --- 8. root ---------------------------------------------------------
+	// Before the config and not after it, because by this line the install has
+	// already committed -- which is the moment the uid changed and the grant
+	// was lost. The config write below can return early on its own failure,
+	// and a box left with a new config and no root is worse than one left with
+	// the old config and root: the first looks configured and does nothing.
+	//
+	// Before the deferred post-install hook too, which is what starts the
+	// scanner again. A scanner started before this would ask for root and be
+	// refused, and the refusal is what gets written down.
+	i.grantRoot(job.PackageName, rep)
+
+	// --- 9. config -------------------------------------------------------
 	// Here rather than in the post-install hook, and here rather than after
 	// Run returns: the deferred hook is what starts the scanner again, and a
 	// scanner started before its config is in place reads the previous one.
@@ -302,6 +314,59 @@ func (i *Installer) waitForSystem(ctx context.Context, rep Reporter) error {
 			return fmt.Errorf("system_server did not come back within %s", systemWaitTimeout)
 		}
 	}
+}
+
+// --- root ------------------------------------------------------------------
+
+// Where the Redroid image puts the helper that reconciles a package's root
+// grant. Absent everywhere else, which is every piece of hardware: a Magisk
+// module install creates no such file, and the grant there was given by a
+// person tapping a dialog.
+//
+// A var rather than a const only so a test can point it somewhere that
+// exists: nothing changes it at runtime.
+var rootGrantHelper = "/system/bin/magnemite-root-grant"
+
+// How long that helper gets. It reads one package list and writes one row.
+const rootGrantTimeout = 30 * time.Second
+
+// grantRoot gives the app we just installed Magisk's permission to use root.
+//
+// Installing is what takes it away, which is why this belongs here and not in
+// a one-off somebody runs on a new box. Magisk keys its su policy on the
+// **uid**; Android hands a package a new uid when it is installed fresh rather
+// than updated; and a request nobody answers times out as a *deny* that is
+// then written down. On hardware a person taps Grant. A container has no
+// screen, so every rollout that reinstalls the scanner silently revokes it.
+//
+// What that costs is invisible from the outside, which is the whole reason for
+// the trouble: the scanner comes back running, reports healthy, and does
+// nothing. Its injector shells out, the shell cannot traverse /data/adb at
+// all, and the error is substituted into a command line as a parameter --
+// "Cannot parse integer value for -p". Nothing anywhere says "no root".
+//
+// A warning and never a failure: the app is installed and the config is
+// written by the time this runs, and a box that cannot grant root is in a
+// worse state if the job is failed and retried than if it is left saying so.
+func (i *Installer) grantRoot(pkg string, rep Reporter) {
+	if pkg == "" {
+		return
+	}
+	if _, err := os.Stat(rootGrantHelper); err != nil {
+		return
+	}
+
+	// Its own context, like the post-install hook's and for the same reason:
+	// the job's is already cancelled when Run returns on a timeout.
+	ctx, cancel := context.WithTimeout(context.Background(), rootGrantTimeout)
+	defer cancel()
+
+	out, err := i.Sys.Shell(ctx, rootGrantHelper+" "+shellQuote(pkg))
+	if err != nil {
+		rep.Log(proto.LevelWarn, fmt.Sprintf("could not grant root to %s: %v %s", pkg, err, out))
+		return
+	}
+	rep.Log(proto.LevelInfo, strings.TrimSpace(out))
 }
 
 // --- post-install hook -----------------------------------------------------

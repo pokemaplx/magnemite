@@ -31,10 +31,18 @@ RUN set -e; \
 # downloaded by the machine: it would need a token to fetch anything, and at
 # that point it has none.
 COPY agent/host/bootstrap.sh /out/bootstrap.sh
-# And what builds the Redroid image on a machine. The hub pushes these three
-# over the same SSH connection, because the tag is local and there is no
-# registry to pull it from -- so the machine builds it itself, once.
-COPY agent/redroid/Dockerfile agent/redroid/magnemite-start.sh agent/redroid/magnemite.rc /out/redroid/
+# And what builds the Redroid image on a machine. The hub pushes these over the
+# same SSH connection, because the tag is local and there is no registry to
+# pull it from -- so the machine builds it itself, once.
+#
+# This list, the COPY lines in agent/redroid/Dockerfile and the upload list in
+# services/hostBootstrap.ts all have to agree. A file missing from here throws
+# at provisioning time with a message that names it; a file missing from the
+# upload list instead fails `docker build` on the machine, which the bootstrap
+# only warns about -- so that one surfaces minutes later as a converge that
+# cannot find an image.
+COPY agent/redroid/Dockerfile agent/redroid/magnemite-start.sh \
+	agent/redroid/magnemite-root-grant.sh agent/redroid/magnemite.rc /out/redroid/
 
 FROM node:22-alpine AS build
 # pnpm is baked into the image below with `corepack install`: with only
