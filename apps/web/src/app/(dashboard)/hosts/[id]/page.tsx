@@ -163,6 +163,7 @@ export default async function HostPage({ params }: { params: Promise<{ id: strin
           // smaller than they assume.
           memLimitBytes: redroid.memLimitBytes,
           hostReserveBytes: redroid.hostReserveBytes,
+          memTotalBytes: num(host.memTotalBytes),
         }}
         canOperate={user.role !== "VIEWER"}
       />

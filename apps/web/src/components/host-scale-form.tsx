@@ -8,6 +8,61 @@ import { Label } from "@/components/ui/label";
 import { adoptHost, convergeHost, scaleHost } from "@/actions/hosts";
 import { formatBytes } from "@/lib/format";
 
+/**
+ * Why the suggestion is zero, and which number to move.
+ *
+ * A machine that fits nothing is the one case where the figure alone is no
+ * use: it is arithmetic done with two fleet-wide knobs, and without seeing the
+ * subtraction an operator cannot tell whether the machine is too small or the
+ * defaults are too big for it. So this shows the sum, names only the half that
+ * actually produced the zero, and says what would have to change.
+ *
+ * Memory first when both are zero, because memory is the real ceiling — past
+ * it the OOM killer takes boxes down, while the cores figure is a planning
+ * coefficient somebody may legitimately overrule.
+ */
+function WhyZero({
+  capacity,
+  byCpu,
+  workers,
+}: {
+  capacity: Capacity;
+  byCpu: number | null;
+  workers: number;
+}) {
+  const perWorker =
+    Number.isInteger(workers) && workers >= 1 ? workers : capacity.workersPerInstance;
+
+  if (capacity.byMemory === 0 && capacity.memTotalBytes !== null) {
+    const headroom = capacity.memTotalBytes - capacity.hostReserveBytes;
+    return (
+      <p>
+        Zero on memory: {formatBytes(capacity.memTotalBytes)} total, less{" "}
+        {formatBytes(capacity.hostReserveBytes)} held back for the machine, leaves{" "}
+        <span className="font-medium">{formatBytes(headroom)}</span> — and each container is given{" "}
+        {formatBytes(capacity.memLimitBytes)}. One would fit at{" "}
+        <span className="font-medium">{formatBytes(headroom)}</span> each or less. Both numbers are
+        fleet-wide, in <strong>Settings → Tuning</strong>.
+      </p>
+    );
+  }
+
+  if (byCpu === 0 && capacity.cpuCount !== null) {
+    const fits = capacity.cpuCount * capacity.workersPerVCpu;
+    return (
+      <p>
+        Zero on cores: {capacity.cpuCount} core{capacity.cpuCount === 1 ? "" : "s"} ×{" "}
+        {capacity.workersPerVCpu} workers each is <span className="font-medium">{fits}</span>, and
+        one container here is asking for {perWorker}. It would fit at{" "}
+        <span className="font-medium">{fits}</span> workers or fewer. Both numbers are fleet-wide,
+        in <strong>Settings → Tuning</strong>.
+      </p>
+    );
+  }
+
+  return null;
+}
+
 export type Capacity = {
   /** How many containers the machine's memory allows. A real ceiling. */
   byMemory: number | null;
@@ -26,6 +81,8 @@ export type Capacity = {
   /** Memory per container and what is held back for the machine, both in bytes. */
   memLimitBytes: number;
   hostReserveBytes: number;
+  /** The machine's own, so the sentence can show the subtraction. */
+  memTotalBytes: number | null;
 };
 
 /**
@@ -198,14 +255,7 @@ export function HostScaleForm({
             </p>
           )}
           {suggested === 0 ? (
-            <p>
-              Zero because {capacity.byMemory === 0 ? "its memory" : "its cores"} says so:{" "}
-              {formatBytes(capacity.memLimitBytes)} per container with{" "}
-              {formatBytes(capacity.hostReserveBytes)} held back for the machine itself, and{" "}
-              {capacity.workersPerVCpu} workers per core. Both live in{" "}
-              <strong>Settings → Tuning</strong> and are fleet-wide — this machine is simply smaller
-              than they assume.
-            </p>
+            <WhyZero capacity={capacity} byCpu={byCpu} workers={parsedWorkers} />
           ) : null}
           {overMemory ? (
             <p className="text-destructive">
