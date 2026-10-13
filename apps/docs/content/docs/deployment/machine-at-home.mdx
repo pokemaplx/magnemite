@@ -65,29 +65,61 @@ machine again**: the agent dials out and holds the socket, and scaling,
 converging, metrics, exec, logs and re-running the setup all travel back down
 it. No static address, no open port, no dynamic DNS.
 
-Three ways to get through that one moment.
+Four ways through that one moment, easiest first.
 
 <Steps>
 
 <Step>
-### Forward a port
+### Nothing at all, when the hub is already on that network
 
-On your router, forward a port to the VM's `22`. Then **Machines → Add
-machine** with your public address and that port.
+Worth checking first, because at home it is often already true and there is no
+work in it. A self-hosted hub on the same LAN as the Mac reaches a **bridged**
+VM directly — the VM takes an address from your router like any other machine,
+and the hub opens an ordinary connection to it. No router page, no forwarding,
+nothing exposed.
 
-The port is not only how the hub arrives: the bootstrap's hardening step reads
-it and opens exactly that one in `ufw`. Hardcoding 22 on a machine whose sshd
-listens elsewhere is how an operator gets locked out of their own machine
-halfway through provisioning, so the port you type is the port that stays open.
+One value has to be right for this, and it is not the SSH side.
+`MAGNEMITE_PUBLIC_URL` is written into the machine's own config as the hub's
+address, so `localhost` makes a machine dial _itself_ — it provisions, reports
+every step fine, and never appears online. Set it to the hub's address **on
+that network** before provisioning anything that is not the hub's own box. The
+hub already listens on every interface, and plain `http://` is accepted and
+becomes `ws://`, so a LAN address needs no certificate.
 
 </Step>
 
 <Step>
-### Or put them on the same network
+### Or forward a port
 
-Any path that lets the hub reach the VM's SSH once will do — a VPN, a mesh
-network, a tunnel. The hub needs a host and port it can open a TCP connection
-to, and nothing more.
+On your router, forward a port to the VM's `22`, give the VM a reserved lease
+so the target stops moving, and then **Machines → Add machine** with your
+public address and that port.
+
+Translation is fine: forward external `2222` to the VM's `22`, type `2222`, and
+the firewall still ends up correct. The hardening step does not take the port
+you typed as dictation — it opens the **union** of that port, whatever
+`sshd -T` resolves, and every `Port` line in `sshd_config` and its drop-ins. A
+spare rule costs nothing and a missing one costs the machine, which is the
+whole reason it guesses wide rather than precisely.
+
+</Step>
+
+<Step>
+### Or join them to a mesh
+
+Any path that lets the hub reach the VM's SSH once will do. The hub needs a
+host and a port it can open a TCP connection to, and nothing more — so a mesh
+VPN works, needs no router page, and keeps the address stable when your ISP
+moves you.
+
+The thing to check is that the VPN has a **Linux** client, since it is the VM
+that has to join, not the Mac. Tailscale and NordVPN's Meshnet both do.
+Windows-only meshes — Radmin VPN among them — cannot be used here for that
+reason, however convenient they are between desktops.
+
+A reverse tunnel from the VM is the same idea with no third party: the VM dials
+out and forwards its `22` back, so nothing is opened on your router either. It
+has to stay up for the length of one provisioning and not a minute longer.
 
 </Step>
 
