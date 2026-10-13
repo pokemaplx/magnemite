@@ -333,6 +333,8 @@ export default async function HostPage({ params }: { params: Promise<{ id: strin
           <HostInstancesTable
             hostId={host.id}
             groups={groups}
+            nameTemplate={machine?.nameTemplate ?? null}
+            hostName={host.name}
             defaultGroupId={machine?.defaultGroupId ?? null}
             canOperate={user.role !== "VIEWER"}
             instances={wanted.map((instance) => ({

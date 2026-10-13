@@ -5,6 +5,8 @@ import Link from "next/link";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { ConfirmDialog } from "@/components/ui/confirm-dialog";
+import { renderInstanceName } from "@magnemite/db/instance-name";
+import { Input } from "@/components/ui/input";
 import { Select } from "@/components/ui/select";
 import {
   Table,
@@ -15,7 +17,7 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import { RelativeTime } from "@/components/relative-time";
-import { removeInstance, setHostGroup } from "@/actions/hosts";
+import { removeInstance, setHostGroup, setHostNameTemplate } from "@/actions/hosts";
 import { formatBytes } from "@/lib/format";
 
 export type InstanceRow = {
@@ -76,15 +78,31 @@ export function HostInstancesTable({
   instances,
   groups,
   defaultGroupId,
+  nameTemplate,
+  hostName,
   canOperate,
 }: {
   hostId: string;
   instances: InstanceRow[];
   groups: { id: string; name: string }[];
   defaultGroupId: string | null;
+  /** Null means a box names itself from what Android reports. */
+  nameTemplate: string | null;
+  /** The machine's own name, which is what `{host}` renders to. */
+  hostName: string;
   canOperate: boolean;
 }) {
   const [pending, start] = useTransition();
+  // Saved on blur rather than on every keystroke: this is one short string and
+  // a write per character would be a write per character.
+  const [template, setTemplate] = useState(nameTemplate ?? "");
+
+  // The index the next container would take, for the preview to be this
+  // machine's next name rather than a generic example. The allocator fills the
+  // lowest free index rather than appending, so this follows it.
+  const taken = new Set(instances.map((row) => row.index));
+  let nextIndex = 1;
+  while (taken.has(nextIndex)) nextIndex += 1;
   const [error, setError] = useState<string | null>(null);
   const [doomed, setDoomed] = useState<{ row: InstanceRow; forget: boolean } | null>(null);
 
@@ -118,6 +136,45 @@ export function HostInstancesTable({
             confirming the wrong file. */}
         <span className="text-xs text-muted-foreground">
           Decides which MITM config a new box is given.
+        </span>
+      </div>
+
+      <div className="flex flex-wrap items-center gap-2 px-6 text-sm">
+        <span className="text-muted-foreground">and are called</span>
+        <Input
+          aria-label="Name template for new containers"
+          className="w-56 font-mono text-xs"
+          // The placeholder is the default rather than an example, so an empty
+          // field says what it falls back to instead of looking unset.
+          placeholder="{host}-{index}"
+          value={template}
+          disabled={!canOperate || pending}
+          onChange={(event) => setTemplate(event.target.value)}
+          onBlur={() => {
+            const next = template.trim();
+            if (next === (nameTemplate ?? "")) return;
+            run(() => setHostNameTemplate(hostId, next || null));
+          }}
+        />
+        <span className="text-xs text-muted-foreground">
+          {template.trim() ? (
+            <>
+              Next one:{" "}
+              <span className="font-medium text-foreground">
+                {renderInstanceName(template.trim(), {
+                  host: hostName,
+                  index: nextIndex,
+                  serial: `rd-xxxxxx-${String(nextIndex).padStart(2, "0")}`,
+                })}
+              </span>
+              . <code>{"{host}"}</code>, <code>{"{index}"}</code> and <code>{"{serial}"}</code>.
+            </>
+          ) : (
+            <>
+              Empty uses what the box reports, which is the same manufacturer and model on every
+              box. <code>{"{host}"}</code>, <code>{"{index}"}</code> and <code>{"{serial}"}</code>.
+            </>
+          )}
         </span>
       </div>
 

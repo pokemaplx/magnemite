@@ -372,6 +372,12 @@ export async function updateRedroidSettings(patch: Partial<RedroidSettingsValues
   await writeGroup(patch, REDROID_SETTINGS_PREFIX);
 }
 
+// The name template helpers live in their own module so a client component
+// can import them without this one's PrismaClient coming with them, and are
+// re-exported here so server code reaches them where it reaches everything
+// else.
+export * from "./instance-name.js";
+
 /**
  * How many containers a machine can hold, and what it would cost.
  *

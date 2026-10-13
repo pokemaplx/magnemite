@@ -219,6 +219,49 @@ export async function removeInstance(
   }
 }
 
+/**
+ * What a machine's new containers are called when they enrol.
+ *
+ * Straight to the database and not through the hub, like the group beside it:
+ * nothing is rendered into the compose file and no container is recreated. It
+ * is read once, at the moment a box first enrols, and a machine that is
+ * offline right now will still use it when its containers come up.
+ *
+ * Empty clears it and goes back to the name the box makes from what Android
+ * reports. Changing it never renames a box that already enrolled -- those keep
+ * the row they have, which is also what makes a rename by hand stick.
+ */
+export async function setHostNameTemplate(
+  hostId: string,
+  template: string | null,
+): Promise<ActionState> {
+  const user = await requireOperator();
+
+  const trimmed = template?.trim() ?? "";
+  if (trimmed.length > 64) return { error: "That template is longer than a device name can be." };
+
+  try {
+    await prisma.redroidHost.update({
+      where: { deviceId: hostId },
+      data: { nameTemplate: trimmed === "" ? null : trimmed },
+    });
+    await prisma.auditLog.create({
+      data: {
+        userId: user.id,
+        userEmail: user.email,
+        action: "redroidHost.setNameTemplate",
+        targetType: "RedroidHost",
+        targetId: hostId,
+        meta: { template: trimmed === "" ? null : trimmed },
+      },
+    });
+    revalidateHost(hostId);
+    return { ok: true };
+  } catch {
+    return { error: "Could not set the name template for that machine." };
+  }
+}
+
 /** The site a machine's new containers enrol into. */
 export async function setHostGroup(hostId: string, groupId: string | null): Promise<ActionState> {
   const user = await requireOperator();
@@ -275,6 +318,7 @@ export async function bootstrapHost(input: {
   desiredInstances: number;
   desiredWorkers: number | null;
   desiredGroupId: string | null;
+  desiredNameTemplate: string | null;
 }): Promise<ActionState & { id?: string }> {
   const user = await requireOperator();
 
@@ -340,6 +384,7 @@ export async function bootstrapHost(input: {
           // Which site its boxes will come up in, which is a decision and not
           // a detail: it picks the MITM config they are handed.
           desiredGroupId: input.desiredGroupId,
+          desiredNameTemplate: input.desiredNameTemplate,
         },
       },
     });

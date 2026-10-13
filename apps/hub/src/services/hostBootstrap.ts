@@ -163,6 +163,7 @@ export async function startBootstrap(input: {
   desiredInstances: number;
   desiredWorkers: number | null;
   desiredGroupId: string | null;
+  desiredNameTemplate: string | null;
 }): Promise<{ id: string; serial: string }> {
   const serial = `host-${generateToken().slice(0, 10).toLowerCase()}`;
 
@@ -174,6 +175,7 @@ export async function startBootstrap(input: {
       desiredInstances: input.desiredInstances,
       desiredWorkers: input.desiredWorkers,
       desiredGroupId: input.desiredGroupId,
+      desiredNameTemplate: input.desiredNameTemplate,
       state: "RUNNING",
     },
   });
@@ -313,6 +315,7 @@ export async function claimBootstrap(deviceId: string, serial: string): Promise<
       desiredInstances: true,
       desiredWorkers: true,
       desiredGroupId: true,
+      desiredNameTemplate: true,
     },
   });
   if (!row || row.state === "DONE") return;
@@ -333,6 +336,7 @@ export async function claimBootstrap(deviceId: string, serial: string): Promise<
     data: {
       adoptedAt: new Date(),
       ...(row.desiredGroupId ? { defaultGroupId: row.desiredGroupId } : {}),
+      ...(row.desiredNameTemplate ? { nameTemplate: row.desiredNameTemplate } : {}),
     },
   });
 

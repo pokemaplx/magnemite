@@ -276,6 +276,7 @@ export const hub = {
     desiredInstances: number;
     desiredWorkers: number | null;
     desiredGroupId: string | null;
+    desiredNameTemplate: string | null;
   }) => call<{ id: string; serial: string }>("/internal/hosts/bootstrap", input),
   /** Re-send the file. `force` sends it even when the hash already matches. */
   convergeHost: (id: string, force = false) =>

@@ -608,6 +608,7 @@ export async function internalRoutes(app: FastifyInstance) {
         // deleted between opening the dialog and submitting it costs the
         // default group rather than the provisioning run.
         desiredGroupId: z.string().min(1).nullable().optional(),
+        desiredNameTemplate: z.string().trim().min(1).max(64).nullable().optional(),
       })
       // One or the other. Neither means there is no way in, and without this
       // the failure would be a timeout twenty minutes later.
@@ -627,6 +628,7 @@ export async function internalRoutes(app: FastifyInstance) {
         desiredInstances: parsed.data.desiredInstances,
         desiredWorkers: parsed.data.desiredWorkers ?? null,
         desiredGroupId: parsed.data.desiredGroupId ?? null,
+        desiredNameTemplate: parsed.data.desiredNameTemplate ?? null,
       });
     } catch (err) {
       // Deliberately not logging the error object: the credential is in the

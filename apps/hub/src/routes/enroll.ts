@@ -1,6 +1,6 @@
 import type { FastifyInstance } from "fastify";
 import { enrollRequestSchema } from "@magnemite/protocol";
-import { generateToken, hashToken, prisma } from "@magnemite/db";
+import { generateToken, hashToken, prisma, renderInstanceName } from "@magnemite/db";
 import { bus } from "../bus.js";
 import { claimBootstrap } from "../services/hostBootstrap.js";
 import { env } from "../env.js";
@@ -56,9 +56,35 @@ export async function enrollRoutes(app: FastifyInstance) {
       kind === "BOX"
         ? await prisma.redroidInstance.findUnique({
             where: { serial: body.device.serial },
-            select: { id: true, host: { select: { defaultGroupId: true } } },
+            select: {
+              id: true,
+              index: true,
+              host: {
+                select: {
+                  defaultGroupId: true,
+                  nameTemplate: true,
+                  // The machine's own name, which is what `{host}` means.
+                  device: { select: { name: true } },
+                },
+              },
+            },
           })
         : null;
+
+    // What this container is called, when its machine says. Only ever used on
+    // the create below: a re-enrolment keeps the row's existing name, so a box
+    // renamed by hand stays renamed and changing the template never reaches
+    // back to boxes that already enrolled.
+    //
+    // Falls through to the usual name when the template renders to nothing,
+    // which a template of only whitespace or only unknown placeholders would.
+    const templated = instance?.host.nameTemplate
+      ? renderInstanceName(instance.host.nameTemplate, {
+          host: instance.host.device.name,
+          index: instance.index,
+          serial: body.device.serial,
+        }) || null
+      : null;
 
     // A host belongs to no group: a group is a site with a MITM config and
     // install hooks, and a machine runs neither.
@@ -101,6 +127,7 @@ export async function enrollRoutes(app: FastifyInstance) {
             kind,
             name:
               body.name ??
+              templated ??
               defaultName(body.device.serial, body.device.manufacturer, body.device.model),
             tokenHash: hashToken(deviceToken),
             // A host is always approved. `/internal/authz` refuses an

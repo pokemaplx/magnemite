@@ -66,6 +66,7 @@ export function AddHostDialog({
         desiredInstances: Number.isInteger(instances) ? instances : 0,
         desiredWorkers: Number.isInteger(workers) && workers > 0 ? workers : null,
         desiredGroupId: groupId || null,
+        desiredNameTemplate: String(formData.get("nameTemplate") ?? "").trim() || null,
       });
       if (result.error) setError(result.error);
       else setOpen(false);
@@ -179,13 +180,40 @@ export function AddHostDialog({
                     value={groupId}
                     onValueChange={setGroupId}
                     disabled={pending}
+                    // Radix reads "" as *no value*, so this is what the closed
+                    // field says while nothing is picked — not decoration.
+                    placeholder="No group"
                     options={[
-                      { value: "", label: "default" },
+                      // Not labelled `default`. A group called that usually
+                      // exists already, because enrolment creates it when a box
+                      // arrives with nowhere to go — so naming the empty option
+                      // after it put the word in the list twice, once for a real
+                      // group and once for the absence of one.
+                      { value: "", label: "No group" },
                       ...groups.map((group) => ({ value: group.id, label: group.name })),
                     ]}
                   />
                 </div>
               </div>
+              <div className="space-y-1.5">
+                <Label htmlFor="nameTemplate">Name the containers</Label>
+                <Input
+                  id="nameTemplate"
+                  name="nameTemplate"
+                  className="font-mono text-xs"
+                  placeholder="{host}-{index}"
+                  maxLength={64}
+                />
+                {/* Here for the same reason the group is: the boxes enrol as
+                    the containers come up, and a name chosen afterwards is a
+                    rename of things that already exist. */}
+                <p className="text-xs text-muted-foreground">
+                  <code>{"{host}"}</code>, <code>{"{index}"}</code> and <code>{"{serial}"}</code>.
+                  Empty uses what the box reports about itself, which is the same manufacturer and
+                  model on every box in the fleet — so they differ only in six characters of serial.
+                </p>
+              </div>
+
               <p className="text-xs text-muted-foreground">
                 Leave instances at 0 to provision the machine without starting anything, and set the
                 number once you can see what it reports.
@@ -198,7 +226,9 @@ export function AddHostDialog({
               <p className="text-xs text-muted-foreground">
                 The group decides which MITM config its boxes are given, and they enrol the moment
                 the containers come up — so it is chosen now rather than after. It can be changed on
-                the machine&apos;s page, but that only affects containers added later.
+                the machine&apos;s page, but that only affects containers added later.{" "}
+                <strong>No group</strong> is not a third state: those boxes land in the group called{" "}
+                <code>default</code>, which is created if it does not exist yet.
               </p>
             </div>
 

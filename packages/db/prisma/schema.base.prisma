@@ -638,6 +638,17 @@ model RedroidHost {
   defaultGroupId String?
   defaultGroup   DeviceGroup? @relation(fields: [defaultGroupId], references: [id], onDelete: SetNull)
 
+  /// What a container on this machine is called when it enrols, with `{host}`,
+  /// `{index}` and `{serial}` filled in.
+  ///
+  /// Null uses what the box says about itself, which on Redroid is the
+  /// manufacturer and model Android reports -- identical on every box in the
+  /// fleet -- plus six characters of serial.
+  ///
+  /// Only a default, and only at creation: a box renamed by hand keeps its
+  /// name, and changing this never renames a box that already enrolled.
+  nameTemplate String?
+
   instances RedroidInstance[]
 
   createdAt DateTime @default(now())
@@ -776,6 +787,11 @@ model RedroidBootstrap {
   /// enrolment falls back to `default`.
   desiredGroupId String?
   desiredGroup   DeviceGroup? @relation(fields: [desiredGroupId], references: [id], onDelete: SetNull)
+
+  /// What those first containers are called, carried for the same reason as
+  /// the group above: they enrol as the run ends, and a name chosen afterwards
+  /// is a rename of boxes that already exist rather than a default.
+  desiredNameTemplate String?
 
   state RedroidBootstrapState @default(RUNNING)
 
