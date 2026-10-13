@@ -490,6 +490,101 @@ export async function deleteGroup(id: string): Promise<ActionState> {
   return { ok: true, message: `Removed "${group.name}".` };
 }
 
+/**
+ * Add a build to what a group hands every box that joins it.
+ *
+ * One row per build per group, so pressing Add twice on the same build is the
+ * same instruction rather than two. A build that is not cached is refused
+ * here, because the alternative is discovering it at the one moment nobody is
+ * watching -- a container coming up at four in the morning.
+ */
+export async function addJoinInstall(groupId: string, appVersionId: string): Promise<ActionState> {
+  const user = await requireOperator();
+
+  const [group, version] = await Promise.all([
+    prisma.deviceGroup.findUnique({ where: { id: groupId }, select: { name: true } }),
+    prisma.appVersion.findUnique({
+      where: { id: appVersionId },
+      select: { version: true, status: true, appTarget: { select: { packageName: true } } },
+    }),
+  ]);
+  if (!group) return { error: "That group is already gone." };
+  if (!version) return { error: "That build is already gone." };
+  if (version.status !== "READY") {
+    return { error: `${version.version} is not cached yet — cache it before adding it here.` };
+  }
+
+  // One build per package, because two would mean a new box installing one
+  // over the other in whichever order the scheduler happened to pick.
+  const clash = await prisma.groupJoinInstall.findFirst({
+    where: { groupId, appVersion: { appTarget: { packageName: version.appTarget.packageName } } },
+    select: { id: true, appVersion: { select: { version: true } } },
+  });
+  if (clash) {
+    return {
+      error: `This group already gives new boxes ${version.appTarget.packageName} ${clash.appVersion.version}. Remove that one first.`,
+    };
+  }
+
+  await prisma.groupJoinInstall.create({ data: { groupId, appVersionId } });
+
+  await prisma.auditLog.create({
+    data: {
+      userId: user.id,
+      userEmail: user.email,
+      action: "groupJoinInstall.add",
+      targetType: "DeviceGroup",
+      targetId: groupId,
+      meta: {
+        group: group.name,
+        packageName: version.appTarget.packageName,
+        version: version.version,
+      },
+    },
+  });
+
+  revalidatePath("/settings");
+  return { ok: true, message: `New boxes in "${group.name}" will get ${version.version}.` };
+}
+
+/**
+ * Stop handing a build to new boxes.
+ *
+ * Nothing is uninstalled. The boxes that already got it keep it, which is the
+ * only sane reading of removing an instruction about the future.
+ */
+export async function removeJoinInstall(id: string): Promise<ActionState> {
+  const user = await requireOperator();
+  const row = await prisma.groupJoinInstall.findUnique({
+    where: { id },
+    select: {
+      group: { select: { name: true } },
+      appVersion: { select: { version: true, appTarget: { select: { packageName: true } } } },
+    },
+  });
+  if (!row) return { error: "That is already gone." };
+
+  await prisma.groupJoinInstall.delete({ where: { id } });
+
+  await prisma.auditLog.create({
+    data: {
+      userId: user.id,
+      userEmail: user.email,
+      action: "groupJoinInstall.remove",
+      targetType: "DeviceGroup",
+      targetId: id,
+      meta: {
+        group: row.group.name,
+        packageName: row.appVersion.appTarget.packageName,
+        version: row.appVersion.version,
+      },
+    },
+  });
+
+  revalidatePath("/settings");
+  return { ok: true, message: "New boxes will no longer get it." };
+}
+
 /** Same shape the hub validates uploads against. */
 const PACKAGE_NAME = /^[a-zA-Z][a-zA-Z0-9_]*(\.[a-zA-Z][a-zA-Z0-9_]*)+$/;
 

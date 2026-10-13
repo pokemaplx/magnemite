@@ -20,9 +20,56 @@ data**.
 | **Column header**    | Shorter name for that column. Defaults to the last dotted segment.                                  |
 | **Config file path** | Where the file goes on the box, eg. `/data/local/tmp/aegis_config.json`.                            |
 | **Config JSON**      | The file's contents, with placeholders.                                                             |
+| **Install on join**  | Builds every box joining this group is given, before anybody asks. Empty by default.                |
 
 The **Fill from** buttons put in the real shapes for Aegis, Atlas and GC,
 paths and key sets.
+
+## Install on join
+
+A box that has just enrolled is in its group with **nothing on it** — a
+container that has only now come up, or hardware somebody has just flashed.
+Everything else the fleet does assumes the scanner and its MITM are already
+there, so the first move after every scale-up was a trip to
+[Manual deploy](/docs/fleet/manual) to install the same two builds on the same
+kind of box again.
+
+Put those builds in the group's **Install on join** and the box does it itself.
+A container coming up at four in the morning after a
+[scale-up](/docs/fleet/redroid-hosts) arrives with the scanner on it.
+
+<Callout type="warn" title="This is the one control here that installs with nobody watching">
+  It is **empty on every group** and nothing happens until somebody fills it — the same care the
+  [monitoring rules](/docs/fleet/monitoring) are seeded disabled with. An upgrade that starts
+  installing on its own is the version of this nobody asked for.
+</Callout>
+
+What it does, precisely:
+
+- **One build per package.** Two builds of one package would mean a new box
+  installing one over the other in whichever order the scheduler happened to
+  pick, so the second is refused with the first one named.
+- **A build, not "the newest".** Installing whatever is latest is what a
+  [rollout](/docs/fleet/rollouts) is for, and answering it here would make
+  every new box the first to try a version nobody chose. This answers the
+  narrower question — what does a box need before it is any use — and that is
+  a build somebody picked and has already seen work.
+- **Cached builds only**, because that is what a rollout accepts. One listed by
+  a [source](/docs/fleet/rollouts) and not yet downloaded is refused when you
+  add it, rather than at the one moment nobody is watching.
+- **Each build is its own rollout**, so they appear on **Rollouts** noted
+  `joined its group` and are followed, retried and cancelled like any other.
+  There is no ordering: the scheduler decides when each runs.
+- **A box that already has one gets nothing for it.** The check is what the box
+  reports installed, not whether it has enrolled before — so a re-enrolment
+  queues nothing, and a box whose `/data` was wiped gets everything again,
+  which is exactly when it needs to.
+- **Removing a build from the list uninstalls nothing.** The boxes that got it
+  keep it; the list only says what the _next_ box gets.
+
+A box that enrolled on a token without
+[auto-approve](/docs/fleet/enrollment) is skipped, because a rollout cannot
+target an unapproved box. It gets its builds the moment you approve it.
 
 ## Putting boxes in a group
 

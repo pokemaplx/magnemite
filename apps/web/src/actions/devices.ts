@@ -28,6 +28,20 @@ export async function setDeviceApproval(deviceId: string, approved: boolean): Pr
       targetId: deviceId,
     },
   });
+
+  // The other door into a group's join installs.
+  //
+  // A box that enrolled on a token without auto-approve was pending at the
+  // time, so enrolment queued nothing -- a rollout skips an unapproved device.
+  // This is the moment it becomes a target, and the only one left.
+  //
+  // Swallowed on purpose: the approval is done and recorded, and failing the
+  // whole action because an install could not be queued would leave the
+  // operator pressing a button that already worked.
+  if (approved) {
+    await hub.queueJoinInstalls(deviceId).catch(() => undefined);
+  }
+
   revalidatePath("/");
   revalidatePath(`/devices/${deviceId}`);
   return { ok: true };

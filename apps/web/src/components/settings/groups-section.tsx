@@ -1,17 +1,40 @@
 "use client";
 
 import { useActionState, useState, useTransition } from "react";
-import { Boxes, Pencil, Plus, Trash2 } from "lucide-react";
+import { Boxes, Download, Pencil, Plus, Trash2 } from "lucide-react";
 import { CONFIG_PLACEHOLDERS } from "@/lib/config-placeholders";
-import { createGroup, deleteGroup, updateGroup } from "@/actions/settings";
+import {
+  addJoinInstall,
+  createGroup,
+  deleteGroup,
+  removeJoinInstall,
+  updateGroup,
+} from "@/actions/settings";
 import type { ActionState } from "@/actions/rollouts";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input, Textarea } from "@/components/ui/input";
 import { ConfirmDialog } from "@/components/ui/confirm-dialog";
 import { Label } from "@/components/ui/label";
+import { Select } from "@/components/ui/select";
 import { SaveButton } from "@/components/ui/save-button";
 import { RenameDevicesDialog } from "@/components/rename-devices-dialog";
+
+export type JoinInstallRow = {
+  id: string;
+  appVersionId: string;
+  packageName: string;
+  displayName: string | null;
+  version: string;
+};
+
+/** A cached build, offered to every group's join set. */
+export type JoinCandidate = {
+  id: string;
+  packageName: string;
+  displayName: string | null;
+  version: string;
+};
 
 export type GroupRow = {
   id: string;
@@ -34,6 +57,8 @@ export type GroupRow = {
   mitmConfig: string | null;
   /** So a VIEWER can still be told one exists without being shown it. */
   hasMitmConfig: boolean;
+  /** What every box joining this group is given, in the order it was added. */
+  joinInstalls: JoinInstallRow[];
   /**
    * How many of *this group's* approved boxes have reported a version for its
    * MITM. Per group, so it can be read against `approvedCount` below it.
@@ -127,7 +152,16 @@ const PRESETS = [
   },
 ] as const;
 
-export function GroupsSection({ groups, disabled }: { groups: GroupRow[]; disabled: boolean }) {
+export function GroupsSection({
+  groups,
+  candidates,
+  disabled,
+}: {
+  groups: GroupRow[];
+  /** Every cached build, for the join-install picker. */
+  candidates: JoinCandidate[];
+  disabled: boolean;
+}) {
   return (
     <Card>
       <CardHeader>
@@ -151,7 +185,7 @@ export function GroupsSection({ groups, disabled }: { groups: GroupRow[]; disabl
         ) : null}
 
         {groups.map((group) => (
-          <GroupForm key={group.id} group={group} disabled={disabled} />
+          <GroupForm key={group.id} group={group} candidates={candidates} disabled={disabled} />
         ))}
 
         {!disabled ? <CreateGroupForm /> : null}
@@ -160,7 +194,15 @@ export function GroupsSection({ groups, disabled }: { groups: GroupRow[]; disabl
   );
 }
 
-function GroupForm({ group, disabled }: { group: GroupRow; disabled: boolean }) {
+function GroupForm({
+  group,
+  candidates,
+  disabled,
+}: {
+  group: GroupRow;
+  candidates: JoinCandidate[];
+  disabled: boolean;
+}) {
   const [state, formAction] = useActionState<ActionState, FormData>(updateGroup, {});
   const [pending, startTransition] = useTransition();
   const [confirmOpen, setConfirmOpen] = useState(false);
@@ -368,6 +410,12 @@ function GroupForm({ group, disabled }: { group: GroupRow; disabled: boolean }) 
         </div>
       ) : null}
 
+      {/* Outside the save above on purpose: this is a list with its own add
+          and remove, each taking effect at once, rather than a field that
+          waits for a Save. Mixing the two in one form is how a half-saved
+          group happens. */}
+      <JoinInstalls group={group} candidates={candidates} disabled={disabled} />
+
       <ConfirmDialog
         open={confirmOpen}
         onOpenChange={setConfirmOpen}
@@ -397,6 +445,130 @@ function GroupForm({ group, disabled }: { group: GroupRow; disabled: boolean }) 
         ) : null}
       </ConfirmDialog>
     </form>
+  );
+}
+
+/**
+ * What every box joining this group is handed, before anybody asks.
+ *
+ * The gap it closes is the first minute of a box's life: a container that has
+ * just come up is in its group with nothing on it, and everything else the
+ * fleet does assumes the scanner and its MITM are already there. So the first
+ * thing after every scale-up was a trip to Manual deploy to install the same
+ * two builds on the same kind of box again.
+ *
+ * Empty everywhere by default, and that is deliberate: this is the one control
+ * here that makes the hub install software with no operator in the loop.
+ */
+function JoinInstalls({
+  group,
+  candidates,
+  disabled,
+}: {
+  group: GroupRow;
+  candidates: JoinCandidate[];
+  disabled: boolean;
+}) {
+  const [pick, setPick] = useState("");
+  const [error, setError] = useState<string | null>(null);
+  const [pending, startTransition] = useTransition();
+
+  // A package already in the set is not offered again: two builds of one
+  // package would mean a new box installing one over the other in whichever
+  // order the scheduler happened to pick.
+  const taken = new Set(group.joinInstalls.map((row) => row.packageName));
+  const options = candidates
+    .filter((build) => !taken.has(build.packageName))
+    .map((build) => ({
+      value: build.id,
+      label: `${build.displayName ?? build.packageName} ${build.version}`,
+    }));
+
+  return (
+    <div className="flex flex-col gap-2 rounded-lg border border-border bg-subtle/50 p-3">
+      <div className="flex items-center gap-2">
+        <Download className="h-3.5 w-3.5 text-muted-foreground" />
+        <Label className="text-xs">Install on a box joining this group</Label>
+      </div>
+
+      {group.joinInstalls.length === 0 ? (
+        <p className="text-xs text-muted-foreground">
+          Nothing, so a new box arrives empty and waits for a rollout. Add the scanner and its MITM
+          here and a container coming up after a scale-up installs them on its own.
+        </p>
+      ) : (
+        <ul className="flex flex-col gap-1">
+          {group.joinInstalls.map((row) => (
+            <li
+              key={row.id}
+              className="flex items-center gap-2 rounded-md border border-border bg-card px-2.5 py-1.5 text-sm"
+            >
+              <span className="font-mono text-xs">{row.version}</span>
+              <span className="truncate text-xs text-muted-foreground">
+                {row.displayName ?? row.packageName}
+              </span>
+              {!disabled ? (
+                <Button
+                  variant="ghost"
+                  size="icon"
+                  className="ml-auto h-7 w-7"
+                  aria-label={`Stop giving new boxes ${row.version}`}
+                  disabled={pending}
+                  onClick={() => {
+                    startTransition(async () => {
+                      const result = await removeJoinInstall(row.id);
+                      setError(result.error ?? null);
+                    });
+                  }}
+                >
+                  <Trash2 />
+                </Button>
+              ) : null}
+            </li>
+          ))}
+        </ul>
+      )}
+
+      {!disabled ? (
+        <div className="flex flex-wrap items-center gap-2">
+          <Select
+            value={pick}
+            onValueChange={setPick}
+            className="w-64"
+            placeholder={options.length > 0 ? "Pick a cached build…" : "No cached build to add"}
+            disabled={pending || options.length === 0}
+            options={options}
+            aria-label="A build to give new boxes"
+          />
+          <Button
+            variant="outline"
+            size="sm"
+            disabled={pending || !pick}
+            onClick={() => {
+              startTransition(async () => {
+                const result = await addJoinInstall(group.id, pick);
+                setError(result.error ?? null);
+                if (!result.error) setPick("");
+              });
+            }}
+          >
+            <Plus />
+            Add
+          </Button>
+        </div>
+      ) : null}
+
+      {/* Said once, here, because it is the question the list raises and the
+          answer is not obvious either way. */}
+      {group.joinInstalls.length > 0 ? (
+        <p className="text-xs text-muted-foreground">
+          A box already reporting one of these gets nothing for it. Removing a build from this list
+          uninstalls nothing — the boxes that got it keep it.
+        </p>
+      ) : null}
+
+      {error ? <p className="text-xs text-destructive">{error}</p> : null}
+    </div>
   );
 }
 

@@ -510,9 +510,49 @@ model DeviceGroup {
   redroidHosts      RedroidHost[]
   /// Machines still being provisioned that will enroll their containers here.
   redroidBootstraps RedroidBootstrap[]
+  /// What a box gets installed the moment it joins this group.
+  joinInstalls      GroupJoinInstall[]
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
+}
+
+/// A build every new box in a group is given, before anybody asks.
+///
+/// The gap this closes: a container that has just come up, or a box somebody
+/// has just flashed, is in its group with nothing on it. Everything the fleet
+/// does to a box assumes the scanner and its MITM are already there, so the
+/// first thing after every scale-up was a trip to Manual deploy to install the
+/// same two builds on the same kind of box again.
+///
+/// **Empty on every group, and nothing happens until an operator fills it.**
+/// This creates rollouts with nobody pressing anything, which is the one shape
+/// of feature this repo is most careful about -- an upgrade that starts
+/// installing on its own is the version nobody asked for.
+///
+/// A build and not a package, deliberately. "Install whatever is newest" is
+/// what a rollout is for, and answering it here would mean every new box
+/// becoming the first to try a version nobody chose. This answers the narrower
+/// question -- what does a box need before it is any use -- and that is a
+/// build somebody picked and has already seen work.
+///
+/// There is no ordering field. Each build becomes its own rollout and the
+/// scheduler decides when each one runs, so a column promising sequence would
+/// promise something nothing here can deliver.
+model GroupJoinInstall {
+  id      String      @id @default(cuid())
+  groupId String
+  group   DeviceGroup @relation(fields: [groupId], references: [id], onDelete: Cascade)
+
+  appVersionId String
+  appVersion   AppVersion @relation(fields: [appVersionId], references: [id], onDelete: Cascade)
+
+  createdAt DateTime @default(now())
+
+  /// One row per build per group: adding the same build twice is the same
+  /// instruction, not two.
+  @@unique([groupId, appVersionId])
+  @@index([appVersionId])
 }
 
 // ---------------------------------------------------------------------------
@@ -959,6 +999,8 @@ model AppVersion {
   discoveredAt DateTime  @default(now())
 
   rollouts Rollout[]
+  /// Groups that hand this build to every box that joins them.
+  joinGroups GroupJoinInstall[]
 
   /// One row per build, whichever feed happened to list it first. Two feeds
   /// mirroring the same release are the same thing to everyone downstream —

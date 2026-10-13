@@ -284,6 +284,15 @@ export const hub = {
   /** Re-run the provisioning script, with the files that build the image. */
   rerunBootstrap: (id: string) =>
     call<{ sent: boolean; reason?: string }>(`/internal/hosts/${id}/bootstrap`, {}),
+  /**
+   * Give a box what its group hands every new box.
+   *
+   * Enrolment already does this. This is for a box that enrolled on a token
+   * without auto-approve: it was pending then, so nothing was queued, and the
+   * moment it becomes a rollout target is the moment somebody approves it.
+   */
+  queueJoinInstalls: (id: string) =>
+    call<{ queued: number }>(`/internal/devices/${id}/join-installs`, {}),
 };
 
 export const HUB_BASE_URL = HUB_URL;

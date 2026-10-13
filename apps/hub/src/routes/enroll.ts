@@ -3,6 +3,7 @@ import { enrollRequestSchema } from "@magnemite/protocol";
 import { generateToken, hashToken, prisma, renderInstanceName } from "@magnemite/db";
 import { bus } from "../bus.js";
 import { claimBootstrap } from "../services/hostBootstrap.js";
+import { queueJoinInstalls } from "../services/joinInstalls.js";
 import { env } from "../env.js";
 import { log } from "../log.js";
 
@@ -187,6 +188,23 @@ export async function enrollRoutes(app: FastifyInstance) {
         where: { id: instance.id },
         data: { deviceId: device.id },
       });
+    }
+
+    // What its group says every new box needs, if its group says anything.
+    //
+    // Here rather than on the socket's hello, because a box connects on every
+    // reconnect and enrols roughly once -- and run on a re-enrolment too, not
+    // only a create: a box whose /data was wiped comes back as the same row
+    // with an empty filesystem, which is exactly when it needs this most.
+    // What stops that from being noise is the service's own check, which asks
+    // what the box has rather than whether it is new.
+    //
+    // Not awaited for its result and never allowed to throw: a box that has
+    // enrolled must get its token back even if the hub cannot queue a thing.
+    if (kind === "BOX" && device.approved) {
+      await queueJoinInstalls(device.id).catch((err) =>
+        log.warn({ err, deviceId: device.id }, "could not queue the group's join installs"),
+      );
     }
 
     log.info(

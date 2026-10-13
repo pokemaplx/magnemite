@@ -17,6 +17,7 @@ import { broadcastWelcome } from "../services/devices.js";
 import { normaliseLogPath, requestBundle, subscribeToLogs } from "../services/deviceLogs.js";
 import { collectHealth } from "../services/health.js";
 import { cancelJob, retryFailedJobs, retryJob } from "../services/jobs.js";
+import { queueJoinInstalls } from "../services/joinInstalls.js";
 import { evaluate } from "../services/monitor.js";
 import { sendTestAlert } from "../services/notify.js";
 import { cancelRollout, createRollout, resumeRollout } from "../services/rollouts.js";
@@ -524,6 +525,23 @@ export async function internalRoutes(app: FastifyInstance) {
    * means both, and leaving them separate would make "I changed the number and
    * nothing happened" the normal experience.
    */
+  /**
+   * Give a box what its group hands every new box.
+   *
+   * Enrolment does this by itself; this exists for the other door. A token
+   * without auto-approve leaves a box pending, `createRollout` skips an
+   * unapproved device, and the box only becomes a rollout target when somebody
+   * approves it -- at which point nothing would have queued anything, because
+   * the enrolment that would have is long over.
+   *
+   * Idempotent, because `queueJoinInstalls` asks what the box already has: an
+   * approve, unapprove and approve again queues nothing the second time.
+   */
+  app.post("/internal/devices/:id/join-installs", async (request) => {
+    const { id } = request.params as { id: string };
+    return { queued: await queueJoinInstalls(id) };
+  });
+
   app.post("/internal/hosts/:id/scale", async (request, reply) => {
     const { id } = request.params as { id: string };
     const parsed = z
