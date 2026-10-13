@@ -62,7 +62,7 @@ sudo modprobe ashmem_linux
 
 ```sh
 make redroid
-# → magnemite/redroid:1
+# → magnemite/redroid:3
 ```
 
 Unlike `make module`, this takes no `SERVER` and no `TOKEN`. **The image holds
@@ -125,14 +125,48 @@ full Android cold boot each, to deliver a binary the boxes would have swapped
 in seconds on their own. Bump `redroid=` when the base image, the start script
 or the init service changes.
 
-The base image is `REDROID_BASE`, default `abing7k/redroid:a11_magisk_arm` —
-Magisk-prerooted, because [Cosmog](https://sylvie.fyi/cosmog/) needs Magisk
-hidden from its worker processes and upstream Redroid ships none.
+The base image is `REDROID_BASE`, default
+`redroid/redroid:12.0.0_64only-latest` — the official image, and **64-bit
+only**. Magisk is not inherited from it; the build injects it, pinned by
+`MAGISK_VERSION`.
 
-<Callout type="info" title="`_arm` is the host, not a 32-bit guest">
-  That image is `linux/arm64`, which is why the arm64 agent is still the right one. The `_amd` tags
-  are the x86_64 variants, and there is no `a11_magisk_ndk_arm` because `ndk` is the ARM native
-  bridge — nothing an ARM host needs.
+### Why 64-bit only
+
+An arm64 Android normally ships two zygotes, and the 32-bit one needs AArch32,
+which Arm has been removing generation by generation. Neoverse N1 and V1
+(Ampere Altra, Graviton 2 and 3) still have it at EL0; **Neoverse V2 and V3
+(Graviton 4 and 5, Google Axion, NVIDIA Grace) and every Apple Silicon do
+not.** There the 32-bit zygote cannot start, and the symptom is a container
+that runs with an Android that never finishes booting — an instance left
+`running, not enrolled`, which reads like a network fault and is not one.
+
+Nothing is lost by dropping it. The fleet's `.apkm` bundles carry an
+`arm64-v8a` split and the agent picks a split by exact ABI match, so no 32-bit
+runtime was ever used by anything here. The `_64only` variants begin at Android
+12, which is why the base is 12 and not 11.
+
+### Why Magisk is injected rather than inherited
+
+The base used to be `abing7k/redroid:a11_magisk_arm`, prerooted, and that was a
+dead end: it carries Magisk Delta 25206 canary from a 2023 androidfilehost
+mirror, Delta's own repositories are gone from GitHub, and the repo that built
+it says it is no longer maintained. **Nobody can rebuild that image**, its
+author included.
+
+So the injection is ours, and it is the same one
+[`ayasa520/redroid-script`](https://github.com/ayasa520/redroid-script)
+performs — the script `abing7k` forked, still maintained, and the source of
+every line of the init block in the Dockerfile. Bootless Magisk is a handful of
+binaries under `/system/etc/init/magisk` plus a hook appended to `bootanim.rc`,
+so doing it in the image keeps provisioning to one `docker build` on the
+machine: no Python, no `lzip`, nothing fetched from a third party while a
+machine is being set up.
+
+<Callout type="warn" title="Hiding is Zygisk and the DenyList now, not MagiskHide">
+  This is **upstream** Magisk, not Delta. Delta's `hide=1` does not exist here and cannot be put
+  back — there is nowhere left to download Delta from. Hiding root from a scanner's worker processes
+  is `zygisk=1` plus a DenyList, which is the mechanism upstream Magisk has had since v24. Anything
+  that was configured against MagiskHide has to be configured again.
 </Callout>
 
 ## Run the boxes

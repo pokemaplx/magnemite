@@ -31,7 +31,7 @@ x-box: &box
   # Tracks the `redroid=` line of VERSION, which is what `make redroid` tags.
   # It is not the agent version: the agent updates itself over the wire, and a
   # moving tag here would cold-boot every container on the machine for nothing.
-  image: ${REDROID_IMAGE:-magnemite/redroid:1}
+  image: ${REDROID_IMAGE:-magnemite/redroid:3}
   # Redroid needs the host's binder devices; it does not run unprivileged.
   privileged: true
   # A container that fell over on its own is brought back; a machine that

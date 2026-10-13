@@ -48,7 +48,6 @@ What the VM needs:
 | ----------------------------------- | ------------------------------------------------------------------------------------------------------- |
 | **arm64**                           | A `linux/arm64` guest. The fleet's bundles carry an `arm64-v8a` split and the agent matches ABI exactly |
 | **Debian or Ubuntu**                | The bootstrap installs with `apt-get`, and gets `binder_linux` from `linux-modules-extra-$(uname -r)`   |
-| **A 64-bit-only image**             | Not the fleet's default, and the one thing on this page that is not just configuration — see below      |
 | **RAM**                             | Whatever you give the VM is what the capacity planner divides up — the Mac's total is invisible to it   |
 | **Reachable once**                  | The hub needs one outbound SSH connection to it, and only for provisioning. See below                   |
 | **Its own IP, or a forwarded port** | A NAT'd VM is fine; a bridged one is simpler                                                            |
@@ -158,7 +157,7 @@ MAGNEMITE_TOKEN=<host enrollment token> \
 MAGNEMITE_NAME=mac-vm \
 MAGNEMITE_SERIAL=<any stable, unique value> \
 MAGNEMITE_SSH_PORT=22 \
-MAGNEMITE_IMAGE=magnemite/redroid:2 \
+MAGNEMITE_IMAGE=magnemite/redroid:3 \
 sh ./bootstrap.sh
 ```
 
@@ -179,66 +178,44 @@ And `MAGNEMITE_SERVER` is the **hub's** URL, which is not the dashboard's.
   bootstrap that reported every step as fine.
 </Callout>
 
-## The 32-bit half of Android, and the CPUs that cannot run it
+## The 32-bit half of Android, which the fleet no longer has
 
-This is the one item on this page that is not configuration, and it is not
-really about Macs — a Mac is just the first machine most people own that has
-the problem.
+Worth reading once even though there is nothing to do about it, because it is
+the reason a Mac was unsupported until recently and the reason the image is
+Android 12 rather than 11.
 
 An arm64 Android normally ships two zygotes, 64-bit and 32-bit, because AOSP
 expects to run 32-bit apps. Whether the 32-bit one can start at all is a
 property of the **CPU**, and Arm has been removing AArch32 generation by
 generation:
 
-| Core               | Machines                                       | AArch32 at EL0 |
-| ------------------ | ---------------------------------------------- | -------------- |
-| Neoverse N1        | Ampere Altra, AWS Graviton 2                   | yes            |
-| Neoverse V1        | AWS Graviton 3                                 | yes            |
-| Neoverse N2        | Alibaba Yitian 710                             | yes            |
-| Neoverse V2        | **AWS Graviton 4**, Google Axion, NVIDIA Grace | **no**         |
-| Neoverse V3        | **AWS Graviton 5**                             | **no**         |
-| Apple M1 and later | **every Apple Silicon Mac**                    | **no**         |
+| Core               | Machines                                   | AArch32 at EL0 |
+| ------------------ | ------------------------------------------ | -------------- |
+| Neoverse N1        | Ampere Altra, AWS Graviton 2               | yes            |
+| Neoverse V1        | AWS Graviton 3                             | yes            |
+| Neoverse N2        | Alibaba Yitian 710                         | yes            |
+| Neoverse V2        | AWS Graviton 4, Google Axion, NVIDIA Grace | **no**         |
+| Neoverse V3        | AWS Graviton 5                             | **no**         |
+| Apple M1 and later | every Apple Silicon Mac                    | **no**         |
 
-On everything in the bottom half the 32-bit zygote has nothing to run on.
-Redroid publishes `_64only` images for exactly this reason, and its
-maintainer's standing advice for Apple Silicon is to use one.
+On everything in the bottom half a 32-bit zygote has nothing to run on, and the
+symptom is the nastiest kind: the container runs, the Android in it never
+finishes booting, and the instance sits **running, not enrolled** — which reads
+like a network fault and is not one. It is also invisible to the bootstrap,
+because a Graviton 4 answers `aarch64` exactly like a Graviton 3 does.
 
-The fleet's image is not one of them. It builds on
-`abing7k/redroid:a11_magisk_arm`, which is Android 11 from
-`redroid/redroid:11.0.0-latest` — and upstream has `_64only` variants from
-Android **12** up, never for 11 — Android 11 predates the problem. So there is
-no prebuilt Magisk-prerooted 64-bit-only Android 11 anywhere, because there is
-no Android 11 to build it from.
+**The fleet's image has no 32-bit half.** It is built on
+`redroid/redroid:12.0.0_64only-latest`, which ships `init.zygote64.rc` and no
+`init.zygote64_32.rc`, no `app_process32`, and an empty
+`ro.product.cpu.abilist32`. Nothing is lost: the fleet's `.apkm` bundles carry
+an `arm64-v8a` split and the agent matches ABI exactly, so no 32-bit runtime
+was ever used by anything here.
 
-<Callout type="info" title="Which is why nothing is wrong today">
-  Every machine this fleet has run on executes AArch32 at EL0, so both zygotes start and the image
-  is correct. This is a constraint on what to **buy** next, not a fault to go and fix — and the
-  bootstrap's first step will not catch it, because a Graviton 4 answers `aarch64` exactly like a
-  Graviton 3 does.
-</Callout>
-
-<Callout type="warn" title="It will look like a network problem">
-  The reported symptom on an M1 under Parallels is a container that runs and an `adb` that never
-  connects ([redroid-doc#336](https://github.com/remote-android/redroid-doc/issues/336)) — Android
-  never finishes booting, so nothing inside it answers. Here that surfaces as an instance marked
-  **running, not enrolled**: the container is up, the agent in it never dialled out. That row is
-  worth trusting. It is the state the instances table exists to tell apart, and on one of the CPUs
-  above it points at the image rather than at the network.
-</Callout>
-
-The escape hatch is already in the data model: **the image is per machine**, so
-one Mac VM can run a different Android from every VPS without touching them.
-Building that image means a 64-only base at Android 12 or newer with
-[`ayasa520/redroid-script`](https://github.com/ayasa520/redroid-script), which
-takes `12.0.0_64only` as a target, then this repo's `agent/redroid/Dockerfile`
-layered on top of the result.
-
-<Callout type="info" title="There is no UI for it yet">
-  `RedroidHost.image` and `RedroidHost.gpuMode` are both per-machine columns and neither has a field
-  on the machine's page, so overriding one today is an `UPDATE` in psql followed by a **Re-run
-  setup** to build the tag and a converge to move the containers onto it. Worth knowing before
-  planning around it.
-</Callout>
+So a Mac VM runs the same image as every VPS, and so will whatever arm64
+machine you buy next. See
+[the Redroid image](/docs/fleet/redroid) for how it is built — including the
+one behavioural consequence, which is that hiding root is Zygisk and the
+DenyList rather than Delta's MagiskHide.
 
 ## Two things that bite a machine at home and not a VPS
 

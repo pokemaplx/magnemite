@@ -72,9 +72,10 @@ module: agent ## Package the Magisk module zip into dist/
 # Magisk-prerooted, because Cosmog needs it. `_arm` in that tag is the *host*
 # architecture, not a 32-bit guest: the image is linux/arm64, which is why the
 # Dockerfile copies the arm64 agent and the arm64-only policy still holds.
-# There is no `a11_magisk_ndk_arm`, and nothing is missing -- `ndk` is the ARM
-# native bridge, which an ARM host has no use for.
-REDROID_BASE ?= abing7k/redroid:a11_magisk_arm
+# 64-bit only, which is what lets a container boot on a CPU without AArch32 --
+# Apple Silicon and Graviton 4 upwards. The Dockerfile says why at length, and
+# the 64only variants start at Android 12.
+REDROID_BASE ?= redroid/redroid:12.0.0_64only-latest
 # Versioned by what is *in* the image -- the base, the start script, the .rc --
 # and deliberately not by the agent version.
 #
