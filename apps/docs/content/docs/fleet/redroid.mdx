@@ -38,13 +38,25 @@ does what `customize.sh` did at flash time.
   matches the ABI exactly, refusing to install the wrong native libraries. An
   x86_64 Redroid needs ARM translation and a different split policy; it is not
   a supported target.
-- **The binder kernel module**, with the device names Android expects:
+- **The binder kernel module**, with the device names Android expects — **and
+  the devices openable by somebody other than root**:
 
 ```sh
 sudo modprobe binder_linux devices="binder,hwbinder,vndbinder"
+sudo chmod 0666 /dev/binder /dev/hwbinder /dev/vndbinder
 # kernels older than 5.18 also want:
 sudo modprobe ashmem_linux
 ```
+
+<Callout type="warn" title="The chmod is not optional, and skipping it looks like something else">
+  modprobe creates these `0600 root:root`, and Android runs its services as uid 1000, 1013 and
+  friends — a privileged container inherits the mode, so every one of them aborts on the open with
+  `Binder driver could not be opened. Terminating.` What you see is a container that docker reports
+  as **Up**, with empty `docker logs` (Android logs to logcat, not stdout), idling at a few percent
+  CPU and never reaching `sys.boot_completed` — which from the dashboard is a box that is running
+  and never enrols. It survives neither a reboot nor a module reload, so it wants a udev rule; a
+  [hub-provisioned machine](/docs/deployment/redroid-bootstrap) is given one.
+</Callout>
 
 ## Build the image
 

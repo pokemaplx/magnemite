@@ -108,9 +108,29 @@ in needs no module at all.
 ### binder — the outcome, not the step
 
 Redroid's own documentation disagrees with itself about whether a modern kernel
-needs the module, so what gets verified is the end state: that `/dev/binder`,
-`/dev/binderfs` or `binder` in `/proc/filesystems` is actually there. This is
-the one hardware-ish refusal — a kernel without it cannot run Redroid at all.
+needs the module, so what gets verified is the end state — and the end state is
+two things, not one: that `/dev/binder`, `/dev/hwbinder` and `/dev/vndbinder`
+exist, **and that something other than root can open them**.
+
+`modprobe` creates them `0600 root:root`. Android runs its services as uid 1000,
+1013 and friends, and a privileged container inherits the mode — so every one of
+them aborts with `Binder driver could not be opened. Terminating.` and the
+container never finishes booting. So this step also sets the mode for now and
+writes `/etc/udev/rules.d/99-magnemite-binder.rules` to set it on every boot
+after, and the agent's own unit chmods them once more before it starts anything,
+because the agent is what brings containers back after a reboot.
+
+Binderfs alone is deliberately no longer accepted: the rendered compose hands a
+container device nodes, so a kernel that offers only binderfs would provision
+cleanly and boot nothing.
+
+<Callout type="warn" title="What this failure looks like, since it looks like nothing">
+  docker reports the container **Up**. `docker logs` is empty, because Android logs to logcat rather
+  than to stdout. CPU sits at a few percent and memory barely moves, so it does not read as a slow
+  boot either. The only symptoms that reach Magnemite are a container that is `running` and a box
+  that is `not enrolled`, for ever. `docker exec <container> logcat -b crash -d` is what says it out
+  loud.
+</Callout>
 
 </Step>
 

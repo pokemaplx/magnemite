@@ -10,8 +10,14 @@ name: magnemite-redroid
 # Host requirements, none of which this file can check for you:
 #   - arm64. The fleet's bundles carry an arm64-v8a split and the agent matches
 #     the ABI exactly, so an x86_64 host is not a supported target.
-#   - the binder kernel module, with the device names Android expects:
+#   - the binder kernel module, with the device names Android expects, and the
+#     devices readable by somebody other than root:
 #       sudo modprobe binder_linux devices="binder,hwbinder,vndbinder"
+#       sudo chmod 0666 /dev/binder /dev/hwbinder /dev/vndbinder
+#     The chmod is not optional: modprobe makes them 0600 root:root, Android's
+#     services do not run as root, and every one of them aborts on the open
+#     with "Binder driver could not be opened" -- in a container docker happily
+#     reports as Up, with nothing in `docker logs`, that never finishes booting.
 #     On kernels older than 5.18, ashmem_linux as well.
 #
 # Two variables in .env drive every box:

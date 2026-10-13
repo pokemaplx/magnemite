@@ -114,12 +114,64 @@ step modules ok "$KERNEL"
 #
 # Redroid's own documentation disagrees with itself about whether a modern
 # kernel needs the module at all, so what gets verified is the end state: are
-# the devices Android will ask for actually there.
-if [ -e /dev/binder ] || [ -d /dev/binderfs ] || grep -q binder /proc/filesystems 2>/dev/null; then
-	step binder ok
-else
-	die binder "no binder devices and no binderfs — this kernel cannot run Redroid"
+# the devices Android will ask for there, and can the processes that need them
+# actually open them.
+#
+# "There" was once the whole check, and it is not enough -- which cost a night.
+# modprobe creates these 0600 root:root, Android runs its services as uid 1000,
+# 1013 and friends, and a privileged container inherits the mode. So every
+# non-root service aborted on the open with
+#
+#     Binder driver could not be opened. Terminating.
+#
+# and the container sat at 4% CPU with 115 processes, never reaching
+# sys.boot_completed. From the outside that is indistinguishable from a slow
+# boot: docker says Up, docker logs says nothing (Android logs to logcat), and
+# the machine reports a container that is running and a box that never enrols.
+BINDER_DEVS="/dev/binder /dev/hwbinder /dev/vndbinder"
+
+missing=""
+for dev in $BINDER_DEVS; do
+	[ -c "$dev" ] || missing="$missing $dev"
+done
+if [ -n "$missing" ]; then
+	# Deliberately no longer satisfied by binderfs alone. A kernel that offers
+	# only binderfs has no device for the rendered compose to hand a container,
+	# and passing here would buy a machine that provisions cleanly and boots
+	# nothing -- the failure this stage exists to prevent.
+	die binder "no binder devices:$missing (modprobe binder_linux devices=binder,hwbinder,vndbinder)"
 fi
+
+# Now, for this boot...
+chmod 0666 $BINDER_DEVS 2>/dev/null || true
+
+# ...and for every boot after it. A file we own, overwritten rather than
+# appended to, like the modprobe drop-ins above. Without this the modes go back
+# to 0600 on the next reboot or module reload, and the fleet comes back from a
+# kernel update with every container wedged at the same place -- with nothing
+# to connect it to the reboot, because the containers *are* running.
+mkdir -p /etc/udev/rules.d
+cat >/etc/udev/rules.d/99-magnemite-binder.rules <<'RULES'
+# Android's services do not run as root, and binder is opened by all of them.
+SUBSYSTEM=="misc", KERNEL=="binder", MODE="0666"
+SUBSYSTEM=="misc", KERNEL=="hwbinder", MODE="0666"
+SUBSYSTEM=="misc", KERNEL=="vndbinder", MODE="0666"
+RULES
+if have udevadm; then
+	udevadm control --reload-rules >/dev/null 2>&1 || true
+	udevadm trigger --subsystem-match=misc >/dev/null 2>&1 || true
+fi
+
+# The check that actually matters, made against the mode rather than against
+# the file existing. Read as "could a service that is not root open this".
+for dev in $BINDER_DEVS; do
+	mode=$(stat -c %a "$dev" 2>/dev/null || echo "")
+	case "$mode" in
+	*6 | *7) ;;
+	*) die binder "$dev is mode ${mode:-unknown}; Android's services cannot open it" ;;
+	esac
+done
+step binder ok "$(stat -c %a /dev/binder 2>/dev/null || echo unknown)"
 
 # --- 3b. pid_max, set here rather than left as a side effect ----------------
 #
@@ -435,6 +487,13 @@ Requires=docker.service
 
 [Service]
 Type=simple
+# Belt to the udev rule's braces, and the one that is certain to run: the
+# containers do not come back by themselves after a reboot (restart: on-failure,
+# so that N Androids do not start at once), the agent brings them up -- which
+# makes this the last moment before anything needs binder. A machine whose udev
+# never applied the rule would otherwise come back from a kernel update with
+# every container wedged on an open() nobody is watching.
+ExecStartPre=-/bin/sh -c 'chmod 0666 /dev/binder /dev/hwbinder /dev/vndbinder 2>/dev/null || true'
 ExecStart=$INSTALL_BIN -host -config $CONF
 # The agent dials out and retries with backoff on its own, so a restart here is
 # only for a process that died outright.
