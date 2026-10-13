@@ -295,24 +295,39 @@ export function ManualInstall({
     [groups, packageName],
   );
 
-  /**
-   * What an override starts from: the group's own config, when the groups
-   * getting one agree on a single body. They usually do — one scanner, one
-   * site — and when they do not, starting from blank is the honest default
-   * rather than silently picking one group's to edit.
-   */
   /** Where the override lands, which is still each group's own path. */
   const configPaths = useMemo(() => {
     const paths = [...new Set(configuredGroups.map((g) => g.mitmConfigPath).filter(Boolean))];
     return paths.length > 0 ? paths.join(", ") : "the group's config path";
   }, [configuredGroups]);
 
+  /**
+   * What an override starts from, which is always a real config when there is
+   * one to start from.
+   *
+   * Editing is the point: an operator opening this wants the group's file with
+   * one value different, not an empty box and a JSON document to retype. So
+   * the only question is *whose*, and that is only a question when the deploy
+   * spans groups whose configs differ — then it seeds from the one covering
+   * the most of the picked boxes, and says so underneath, rather than leaving
+   * the work to be done from scratch over a difference that is usually a line.
+   */
   const overrideSeed = useMemo(() => {
-    const bodies = new Set(
-      configuredGroups.map((g) => g.mitmConfig).filter((c): c is string => Boolean(c)),
-    );
-    return bodies.size === 1 ? [...bodies][0]! : "";
-  }, [configuredGroups]);
+    const withConfig = configuredGroups.filter((group) => Boolean(group.mitmConfig));
+    if (withConfig.length === 0) return { text: "", from: null as string | null, others: 0 };
+
+    const counted = withConfig.map((group) => ({
+      group,
+      boxes: devices.filter((d) => picked.has(d.id) && d.groupId === group.id).length,
+    }));
+    // Most boxes first, and by name after that so the same deploy always
+    // starts from the same place rather than on whichever order a query
+    // happened to return.
+    counted.sort((a, b) => b.boxes - a.boxes || a.group.name.localeCompare(b.group.name));
+    const winner = counted[0]!.group;
+    const distinct = new Set(withConfig.map((group) => group.mitmConfig)).size;
+    return { text: winner.mitmConfig!, from: winner.name, others: distinct - 1 };
+  }, [configuredGroups, devices, picked]);
 
   /**
    * How many of the picked boxes actually have a config written, which is not
@@ -681,7 +696,7 @@ export function ManualInstall({
             configOverride === null ? (
               <button
                 type="button"
-                onClick={() => setConfigOverride(overrideSeed)}
+                onClick={() => setConfigOverride(overrideSeed.text)}
                 className="self-start text-xs text-muted-foreground underline underline-offset-4 hover:text-foreground"
               >
                 Use a different config for this deploy…
@@ -713,11 +728,22 @@ export function ManualInstall({
                   className="font-mono text-xs"
                   aria-label="The MITM config this deploy writes"
                   placeholder={
-                    overrideSeed
+                    overrideSeed.from
                       ? undefined
-                      : "The groups getting a config do not share one, so there was nothing to start from."
+                      : "No group here has a config yet, so there was nothing to start from."
                   }
                 />
+                {overrideSeed.from && overrideSeed.others > 0 ? (
+                  <p className="text-xs text-warning">
+                    Started from <span className="font-medium">{overrideSeed.from}</span>&apos;s
+                    config, the one covering most of the picked boxes.{" "}
+                    {overrideSeed.others === 1
+                      ? "One other group"
+                      : `${overrideSeed.others} other groups`}{" "}
+                    here {overrideSeed.others === 1 ? "has" : "have"} a different one, and what you
+                    write replaces {overrideSeed.others === 1 ? "it" : "them"} too.
+                  </p>
+                ) : null}
                 <p className="text-xs text-muted-foreground">
                   Written to <span className="font-mono">{configPaths}</span> on{" "}
                   <span className="text-foreground">{configWriteCount}</span> box
