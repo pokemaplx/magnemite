@@ -179,31 +179,51 @@ And `MAGNEMITE_SERVER` is the **hub's** URL, which is not the dashboard's.
   bootstrap that reported every step as fine.
 </Callout>
 
-## Apple Silicon runs no 32-bit ARM code, and the fleet's image has some
+## The 32-bit half of Android, and the CPUs that cannot run it
 
-This is the one item on this page that is not configuration, and the only part
-of a Mac VM that is harder than a VPS once provisioning is done.
+This is the one item on this page that is not configuration, and it is not
+really about Macs — a Mac is just the first machine most people own that has
+the problem.
 
 An arm64 Android normally ships two zygotes, 64-bit and 32-bit, because AOSP
-expects to run 32-bit apps. An Ampere or Graviton VPS obliges. **Apple Silicon
-cannot** — it executes no AArch32 at all, at any privilege level — so the
-32-bit half has nothing to run on. Redroid publishes `_64only` images for
-exactly this reason, and its maintainer's standing advice for Apple Silicon is
-to use one.
+expects to run 32-bit apps. Whether the 32-bit one can start at all is a
+property of the **CPU**, and Arm has been removing AArch32 generation by
+generation:
+
+| Core               | Machines                                       | AArch32 at EL0 |
+| ------------------ | ---------------------------------------------- | -------------- |
+| Neoverse N1        | Ampere Altra, AWS Graviton 2                   | yes            |
+| Neoverse V1        | AWS Graviton 3                                 | yes            |
+| Neoverse N2        | Alibaba Yitian 710                             | yes            |
+| Neoverse V2        | **AWS Graviton 4**, Google Axion, NVIDIA Grace | **no**         |
+| Neoverse V3        | **AWS Graviton 5**                             | **no**         |
+| Apple M1 and later | **every Apple Silicon Mac**                    | **no**         |
+
+On everything in the bottom half the 32-bit zygote has nothing to run on.
+Redroid publishes `_64only` images for exactly this reason, and its
+maintainer's standing advice for Apple Silicon is to use one.
 
 The fleet's image is not one of them. It builds on
 `abing7k/redroid:a11_magisk_arm`, which is Android 11 from
 `redroid/redroid:11.0.0-latest` — and upstream has `_64only` variants from
-Android **12** up, never for 11. There is no prebuilt Magisk-prerooted 64-bit-only
-Android 11 anywhere, because there is no Android 11 to build it from.
+Android **12** up, never for 11 — Android 11 predates the problem. So there is
+no prebuilt Magisk-prerooted 64-bit-only Android 11 anywhere, because there is
+no Android 11 to build it from.
+
+<Callout type="info" title="Which is why nothing is wrong today">
+  Every machine this fleet has run on executes AArch32 at EL0, so both zygotes start and the image
+  is correct. This is a constraint on what to **buy** next, not a fault to go and fix — and the
+  bootstrap's first step will not catch it, because a Graviton 4 answers `aarch64` exactly like a
+  Graviton 3 does.
+</Callout>
 
 <Callout type="warn" title="It will look like a network problem">
   The reported symptom on an M1 under Parallels is a container that runs and an `adb` that never
   connects ([redroid-doc#336](https://github.com/remote-android/redroid-doc/issues/336)) — Android
   never finishes booting, so nothing inside it answers. Here that surfaces as an instance marked
   **running, not enrolled**: the container is up, the agent in it never dialled out. That row is
-  worth trusting. It is the state the instances table exists to tell apart, and on a Mac it points
-  at the image rather than at the network.
+  worth trusting. It is the state the instances table exists to tell apart, and on one of the CPUs
+  above it points at the image rather than at the network.
 </Callout>
 
 The escape hatch is already in the data model: **the image is per machine**, so
