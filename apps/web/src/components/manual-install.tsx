@@ -27,6 +27,7 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/com
 import { Checkbox } from "@/components/ui/checkbox";
 import { ConfirmDialog } from "@/components/ui/confirm-dialog";
 import { Input, Textarea } from "@/components/ui/input";
+import { checkConfigTemplate } from "@/lib/config-placeholders";
 import { Label } from "@/components/ui/label";
 import { Progress } from "@/components/ui/progress";
 import { SearchInput } from "@/components/ui/search-input";
@@ -106,6 +107,9 @@ type Group = {
   preInstallHook: string | null;
   postInstallHook: string | null;
   mitmPackageName: string | null;
+  mitmConfigPath: string | null;
+  /** Null for a viewer, who has no override to seed — see the manual page. */
+  mitmConfig: string | null;
 };
 
 const CUSTOM = "__custom__";
@@ -179,6 +183,16 @@ export function ManualInstall({
   // On by default: writing the config is the point of deploying a MITM, and
   // there is no other way for an edited one to reach the boxes.
   const [writeConfig, setWriteConfig] = useState(true);
+  /**
+   * The config this deploy writes instead of each box's group one.
+   *
+   * `null` is "the group's", which is what every deploy did before this
+   * existed and what almost every deploy still wants. A string means this
+   * rollout carries its own — stored on the rollout, so a retry hours later
+   * writes the same thing rather than whatever the group says by then.
+   */
+  const [configOverride, setConfigOverride] = useState<string | null>(null);
+  const [configError, setConfigError] = useState<string | null>(null);
   const [note, setNote] = useState("");
 
   // --- from a link ---------------------------------------------------------
@@ -280,6 +294,25 @@ export function ManualInstall({
     () => (packageName ? groups.filter((g) => g.mitmPackageName === packageName) : []),
     [groups, packageName],
   );
+
+  /**
+   * What an override starts from: the group's own config, when the groups
+   * getting one agree on a single body. They usually do — one scanner, one
+   * site — and when they do not, starting from blank is the honest default
+   * rather than silently picking one group's to edit.
+   */
+  /** Where the override lands, which is still each group's own path. */
+  const configPaths = useMemo(() => {
+    const paths = [...new Set(configuredGroups.map((g) => g.mitmConfigPath).filter(Boolean))];
+    return paths.length > 0 ? paths.join(", ") : "the group's config path";
+  }, [configuredGroups]);
+
+  const overrideSeed = useMemo(() => {
+    const bodies = new Set(
+      configuredGroups.map((g) => g.mitmConfig).filter((c): c is string => Boolean(c)),
+    );
+    return bodies.size === 1 ? [...bodies][0]! : "";
+  }, [configuredGroups]);
 
   /**
    * How many of the picked boxes actually have a config written, which is not
@@ -501,6 +534,19 @@ export function ManualInstall({
   async function runInstall(): Promise<string | null> {
     if (!selected) return null;
 
+    // Checked here and not only on the server, because the server's answer
+    // arrives after the rollout would have started — and because this is the
+    // same check the group's own config goes through, from the same function.
+    if (configOverride !== null) {
+      const bad = configOverride.trim()
+        ? checkConfigTemplate(configOverride)
+        : "Write the config, or switch back to the group's — an empty one would write nothing.";
+      if (bad) {
+        setConfigError(bad);
+        return bad;
+      }
+    }
+
     const result = await startManualInstall({
       appVersionId: selected.id,
       deviceIds: [...picked],
@@ -508,6 +554,7 @@ export function ManualInstall({
       postInstallHook: postHook.trim() || null,
       hookMode: effectiveHookMode,
       writeConfig,
+      mitmConfig: configOverride,
       forceClean,
       skipUpToDate,
       maxConcurrency: null,
@@ -624,6 +671,65 @@ export function ManualInstall({
               that crashed, rolling a build back, or shipping a hotfix over a config somebody edited
               on the box by hand.
             </p>
+          ) : null}
+
+          {/* The override. Behind one click rather than always open, because
+              the group's config is the right answer almost every time and a
+              textarea full of JSON invites being edited when nothing needed
+              changing. */}
+          {writeConfig && canOperate ? (
+            configOverride === null ? (
+              <button
+                type="button"
+                onClick={() => setConfigOverride(overrideSeed)}
+                className="self-start text-xs text-muted-foreground underline underline-offset-4 hover:text-foreground"
+              >
+                Use a different config for this deploy…
+              </button>
+            ) : (
+              <div className="flex flex-col gap-2">
+                <div className="flex items-center justify-between gap-3">
+                  <span className="text-xs font-medium">This deploy&apos;s config</span>
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="sm"
+                    onClick={() => {
+                      setConfigOverride(null);
+                      setConfigError(null);
+                    }}
+                  >
+                    Back to the group&apos;s
+                  </Button>
+                </div>
+                <Textarea
+                  value={configOverride}
+                  onChange={(event) => {
+                    setConfigOverride(event.target.value);
+                    setConfigError(null);
+                  }}
+                  rows={12}
+                  spellCheck={false}
+                  className="font-mono text-xs"
+                  aria-label="The MITM config this deploy writes"
+                  placeholder={
+                    overrideSeed
+                      ? undefined
+                      : "The groups getting a config do not share one, so there was nothing to start from."
+                  }
+                />
+                <p className="text-xs text-muted-foreground">
+                  Written to <span className="font-mono">{configPaths}</span> on{" "}
+                  <span className="text-foreground">{configWriteCount}</span> box
+                  {configWriteCount === 1 ? "" : "es"}, instead of{" "}
+                  {configuredGroups.length === 1 ? "the group's" : "each group's"}. The path is
+                  still the group&apos;s — only what goes in the file changes. Placeholders work the
+                  same way, and this is kept on the rollout, so a retry hours from now writes this
+                  and not whatever the group says by then.
+                </p>
+                {configError ? <p className="text-xs text-destructive">{configError}</p> : null}
+              </div>
+            )
           ) : null}
         </div>
       ) : null}
@@ -1313,7 +1419,12 @@ export function ManualInstall({
             on <span className="text-foreground">{split.total}</span> box
             {split.total === 1 ? "" : "es"} and overwrites the config on{" "}
             <span className="text-foreground">{configWriteCount}</span> of them with{" "}
-            {configuredGroups.length === 1 ? "the group's" : "their group's"} current one.
+            {configOverride !== null
+              ? "the one written on this page"
+              : configuredGroups.length === 1
+                ? "the group's current one"
+                : "their group's current one"}
+            .
           </>
         }
         confirmLabel="Install and write"
@@ -1329,7 +1440,10 @@ export function ManualInstall({
             </span>{" "}
             {configuredGroups.length === 1 ? "has" : "have"} this app as their MITM. Whatever is on
             those boxes now, including anything edited on the box by hand, is replaced, and there is
-            no copy of it anywhere else.
+            no copy of it anywhere else.{" "}
+            {configOverride !== null
+              ? "This deploy carries its own config, so the group's is not what lands — and the group's is left exactly as it is."
+              : ""}
           </p>
           {forceClean ? (
             <p className="text-destructive">

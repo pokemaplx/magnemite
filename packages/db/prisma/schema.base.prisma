@@ -957,6 +957,20 @@ model Rollout {
   preInstallHook  String?
   postInstallHook String?
 
+  /// The MITM config for this rollout only, overriding the one on the device's
+  /// group. The same idea as the hooks above and for the same reason: a deploy
+  /// often needs one value different for one set of boxes, and editing the
+  /// group to get it changes every box in that group -- including the ones
+  /// this deploy is not touching.
+  ///
+  /// The body only. The path stays the group's, because that is where the
+  /// scanner reads it and it does not vary with the deploy -- which also means
+  /// a box whose group has no config path still takes none, override or not.
+  ///
+  /// Text for the reason `DeviceGroup.mitmConfig` is: a bare String is
+  /// VARCHAR(191) on MariaDB, and these are JSON documents.
+  mitmConfig String? @db.Text
+
   /// Which of the resolved hooks this rollout is allowed to run.
   ///
   /// Null on `preInstallHook` already means "fall back to the group", so there

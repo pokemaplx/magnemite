@@ -132,6 +132,11 @@ export default async function ManualPage() {
         preInstallHook: g.preInstallHook,
         postInstallHook: g.postInstallHook,
         mitmPackageName: g.mitmPackageName,
+        mitmConfigPath: g.mitmConfigPath,
+        // Only for somebody who could edit it anyway. A scanner's config
+        // holds its backend and often a key, and this page is readable by a
+        // viewer — who has no override to seed and no deploy to seed it for.
+        mitmConfig: canOperate ? g.mitmConfig : null,
       }))}
       builds={buildRows}
       mitmColumns={columns}

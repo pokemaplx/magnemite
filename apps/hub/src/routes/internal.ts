@@ -41,6 +41,8 @@ const createRolloutBody = z.object({
   postInstallHook: z.string().nullable().optional(),
   hookMode: z.enum(["NORMAL", "POST_ONLY", "NONE"]).optional(),
   writeConfig: z.boolean().optional(),
+  /** This rollout's own MITM config, standing in for the group's. */
+  mitmConfig: z.string().nullable().optional(),
   canaryCount: z.number().int().min(0).optional(),
   soakMinutes: z.number().int().min(0).optional(),
   maxConcurrency: z.number().int().positive().nullable().optional(),

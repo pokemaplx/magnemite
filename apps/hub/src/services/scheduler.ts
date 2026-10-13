@@ -206,7 +206,9 @@ async function dispatchQueued(maxConcurrentJobs: number) {
     // The candidate query already includes the device and its group, so this
     // costs no extra round trip inside the dispatch loop.
     if (rollout.writeConfig && job.device.group?.mitmPackageName === target.packageName) {
-      const config = renderConfig(job.device);
+      // The rollout's own config when it carries one, the group's otherwise --
+      // null here means "fall back", exactly as it does for the hooks above.
+      const config = renderConfig(job.device, rollout.mitmConfig);
       if (config?.ok) {
         message.config = config.file;
       } else if (config) {

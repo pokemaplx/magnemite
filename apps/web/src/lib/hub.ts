@@ -60,6 +60,8 @@ export type CreateRolloutInput = {
   hookMode?: HookMode;
   /** False leaves the group's MITM config alone. Defaults to writing it. */
   writeConfig?: boolean;
+  /** Override the device group's MITM config for this rollout only. */
+  mitmConfig?: string | null;
   canaryCount?: number;
   soakMinutes?: number;
   retryBackoffSeconds?: number;

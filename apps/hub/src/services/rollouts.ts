@@ -17,6 +17,11 @@ export type CreateRolloutInput = {
   hookMode?: RolloutHookMode;
   /** False leaves the group's MITM config alone. Defaults to writing it. */
   writeConfig?: boolean;
+  /**
+   * This rollout's MITM config, overriding the device group's for these
+   * installs only. Null or absent falls back to the group's, like the hooks.
+   */
+  mitmConfig?: string | null;
   canaryCount?: number;
   soakMinutes?: number;
   maxConcurrency?: number | null;
@@ -84,6 +89,7 @@ export async function createRollout(input: CreateRolloutInput) {
       postInstallHook: input.postInstallHook?.trim() || null,
       hookMode: input.hookMode ?? "NORMAL",
       writeConfig: input.writeConfig ?? true,
+      mitmConfig: input.mitmConfig?.trim() || null,
       canaryCount: canaryIds.size,
       soakMinutes: input.soakMinutes ?? 0,
       maxConcurrency: input.maxConcurrency ?? null,

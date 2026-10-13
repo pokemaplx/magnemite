@@ -192,12 +192,20 @@ function escapeForJsonString(value: string): string {
   return JSON.stringify(value).slice(1, -1);
 }
 
-/** Pure, so the scheduler can use the device it has already loaded. */
-export function renderConfig(device: DeviceForConfig): RenderOutcome {
+/**
+ * Pure, so the scheduler can use the device it has already loaded.
+ *
+ * `override` is one rollout's config standing in for the group's, the same way
+ * that rollout's hooks stand in for the group's. Only the body: the path is
+ * still the group's, because that is where the scanner reads it, and a box
+ * whose group has no path therefore takes no config either way.
+ */
+export function renderConfig(device: DeviceForConfig, override?: string | null): RenderOutcome {
   const group = device.group;
-  if (!group?.mitmConfigPath || !group.mitmConfig) return null;
+  const template = override ?? group?.mitmConfig;
+  if (!group?.mitmConfigPath || !template) return null;
 
-  const rendered = renderTemplate(group.mitmConfig, device);
+  const rendered = renderTemplate(template, device);
   if (!rendered.ok) return rendered;
 
   // The template was checked at save and the values are escaped above, so this

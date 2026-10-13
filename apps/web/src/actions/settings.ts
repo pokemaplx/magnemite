@@ -2,7 +2,7 @@
 
 import { revalidatePath } from "next/cache";
 import type { Prisma } from "@prisma/client";
-import { CONFIG_PLACEHOLDERS } from "@/lib/config-placeholders";
+import { checkConfigTemplate, CONFIG_PLACEHOLDERS } from "@/lib/config-placeholders";
 import {
   generateToken,
   getHubSettings as readHubSettings,
@@ -352,40 +352,6 @@ function normalisePath(p: string): string {
     else segments.push(segment);
   }
   return `/${segments.join("/")}`;
-}
-
-/**
- * One regex, matching anything between the braces and judging it by name
- * afterwards.
- *
- * Scanning for `[a-zA-Z0-9_.]` and substituting `[^}]*` was two different
- * ideas of what a placeholder is, and a token with a character in neither —
- * `{{device-name}}` — fell through both: never reported as unknown here, never
- * matched by the hub, and written to every box in the group verbatim. The hub's
- * `TOKEN` is now this same shape.
- */
-const TEMPLATE_TOKEN = /\{\{([^{}]*)\}\}/g;
-
-function checkConfigTemplate(template: string): string | null {
-  const known: readonly string[] = CONFIG_PLACEHOLDERS;
-  const unknown = [...template.matchAll(TEMPLATE_TOKEN)]
-    .map((match) => (match[1] as string).trim())
-    .filter((name) => !known.includes(name));
-  if (unknown.length > 0) {
-    return `Unknown placeholder ${[...new Set(unknown)].map((n) => `{{${n}}}`).join(", ")}. Known: ${CONFIG_PLACEHOLDERS.join(", ")}.`;
-  }
-
-  // A placeholder always stands in for a JSON string, and the hub escapes what
-  // it substitutes so it stays one. Checking with a quoted stand-in is what
-  // makes that the rule rather than an accident: `"workers": {{device.name}}`
-  // is refused here, which is what lets the hub escape without having to ask
-  // whether the token sat inside quotes.
-  try {
-    JSON.parse(template.replace(TEMPLATE_TOKEN, "PLACEHOLDER"));
-  } catch (err) {
-    return `The config is not valid JSON: ${err instanceof Error ? err.message : String(err)}`;
-  }
-  return null;
 }
 
 export async function createGroup(_prev: ActionState, formData: FormData): Promise<ActionState> {
