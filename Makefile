@@ -69,13 +69,22 @@ module: agent ## Package the Magisk module zip into dist/
 # install, so unlike the Magisk zip it takes no SERVER or TOKEN — those are
 # properties on the docker command line, and the image stays free of secrets.
 #
-# Magisk-prerooted, because Cosmog needs it. `_arm` in that tag is the *host*
-# architecture, not a 32-bit guest: the image is linux/arm64, which is why the
-# Dockerfile copies the arm64 agent and the arm64-only policy still holds.
-# 64-bit only, which is what lets a container boot on a CPU without AArch32 --
-# Apple Silicon and Graviton 4 upwards. The Dockerfile says why at length, and
-# the 64only variants start at Android 12.
-REDROID_BASE ?= redroid/redroid:12.0.0_64only-latest
+# The base image and the Magisk version are **not** defaulted here. They are
+# ARG defaults in the Dockerfile, and that is deliberate.
+#
+# The bootstrap builds this image on each machine with a plain
+# `docker build -f ./redroid/Dockerfile .` and no --build-arg, so the
+# Dockerfile's defaults are what the entire fleet actually gets. A second
+# default here could drift from it, and the failure would be silent in the
+# worst way: one tag meaning two different images depending on who ran the
+# build. To upgrade the Android version or Magisk, edit the Dockerfile.
+#
+# Both stay overridable for an experiment -- `make redroid REDROID_BASE=...` --
+# and are passed through only when set.
+REDROID_BASE   ?=
+MAGISK_VERSION ?=
+REDROID_ARGS    = $(if $(REDROID_BASE),--build-arg REDROID=$(REDROID_BASE))
+REDROID_ARGS   += $(if $(MAGISK_VERSION),--build-arg MAGISK=$(MAGISK_VERSION))
 # Versioned by what is *in* the image -- the base, the start script, the .rc --
 # and deliberately not by the agent version.
 #
@@ -84,17 +93,12 @@ REDROID_BASE ?= redroid/redroid:12.0.0_64only-latest
 # rendered `image:` line, and make compose recreate every container on the
 # machine: a full Android cold boot each, to deliver a binary the containers
 # would have swapped in seconds with a syscall.Exec.
-# Which Magisk the image takes its busybox from. Pinned rather than latest,
-# because it is a binary that runs as root on every box, and the one that is
-# pinned is the one that was proven on a machine.
-MAGISK_VERSION ?= v30.7
 REDROID_VERSION ?= $(shell awk -F= '/^redroid=/ { print $$2 }' VERSION)
 REDROID_TAG     ?= magnemite/redroid:$(REDROID_VERSION)
 
 .PHONY: redroid
 redroid: agent ## Build the Redroid image with the agent baked in (arm64 host)
-	docker build -f agent/redroid/Dockerfile --build-arg REDROID=$(REDROID_BASE) \
-		--build-arg MAGISK=$(MAGISK_VERSION) -t $(REDROID_TAG) agent
+	docker build -f agent/redroid/Dockerfile $(REDROID_ARGS) -t $(REDROID_TAG) agent
 	@echo "Image: $(REDROID_TAG)"
 
 # Narrow every compose target to one service: `make build up SERVICE=web`

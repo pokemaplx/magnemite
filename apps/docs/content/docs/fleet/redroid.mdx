@@ -125,10 +125,17 @@ full Android cold boot each, to deliver a binary the boxes would have swapped
 in seconds on their own. Bump `redroid=` when the base image, the start script
 or the init service changes.
 
-The base image is `REDROID_BASE`, default
-`redroid/redroid:12.0.0_64only-latest` — the official image, and **64-bit
-only**. Magisk is not inherited from it; the build injects it, pinned by
-`MAGISK_VERSION`.
+The base image is `redroid/redroid:12.0.0_64only-latest` — the official
+image, and **64-bit only**. Magisk is not inherited from it; the build injects
+it, pinned to one version.
+
+Both values live as `ARG` defaults **in the Dockerfile** and nowhere else,
+which is also how you change them. The bootstrap builds this image on each
+machine with a plain `docker build` and no `--build-arg`, so the Dockerfile's
+defaults are what the whole fleet gets; a second default in the `Makefile`
+could drift from it and give one tag two meanings depending on who ran the
+build. `make redroid REDROID_BASE=… MAGISK_VERSION=…` still overrides either
+one for an experiment.
 
 ### Why 64-bit only
 
