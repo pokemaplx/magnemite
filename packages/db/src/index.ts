@@ -376,7 +376,21 @@ export async function updateRedroidSettings(patch: Partial<RedroidSettingsValues
 // can import them without this one's PrismaClient coming with them, and are
 // re-exported here so server code reaches them where it reaches everything
 // else.
-export * from "./instance-name.js";
+// Extensionless, and that extension is the whole story of one broken deploy.
+//
+// This package resolves with `moduleResolution: "bundler"`, where a relative
+// specifier carries no extension. `./instance-name.js` is the NodeNext
+// convention and there is no such file on disk -- `tsc` substitutes the
+// extension and says nothing, and so does esbuild, so the mistake survives
+// every check this repo runs. Next's webpack resolves it literally and fails
+// with `Module not found: Can't resolve './instance-name.js'`, and because
+// `src/lib/auth.ts` imports this module, the failure lands on *every* page
+// rather than on the one that wanted a name template.
+//
+// It is also why `pnpm typecheck` could not catch it. The web tsconfig
+// includes `.next/types/**/*.ts`, so a checkout with no `.next` typechecks
+// strictly less than the build does.
+export * from "./instance-name";
 
 /**
  * How many containers a machine can hold, and what it would cost.
