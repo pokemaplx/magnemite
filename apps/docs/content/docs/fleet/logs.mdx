@@ -24,6 +24,28 @@ A snapshot, collected on demand and downloaded through the browser.
   without dropping the fleet](/docs/deployment/coolify#deploying-without-dropping-the-fleet).
 </Callout>
 
+### Collected automatically after an outage
+
+Both tools above need the box **online**, which is exactly what it was not
+while the thing you are investigating happened. The box's own `agent.log`
+survives the gap on its disk, so the fix is to fetch it on the way back rather
+than to ask for it afterwards.
+
+Turn on **Collect logs on recovery** in _Settings → Tuning_. When a box returns
+from an outage long enough to have flipped it offline, the hub collects a
+bundle by itself and files it against that episode — it then hangs off the row
+in _Connectivity_, see [where a box went](/docs/fleet/connectivity).
+
+It ships **off**. It runs a collection on a box in somebody's living room and
+costs that box's uplink, so it is something to turn on deliberately. Once on,
+three limits keep it sane: nothing is collected for a gap shorter than the
+offline timeout, at most one capture per box an hour, and a fleet-wide ceiling
+per hour so that an outage at the hub end does not bring fifty simultaneous
+uploads back with the fleet.
+
+Automatic captures are kept separately from the ones you ask for, so a box that
+flapped three times cannot evict the bundle you were waiting on.
+
 ## Live logs
 
 A log as it is written, streamed while the panel is open. The source picker

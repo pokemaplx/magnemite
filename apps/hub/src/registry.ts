@@ -10,6 +10,14 @@ export type Connection = {
   agentVersion: string | null;
   /** ro.product.cpu.abi, so an agent update picks the right binary. */
   abi: string | null;
+  /**
+   * The agent's own id for this connection, from its hello.
+   *
+   * Lives here rather than on the Device row because it describes the socket,
+   * not the box: it is what lets a connectivity episode name the stretch of
+   * the box's agent.log that explains it. Null from an older agent.
+   */
+  sessionId: string | null;
   connectedAt: number;
   lastSeenAt: number;
   /** Job the agent says it is running right now, from hello/heartbeat. */

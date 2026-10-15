@@ -1,6 +1,7 @@
 import type { deviceInfoSchema, deviceMetricsSchema } from "@magnemite/protocol";
 import type { z } from "zod";
 import { prisma } from "@magnemite/db";
+import { closeEpisode, openEpisode } from "./connectivity.js";
 import { getHubSettings } from "./hubSettings.js";
 import { bus } from "../bus.js";
 import { log } from "../log.js";
@@ -10,6 +11,12 @@ import { forgetReading, loadEnabledRules, recordReading, specFor } from "./monit
 
 type DeviceInfo = z.infer<typeof deviceInfoSchema>;
 type DeviceMetrics = z.infer<typeof deviceMetricsSchema>;
+
+/** Unix seconds from an agent, as a Date — or undefined, meaning "did not say". */
+function secondsToDate(value: number | null | undefined): Date | undefined {
+  if (value === null || value === undefined || value <= 0) return undefined;
+  return new Date(value * 1000);
+}
 
 function toBigInt(value: number | string | null | undefined): bigint | null {
   if (value === null || value === undefined) return null;
@@ -34,11 +41,20 @@ export async function markOnline(
     data: {
       status: "ONLINE",
       lastSeenAt: new Date(),
+      // It is beating again, so whatever stall the sweep stamped is over.
+      // Folded into the update that was happening anyway rather than given a
+      // statement of its own, which is also what makes it impossible to forget.
+      beatStaleSince: null,
       agentVersion: opts.agentVersion,
       // Replaced outright on every hello, empty list included: a rolled-back
       // agent has to stop claiming what it can no longer do.
       capabilities: opts.capabilities,
       publicIp: opts.publicIp,
+      // `?? undefined`, like the readings below: an older agent that does not
+      // send these must not wipe what a newer one established. Absence is the
+      // signal here, exactly as it is for `monitorRan`.
+      bootedAt: secondsToDate(opts.info.bootedAt),
+      agentStartedAt: secondsToDate(opts.info.agentStartedAt),
       // Only the agent knows the box's LAN address; keep whatever we had if an
       // older agent does not report one.
       localIp: opts.info.localIp ?? undefined,
@@ -54,7 +70,9 @@ export async function markOnline(
 
 export async function markOffline(deviceId: string) {
   await prisma.device
-    .update({ where: { id: deviceId }, data: { status: "OFFLINE" } })
+    // Plainly offline now, so a stall stamp from the sweep is no longer the
+    // right description of it: a box with no socket is not a mute one.
+    .update({ where: { id: deviceId }, data: { status: "OFFLINE", beatStaleSince: null } })
     .catch(() => undefined);
   // Whatever the box last said about itself is now stale by definition, and a
   // monitor rule acting on it would be acting on the past.
@@ -73,6 +91,7 @@ export async function applyMetrics(deviceId: string, metrics: DeviceMetrics) {
     data: {
       lastSeenAt: new Date(),
       status: "ONLINE",
+      beatStaleSince: null,
       freeBytes: toBigInt(metrics.freeBytes),
       totalBytes: toBigInt(metrics.totalBytes),
       uptimeSeconds: metrics.uptimeSeconds ?? null,
@@ -112,6 +131,10 @@ export async function applyMetrics(deviceId: string, metrics: DeviceMetrics) {
   // The live half of the same reading — the checks and the ANR list, which are
   // "how is this box right now" rather than history, and are replaced on every
   // beat rather than written to a row.
+  // It is back. Nothing happens here on a healthy box — the check is a map
+  // lookup against an empty map.
+  void closeEpisode(deviceId);
+
   recordReading(deviceId, metrics);
 
   // The row above is only ever "now". This is the history behind it, kept on
@@ -178,22 +201,76 @@ export async function applyMetrics(deviceId: string, metrics: DeviceMetrics) {
 /**
  * Safety net for sockets that die without a close frame — a box losing power
  * mid-heartbeat leaves the TCP connection hanging until the OS times it out.
+ *
+ * Silence past the timeout is two different faults wearing one symptom, and
+ * whether we still hold the box's socket is the whole difference. This used to
+ * ask only how long ago the row was written, so a connected box whose beat
+ * merely ran late was flipped to OFFLINE — and flipped back by the next beat.
+ * That pair, fired and recovered inside a minute with nothing having
+ * disconnected, is the whole of the "Box unreachable" noise.
  */
 export async function sweepOffline(timeoutSeconds: number) {
   const cutoff = new Date(Date.now() - timeoutSeconds * 1000);
   const stale = await prisma.device.findMany({
     where: { status: "ONLINE", OR: [{ lastSeenAt: { lt: cutoff } }, { lastSeenAt: null }] },
-    select: { id: true },
+    select: { id: true, name: true, lastSeenAt: true, beatStaleSince: true },
   });
   if (stale.length === 0) return 0;
 
-  await prisma.device.updateMany({
-    where: { id: { in: stale.map((d) => d.id) } },
-    data: { status: "OFFLINE" },
-  });
-  for (const d of stale) bus.publish({ kind: "device", deviceId: d.id });
-  log.info({ count: stale.length }, "marked devices offline");
-  return stale.length;
+  // A row saying ONLINE is a record of the last write, not of the link. Only
+  // the registry knows the link.
+  const connected = new Set(onlineDeviceIds());
+  const gone = stale.filter((d) => !connected.has(d.id));
+  const mute = stale.filter((d) => connected.has(d.id));
+
+  if (gone.length > 0) {
+    await prisma.device.updateMany({
+      where: { id: { in: gone.map((d) => d.id) } },
+      data: { status: "OFFLINE" },
+    });
+    for (const d of gone) {
+      bus.publish({ kind: "device", deviceId: d.id });
+      // No close frame ever arrived — a box that lost power leaves the socket
+      // hanging until the OS times it out — so this is the only place the
+      // episode gets opened at all.
+      void openEpisode(d.id);
+    }
+    log.info({ count: gone.length }, "marked devices offline");
+  }
+
+  // Reachable and mute. Deliberately no status write: the socket is there, and
+  // calling that OFFLINE is what announced healthy boxes as unreachable. It is
+  // stamped instead, so the dashboard can say what is actually wrong — and so
+  // a rule can act on the box, which it can, because that socket still carries
+  // exec, restart and reboot.
+  //
+  // One update per stall rather than one per sweep: already-stamped boxes are
+  // filtered out, so a box that stays mute for an hour costs one write.
+  for (const d of mute) {
+    if (d.beatStaleSince !== null) continue;
+    const since = d.lastSeenAt ?? cutoff;
+    await prisma.device.update({
+      where: { id: d.id },
+      // The beat it went quiet after, not the moment we noticed, which is up
+      // to a sweep interval later.
+      data: { beatStaleSince: since },
+    });
+    bus.publish({ kind: "device", deviceId: d.id });
+    // A stall is lost contact too, and it is the kind with no close code. If
+    // it later degenerates into a real disconnection, the close handler fills
+    // that code into this same row rather than opening a second one.
+    void openEpisode(d.id);
+    log.warn(
+      {
+        deviceId: d.id,
+        device: d.name,
+        quietForSeconds: Math.round((Date.now() - since.getTime()) / 1000),
+      },
+      "socket is open and the box has stopped beating",
+    );
+  }
+
+  return gone.length;
 }
 
 /**

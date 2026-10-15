@@ -8,6 +8,7 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { Switch } from "@/components/ui/switch";
 import { SaveButton } from "@/components/ui/save-button";
 import { NumberField, SettingGroup } from "@/components/settings/setting-fields";
 import type { MonitorSettingsRow } from "@/components/settings/monitoring-section";
@@ -146,6 +147,43 @@ export function MonitorTuningCard({
               unit="days"
               disabled={disabled}
               hint="Set 0 to keep data history forever."
+            />
+          </SettingGroup>
+
+          <SettingGroup title="Diagnostics">
+            <label className="flex items-start justify-between gap-4">
+              <span className="flex flex-col gap-1">
+                <span className="text-sm font-medium">Collect logs when a box comes back</span>
+                <span className="text-xs text-muted-foreground">
+                  The window that explains an unreachable alert is gone by the time you read it —
+                  live logs and the zip both need the box online. This grabs the box&apos;s own
+                  agent.log on the way back instead, and files it against the outage. Off by
+                  default: it runs a collection on the box and costs its uplink.
+                </span>
+              </span>
+              <Switch
+                name="autoCollectLogsOnRecovery"
+                defaultChecked={settings.autoCollectLogsOnRecovery}
+                disabled={disabled}
+              />
+            </label>
+            <NumberField
+              name="autoCollectMinIntervalMinutes"
+              label="At most one per box every"
+              value={settings.autoCollectMinIntervalMinutes}
+              min={1}
+              unit="minutes"
+              disabled={disabled}
+              hint="A box that flaps all night would otherwise be collected from all night."
+            />
+            <NumberField
+              name="autoCollectMaxPerHour"
+              label="Fleet-wide ceiling"
+              value={settings.autoCollectMaxPerHour}
+              min={1}
+              unit="per hour"
+              disabled={disabled}
+              hint="An outage at the hub end brings every box back at once. Collecting from all of them together would be a second outage on top of the first."
             />
           </SettingGroup>
 

@@ -149,6 +149,27 @@ model Device {
 
   status        DeviceStatus @default(OFFLINE)
   lastSeenAt    DateTime?
+  /// Set while we still hold this box's socket and its heartbeats have stopped
+  /// anyway — reachable and mute, which is neither of the two statuses.
+  ///
+  /// There is deliberately no third DeviceStatus. `ONLINE` means "we have a
+  /// socket" in a dozen queries across the hub and the dashboard, and a third
+  /// value would make every one of them decide a question it has no business
+  /// deciding. Null is healthy; the value is the `lastSeenAt` the stall began
+  /// from. Cleared by the next beat, in the update that beat already does.
+  beatStaleSince DateTime?
+  /// When this Android last booted, as a wall-clock instant, from the agent's
+  /// hello. Null on an agent too old to report it.
+  ///
+  /// The discriminator the whole connectivity record rests on, and better than
+  /// uptime for it: uptime is measured when a beat is *generated*, so a slow
+  /// beat under-reports it, while this does not move at all unless the box
+  /// actually restarted.
+  bootedAt DateTime?
+  /// When the agent process started. Same boot with a different value means
+  /// the agent restarted — a self-update, a crash, an init respawn — which is
+  /// a different story from the box rebooting, and was previously a guess.
+  agentStartedAt DateTime?
   /// Address the socket came from. Behind the reverse proxy this is the same
   /// internal 10.x for every box, which is why the UI shows localIp instead.
   publicIp      String?
@@ -263,7 +284,8 @@ model Device {
   jobs           Job[]
   agentUpdates   AgentUpdate[]
   logBundles     DeviceLogBundle[]
-  screenshots    DeviceScreenshot[]
+  screenshots      DeviceScreenshot[]
+  connectionEvents DeviceConnectionEvent[]
   metricSamples  DeviceMetricSample[]
   packageSamples DevicePackageMetricSample[]
   rotomSamples   RotomSample[]
@@ -348,7 +370,27 @@ model DeviceLogBundle {
   requestedAt   DateTime  @default(now())
   completedAt   DateTime?
 
+  /// Who or what asked for it. The prune keeps the newest few *per reason*, so
+  /// a run of automatic captures cannot evict the bundle an operator asked for
+  /// — which is exactly what would happen with one shared ceiling.
+  reason DeviceLogBundleReason @default(OPERATOR)
+  /// The episode of lost contact this was collected to explain, when it was
+  /// collected for one.
+  ///
+  /// Set at creation rather than on success, so a capture that *failed* still
+  /// shows against the episode: "we asked and the box could not answer" is
+  /// more useful than a blank. SetNull rather than Cascade because the bundle
+  /// is still a real file once the episode has been pruned.
+  connectionEventId Int?
+  connectionEvent   DeviceConnectionEvent? @relation(fields: [connectionEventId], references: [id], onDelete: SetNull)
+
   @@index([deviceId, requestedAt])
+  @@index([connectionEventId])
+}
+
+enum DeviceLogBundleReason {
+  OPERATOR // somebody pressed the button
+  AUTO_RECOVERY // a box came back and the hub grabbed the window automatically
 }
 
 enum DeviceLogBundleState {
@@ -1364,6 +1406,7 @@ model Setting {
 /// is unknown, never a fault.
 enum MonitorSignal {
   AGENT_OFFLINE // the socket has been gone longer than the alert delay
+  AGENT_STALLED // the socket is open and the beats have stopped
   SERVICE_DOWN // a tracked package has no processes on the box
   APP_NOT_FOREGROUND // something else owns the screen
   APP_ANR // the package is sitting on an ANR dialog
@@ -1626,4 +1669,80 @@ model PushSubscription {
   updatedAt DateTime @updatedAt
 
   @@index([userId])
+}
+
+// ---------------------------------------------------------------------------
+// Connectivity
+// ---------------------------------------------------------------------------
+
+/// One stretch where Magnemite lost contact with a box, and what it was.
+///
+/// An interval, not a point: the question is never "when did it drop" but
+/// "what happened across that gap", and answering it needs both ends. Opened
+/// the moment contact is lost, closed by the beat or the hello that restores
+/// it, and left open — `endedAt` null — for a box that is away right now,
+/// which is also what makes "down since" a row rather than arithmetic.
+///
+/// The before/after pairs are the point of the table. A gap where the boot
+/// instant moved is a reboot; a gap where it did not and the socket never
+/// closed is an agent that stalled. Both halves are snapshotted rather than
+/// read back later, so no ordering against `markOnline` can lose them.
+model DeviceConnectionEvent {
+  /// An autoincrement for the reason DeviceMetricSample has one: a flapping
+  /// fleet writes a lot of these, and a cuid is bigger than the row.
+  id       Int    @id @default(autoincrement())
+  deviceId String
+  device   Device @relation(fields: [deviceId], references: [id], onDelete: Cascade)
+
+  /// The last moment the box was known to be there — its `lastSeenAt` as it
+  /// stood, not when we noticed, which is up to a sweep interval later.
+  startedAt       DateTime
+  endedAt         DateTime?
+  durationSeconds Int?
+  /// Null while the episode is open: we do not know yet, and a guess is worse
+  /// than a blank.
+  cause DeviceConnectionCause?
+
+  /// How the socket went, when it went at all. Null for a stall, which is
+  /// exactly the case where the socket never closed.
+  closeCode   Int?
+  closeReason String?
+  /// The hub itself was down for part of this gap, so nothing about the box is
+  /// evidence of anything.
+  hubRestarted Boolean @default(false)
+
+  uptimeBefore       Int?
+  bootedAtBefore     DateTime?
+  agentStartedBefore DateTime?
+  agentVersionBefore String?
+  uptimeAfter        Int?
+  bootedAtAfter      DateTime?
+  agentStartedAfter  DateTime?
+  agentVersionAfter  String?
+
+  /// `getprop sys.boot.reason`, read with one exec and only once the
+  /// classification already says the box rebooted. Null on a container, which
+  /// has no boot reason to give — the honest answer, not a missing one.
+  bootReason String?
+  /// The agent's id for the session that replaced the one that died, so an
+  /// episode names a stretch of the box's own agent.log.
+  sessionAfter String?
+
+  /// The card's and the drill-down's query: one box, one window.
+  @@index([deviceId, startedAt])
+  /// The prune's, which is fleet-wide and has no device to narrow by.
+  @@index([startedAt])
+
+  logBundles DeviceLogBundle[]
+}
+
+enum DeviceConnectionCause {
+  HUB_RESTART // the hub was down for part of it; says nothing about the box
+  REPLACED // a second socket for the same device took over
+  DEVICE_DELETED // the row was gone when it dialled in
+  TERMINATED_BY_HUB // it stopped answering our keepalive and we hung up
+  LINK_LOST // the socket went without a goodbye; the process did not restart
+  AGENT_RESTART // same boot, new agent process
+  REBOOT // the box itself restarted
+  HEARTBEAT_STALL // the socket never closed and the beats stopped
 }

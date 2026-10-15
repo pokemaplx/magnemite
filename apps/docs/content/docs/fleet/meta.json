@@ -12,6 +12,7 @@
     "configs",
     "health",
     "monitoring",
+    "connectivity",
     "maintenance",
     "logs",
     "rotom"

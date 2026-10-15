@@ -267,12 +267,14 @@ export async function updateMetricHistory(
   // already stored on the next prune.
   const metricsRetentionDays = int("metricsRetentionDays", 0);
   const rotomRetentionDays = int("rotomRetentionDays", 0);
+  const connectionRetentionDays = int("connectionRetentionDays", 0);
 
   if (
     metricsSampleSeconds === null ||
     rotomSampleSeconds === null ||
     metricsRetentionDays === null ||
-    rotomRetentionDays === null
+    rotomRetentionDays === null ||
+    connectionRetentionDays === null
   ) {
     return {
       error: "Every field needs a whole number — 1 or more for the intervals, 0 or more for days.",
@@ -300,6 +302,7 @@ export async function updateMetricHistory(
     metricsRetentionDays,
     rotomSampleSeconds,
     rotomRetentionDays,
+    connectionRetentionDays,
   };
   await updateHubSettingsInDb(patch);
 

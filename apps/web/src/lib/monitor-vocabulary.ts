@@ -24,6 +24,7 @@ import {
   Unplug,
   WifiOff,
   Zap,
+  PlugZap,
 } from "lucide-react";
 
 /**
@@ -176,6 +177,20 @@ export const SIGNALS: SignalMeta[] = [
     // The one signal that means the same thing on both. A machine dials out,
     // heartbeats and goes quiet exactly like a box does, and the offline sweep
     // that notices never asked which it was.
+    kinds: ["BOX", "HOST"],
+    floor: null,
+    ceiling: null,
+  },
+  {
+    value: "AGENT_STALLED",
+    label: "Connected but silent",
+    hint: "The socket is open and the heartbeats stopped — the box is reachable and its agent is wedged. Unlike “Stopped answering the hub”, a restart or a reboot can actually be sent, so a ladder here will land.",
+    icon: PlugZap,
+    needsPackage: false,
+    probe: "none",
+    needsAgent: false,
+    // Same reasoning as AGENT_OFFLINE: a machine dials out and goes quiet the
+    // same way a box does, and the sweep that notices never asked which.
     kinds: ["BOX", "HOST"],
     floor: null,
     ceiling: null,

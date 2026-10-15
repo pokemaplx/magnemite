@@ -358,3 +358,64 @@ func TestMetricsAlwaysSendsPackagesAsAnArray(t *testing.T) {
 		t.Error(`"packages":null is the frame the hub drops`)
 	}
 }
+
+// blocking is a System whose Android questions never come back, which is what
+// a box looks like while its framework is restarting: every `dumpsys` sits
+// there until its deadline.
+type blocking struct{ hostLike }
+
+func (blocking) PackageInfo(ctx context.Context, _ string) (proto.PackageInfo, error) {
+	<-ctx.Done()
+	return proto.PackageInfo{}, ctx.Err()
+}
+func (blocking) ThirdPartyPackages(ctx context.Context) ([]proto.PackageInfo, error) {
+	<-ctx.Done()
+	return nil, ctx.Err()
+}
+
+// The property the heartbeat now rests on: the half of a reading that every
+// beat carries asks the box nothing that can hang. A beat that waits on
+// dumpsys is a beat that arrives after the hub has given up, and a box sitting
+// there perfectly healthy gets announced as unreachable.
+func TestBaseMetricsNeverWaitsOnTheFramework(t *testing.T) {
+	done := make(chan proto.DeviceMetrics, 1)
+	go func() { done <- BaseMetrics(blocking{}, []string{"com.nianticlabs.pokemongo"}) }()
+
+	select {
+	case m := <-done:
+		if m.UptimeSeconds != 42 {
+			t.Errorf("UptimeSeconds = %d, want the cheap reading 42", m.UptimeSeconds)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("BaseMetrics blocked on a package question; it must only read /proc")
+	}
+}
+
+// The same hazard as TestMetricsAlwaysSendsPackagesAsAnArray, guarded on the
+// path it moved to: BaseMetrics is what every single heartbeat sends now, so a
+// nil slice here drops every frame rather than the occasional one.
+func TestBaseMetricsAlwaysSendsPackagesAsAnArray(t *testing.T) {
+	data, err := json.Marshal(BaseMetrics(hostLike{}, nil))
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if !strings.Contains(string(data), `"packages":[]`) {
+		t.Errorf("want \"packages\":[] on the wire, got %s", data)
+	}
+}
+
+// "No answer" and "nothing installed" have to stay different at the hub: it
+// only marks an app uninstalled when complete is true, so a refusal must come
+// back incomplete rather than as an empty inventory.
+func TestPackageVersionsRefusalIsNotAnEmptyInventory(t *testing.T) {
+	infos, complete := PackageVersions(context.Background(), hostLike{}, []string{"com.x"}, true)
+	if infos == nil {
+		t.Error("infos is nil, which marshals as null")
+	}
+	if len(infos) != 0 {
+		t.Errorf("got %d packages from a System that refuses them", len(infos))
+	}
+	if complete {
+		t.Error("complete is true after ThirdPartyPackages failed; the hub would uninstall every app")
+	}
+}

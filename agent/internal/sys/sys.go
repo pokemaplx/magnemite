@@ -477,12 +477,15 @@ func (a *Android) Prop(ctx context.Context, name string) string {
 	return strings.TrimSpace(out)
 }
 
+// UptimeSeconds reads /proc directly rather than forking `cat`.
+//
+// It used to shell out on context.Background() — the only unbounded context in
+// this file — once per box every twenty seconds, from inside the heartbeat. A
+// fork that blocked took the beat with it, and a box whose beat never arrives
+// is marked offline while its socket is still open. /proc needs no shell, and
+// the parsing below already takes the raw text.
 func (a *Android) UptimeSeconds() int64 {
-	out, err := a.Shell(context.Background(), "cat /proc/uptime")
-	if err != nil {
-		return 0
-	}
-	return uptimeSeconds(out, readProc("/proc/1/stat"))
+	return uptimeSeconds(readProc("/proc/uptime"), readProc("/proc/1/stat"))
 }
 
 // uptimeSeconds is how long *this* Android has been up, which is not the same
@@ -1259,15 +1262,25 @@ func fallbackSerial(ctx context.Context, a *Android) string {
 	return fmt.Sprintf("unknown-%d", time.Now().UnixNano())
 }
 
-// Metrics gathers everything the hub wants on a heartbeat.
+// Metrics is both halves of a reading, for the one caller that wants a
+// complete picture and can afford to wait for it: the hello on a fresh
+// connection, where one `pm list` is nothing next to the reconnect itself.
 //
-// Cost matters here: this runs every 20 seconds on a box whose day job is
-// scanning. Load, memory and cpu count are three small /proc reads and are
-// always included. The package versions are not: `dumpsys package` prints a
-// wall of text per package, so only the packages the hub asked to track get
-// one, and the full third-party inventory — a single `pm list packages` — is
-// gathered on request rather than on every beat.
+// Every other caller wants the halves apart. See BaseMetrics.
 func Metrics(ctx context.Context, s System, packages []string, withInventory bool) proto.DeviceMetrics {
+	m := BaseMetrics(s, packages)
+	m.Packages, m.PackagesComplete = PackageVersions(ctx, s, packages, withInventory)
+	return m
+}
+
+// BaseMetrics is the half of a reading that cannot wedge: a statfs and a
+// handful of /proc reads, no forks, and so no context to time out.
+//
+// This is what a heartbeat carries every single time. Liveness must never wait
+// on something that can hang — a beat that arrives late is indistinguishable
+// at the hub from a box that is gone, and the cost of the other half is
+// unbounded on a box whose framework is restarting.
+func BaseMetrics(s System, packages []string) proto.DeviceMetrics {
 	free, total, _ := s.Disk("/data")
 	one, five, fifteen := s.LoadAvg()
 	memTotal, memAvailable := s.Memory()
@@ -1312,6 +1325,29 @@ func Metrics(ctx context.Context, s System, packages []string, withInventory boo
 		m.SwapFreeBytes = &swapFree
 	}
 
+	return m
+}
+
+// PackageVersions is the half that shells out: one `dumpsys package` per
+// tracked app, plus a `pm list packages` on an inventory pass.
+//
+// `dumpsys` talks to system_server, so on a box whose framework is restarting
+// every one of these blocks until its deadline — minutes of wall clock for a
+// reading that is only ever inventory. That is why it is collected away from
+// the beat, and why its caller is expected to carry on without it.
+//
+// An empty list is "no answer", not "nothing installed", and the hub reads it
+// that way: it only marks an app uninstalled when complete is true.
+func PackageVersions(
+	ctx context.Context,
+	s System,
+	packages []string,
+	withInventory bool,
+) (infos []proto.PackageInfo, complete bool) {
+	// Empty rather than nil, for the reason BaseMetrics gives: a nil slice
+	// marshals as JSON null and the hub's schema takes an array.
+	infos = []proto.PackageInfo{}
+
 	seen := map[string]bool{}
 	for _, pkg := range packages {
 		info, err := s.PackageInfo(ctx, pkg)
@@ -1319,25 +1355,25 @@ func Metrics(ctx context.Context, s System, packages []string, withInventory boo
 			continue
 		}
 		seen[info.PackageName] = true
-		m.Packages = append(m.Packages, info)
+		infos = append(infos, info)
 	}
 
 	if withInventory {
 		installed, err := s.ThirdPartyPackages(ctx)
 		if err == nil {
-			m.PackagesComplete = true
+			complete = true
 			for _, info := range installed {
 				// The tracked entry already carries a versionName, which the
 				// inventory does not: never overwrite it with the thinner one.
 				if seen[info.PackageName] {
 					continue
 				}
-				m.Packages = append(m.Packages, info)
+				infos = append(infos, info)
 			}
 		}
 	}
 
-	return m
+	return infos, complete
 }
 
 // ParseDumpsysVersion is exported for tests and for the verify step, which

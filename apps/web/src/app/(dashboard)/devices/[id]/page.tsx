@@ -8,6 +8,9 @@ import { requireUser } from "@/lib/session";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { DeviceConnectivityCard } from "@/components/device-connectivity-card";
+import { loadConnectivityTrend, loadEpisodes } from "@/lib/connectivity";
+import { actionPastLabel } from "@/lib/monitor-vocabulary";
 import { OnlineDot } from "@/components/status";
 import { DeviceControls } from "@/components/device-controls";
 import {
@@ -28,7 +31,7 @@ export default async function DevicePage({ params }: { params: Promise<{ id: str
   const user = await requireUser();
   const { id } = await params;
 
-  const [device, groups, targets, trend] = await Promise.all([
+  const [device, groups, targets, trend, connectivity, episodes] = await Promise.all([
     prisma.device.findUnique({
       where: { id },
       include: {
@@ -69,6 +72,10 @@ export default async function DevicePage({ params }: { params: Promise<{ id: str
     prisma.appTarget.findMany({ where: { enabled: true }, select: { packageName: true } }),
     // The last hour behind each meter on the Load card.
     loadRecentTrend(id),
+    // Two bands of the same hour: was the socket up, and were beats landing.
+    loadConnectivityTrend(id),
+    // A day is the window the card's counts are about.
+    loadEpisodes(id, 24 * 60 * 60 * 1000),
   ]);
 
   if (!device) notFound();
@@ -137,6 +144,17 @@ export default async function DevicePage({ params }: { params: Promise<{ id: str
             <p className="mt-1 font-mono text-xs text-muted-foreground">{device.serial}</p>
           </div>
           {!device.approved ? <Badge variant="warning">pending approval</Badge> : null}
+          {/* The dot is green because the socket is genuinely there. This is
+              the rest of the sentence: it is connected and has stopped saying
+              anything, which the two-value status has no room for. */}
+          {device.beatStaleSince ? (
+            <Badge
+              variant="warning"
+              title={`Connected, but nothing since ${device.beatStaleSince.toLocaleString()}`}
+            >
+              not reporting
+            </Badge>
+          ) : null}
           {/* Next to the name rather than in a card, because it changes what
               every other control on this page will do. */}
           {parked ? (
@@ -256,6 +274,14 @@ export default async function DevicePage({ params }: { params: Promise<{ id: str
           </CardContent>
         </Card>
 
+        <DeviceConnectivityCard
+          deviceId={device.id}
+          trend={connectivity}
+          episodes={episodes}
+          bootedAt={device.bootedAt}
+          agentStartedAt={device.agentStartedAt}
+          beatStaleSince={device.beatStaleSince}
+        />
         <DeviceLoadCard
           load={{
             deviceId: device.id,
@@ -294,7 +320,7 @@ export default async function DevicePage({ params }: { params: Promise<{ id: str
                     <span>{event.message}</span>
                     {event.action ? (
                       <Badge variant={event.actionOk === false ? "danger" : "secondary"}>
-                        {event.action}
+                        {actionPastLabel(event.action)}
                         {event.actionOk === false ? " failed" : ""}
                       </Badge>
                     ) : null}

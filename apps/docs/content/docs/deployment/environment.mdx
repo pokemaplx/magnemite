@@ -41,7 +41,8 @@ resource's **Environment** tab.
 <Callout type="info">
   Both live on the **hub** service: the hub syncs the admin account to them on every boot, and there
   is no `.env` inside the container. Changing `ADMIN_PASSWORD` and restarting the hub is the way
-  back in if the login is lost. Changing `ADMIN_EMAIL` later creates a *second* admin.
+  back in if the login is lost. Changing `ADMIN_EMAIL` renames that one account rather than adding
+  another, so the old address stops working as a login.
 </Callout>
 
 ## Hub

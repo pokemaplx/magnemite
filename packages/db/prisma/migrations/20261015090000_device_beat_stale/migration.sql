@@ -1,0 +1,14 @@
+-- A box that is reachable and mute, which was neither of the two statuses.
+--
+-- The offline sweep compared `lastSeenAt` alone and never asked whether we
+-- still held the box's socket, so a connected box whose beat merely ran late
+-- was flipped to OFFLINE and flipped back by the next one. That is the whole
+-- of the "Box unreachable / recovered in the same minute" pair: nothing had
+-- disconnected, and the alert said it had.
+--
+-- Deliberately not a third DeviceStatus. `status = 'ONLINE'` means "we have a
+-- socket" in a dozen queries across the hub and the dashboard, and a third
+-- value would make every one of them decide a question it has no business
+-- deciding. Null is healthy; the value is the `lastSeenAt` the stall began
+-- from, so "mute since" is a column rather than arithmetic.
+ALTER TABLE "Device" ADD COLUMN "beatStaleSince" TIMESTAMP(3);

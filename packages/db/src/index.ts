@@ -56,45 +56,87 @@ export function tokenPrefix(token: string): string {
  * `ADMIN_PASSWORD` and restart the hub, no seed step needed. Also called from
  * the optional seed script, so `pnpm db:seed` stays in sync with the same
  * logic rather than duplicating it.
+ *
+ * There is one account in Magnemite: nothing else creates a user and there is
+ * no sign-up. So a changed `ADMIN_EMAIL` is a *rename*, which is why the
+ * account is looked up by its credential row and not by email — upserting on
+ * email left the old admin behind, still valid with the old password. Renaming
+ * in place also keeps the sessions, the push subscriptions and the rollout
+ * history attached to it.
  */
 export async function syncAdminFromEnv(): Promise<void> {
   const email = process.env.ADMIN_EMAIL ?? "admin@example.com";
   const password = process.env.ADMIN_PASSWORD ?? "change-me-please";
-
-  // Better Auth keeps credentials on the account row, not the user. The auth
-  // config points its hasher at bcrypt precisely so this can create/update the
-  // admin without importing Better Auth here.
-  const admin = await prisma.user.upsert({
-    where: { email },
-    update: { role: "ADMIN" },
-    create: {
-      email,
-      name: "Admin",
-      emailVerified: true,
-      role: "ADMIN",
-    },
-  });
-
+  // Hashed before the transaction opens: bcrypt at cost 12 is deliberately
+  // slow, and none of it needs to hold a database transaction open.
   const passwordHash = await bcrypt.hash(password, 12);
-  const credential = await prisma.account.findFirst({
-    where: { userId: admin.id, providerId: CREDENTIAL_PROVIDER_ID },
+
+  const duplicates = await prisma.$transaction(async (tx) => {
+    const admins = await tx.user.findMany({
+      where: { role: "ADMIN", accounts: { some: { issuer: CREDENTIAL_ISSUER } } },
+      orderBy: { createdAt: "asc" },
+      select: { id: true, email: true },
+    });
+
+    // The oldest row is the original account; anything after it is a duplicate
+    // left by an `ADMIN_EMAIL` change made while this still upserted by email.
+    // A hand-made OPERATOR or VIEWER is not an admin and is left alone.
+    const [current, ...stale] = admins;
+
+    // Deleted before the rename, not after, so a duplicate still holding the
+    // new address cannot collide with `User.email`'s unique index — and so the
+    // account that survives is always the original one, with its name, its
+    // sessions and its rollout history, rather than whichever row happened to
+    // own the address. Sessions and push subscriptions cascade away with the
+    // duplicates; rollouts they started keep their history and lose only the
+    // attribution, because `Rollout.createdById` is SetNull.
+    for (const user of stale) await tx.user.delete({ where: { id: user.id } });
+
+    // `name` is only set on create: the account may have been given a better
+    // one since, and changing the address should not reset it.
+    const admin = current
+      ? await tx.user.update({
+          where: { id: current.id },
+          data: { email, emailVerified: true, role: "ADMIN" },
+        })
+      : await tx.user.create({
+          data: {
+            email,
+            name: "Admin",
+            emailVerified: true,
+            role: "ADMIN",
+          },
+        });
+
+    // Better Auth keeps credentials on the account row, not the user. The auth
+    // config points its hasher at bcrypt precisely so this can create/update
+    // the admin without importing Better Auth here.
+    const credential = await tx.account.findFirst({
+      where: { userId: admin.id, providerId: CREDENTIAL_PROVIDER_ID },
+    });
+
+    if (credential) {
+      await tx.account.update({
+        where: { id: credential.id },
+        data: { password: passwordHash, issuer: CREDENTIAL_ISSUER },
+      });
+    } else {
+      await tx.account.create({
+        data: {
+          userId: admin.id,
+          issuer: CREDENTIAL_ISSUER,
+          providerId: CREDENTIAL_PROVIDER_ID,
+          accountId: admin.id,
+          password: passwordHash,
+        },
+      });
+    }
+
+    return stale;
   });
 
-  if (credential) {
-    await prisma.account.update({
-      where: { id: credential.id },
-      data: { password: passwordHash, issuer: CREDENTIAL_ISSUER },
-    });
-  } else {
-    await prisma.account.create({
-      data: {
-        userId: admin.id,
-        issuer: CREDENTIAL_ISSUER,
-        providerId: CREDENTIAL_PROVIDER_ID,
-        accountId: admin.id,
-        password: passwordHash,
-      },
-    });
+  for (const user of duplicates) {
+    console.warn(`admin sync: removed the duplicate admin ${user.email}`);
   }
 }
 
@@ -186,6 +228,14 @@ export type HubSettingsValues = {
    * is three of them plus a margin.
    */
   deviceOfflineTimeoutSeconds: number;
+  /**
+   * How long to keep the record of lost contact with a box.
+   *
+   * Longer than the metric history by default, and deliberately: a box that
+   * drops once a week is a pattern you only see with weeks to look at, and
+   * one row per episode costs nothing next to one row per beat.
+   */
+  connectionRetentionDays: number;
 };
 
 const HUB_SETTINGS_DEFAULTS: HubSettingsValues = {
@@ -198,6 +248,7 @@ const HUB_SETTINGS_DEFAULTS: HubSettingsValues = {
   heartbeatSeconds: 20,
   agentUpdateConcurrency: 5,
   deviceOfflineTimeoutSeconds: 70,
+  connectionRetentionDays: 30,
 };
 
 /**
@@ -485,6 +536,29 @@ export type MonitorSettingsValues = {
   alertDedupeMinutes: number;
   /** Days of monitor history to keep. 0 keeps it forever. */
   eventRetentionDays: number;
+  /**
+   * Grab a box's logs automatically when it comes back from a real outage.
+   *
+   * Off by default, and deliberately: it runs a collection on boxes in
+   * somebody's living room and costs their uplink. The house rule is that
+   * anything which touches the fleet on its own initiative ships switched off
+   * and somebody reads it first.
+   *
+   * What it buys is the one thing the dashboard could never offer — the
+   * window that explains an unreachable alert. The box's agent.log survives
+   * the gap on its own disk; both of the tools that could fetch it need the
+   * box online, which is exactly what it was not.
+   */
+  autoCollectLogsOnRecovery: boolean;
+  /** At most one automatic capture per box in this window. */
+  autoCollectMinIntervalMinutes: number;
+  /**
+   * Fleet-wide ceiling per hour.
+   *
+   * A VPS outage brings every box back at once, and fifty simultaneous
+   * logcat dumps and uploads would be a second outage on top of the first.
+   */
+  autoCollectMaxPerHour: number;
   /** Empty turns notifications off while leaving remediation running. */
   discordWebhookUrl: string;
   /** A role to ping on CRITICAL only. Empty pings nobody. */
@@ -524,6 +598,9 @@ const MONITOR_SETTINGS_DEFAULTS: MonitorSettingsValues = {
   maxActionsPerDeviceHour: 4,
   maxRebootsPerDeviceDay: 6,
   alertDedupeMinutes: 30,
+  autoCollectLogsOnRecovery: false,
+  autoCollectMinIntervalMinutes: 60,
+  autoCollectMaxPerHour: 10,
   eventRetentionDays: 30,
   discordWebhookUrl: "",
   discordMentionRoleId: "",

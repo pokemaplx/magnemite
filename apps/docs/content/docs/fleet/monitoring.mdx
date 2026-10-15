@@ -32,14 +32,32 @@ answered.
 | **Health check is failing**                | a probe                      | The scanner is logging faults faster than work        |
 | **Loop has stalled**                       | a probe                      | The scanner is alive and has stopped doing anything   |
 | **Box is unreachable**                     | the hub                      | The socket has been gone past the offline timeout     |
+| **Box is connected but silent**            | the hub                      | The socket is open and the heartbeats stopped         |
 | **Rotom lost the box**                     | the hub                      | Rotom is not seeing it, or would not hand it work     |
 | **Rotom has the box but no workers**       | the hub                      | Connected to Rotom with nothing allocated on it       |
 | **Scanner is allocated and doing nothing** | the hub                      | A worker is open and no requests go through it        |
 
 The first five are knowable only on the box, so they need a recent agent, the
 tab counts how many boxes are behind, and rules skip a box that cannot answer.
-The last four the hub sees for itself and work on every box today; all of them
+The rest the hub sees for itself and work on every box today; the Rotom ones
 need [Rotom turned on](/docs/fleet/rotom).
+
+<Callout title="Unreachable and silent are different faults">
+  They look identical from the outside — nothing has been heard from the box —
+  and the remediation is opposite. **Unreachable** means the socket is gone, so
+  nothing can be sent: the ladder can only tell you. **Connected but silent**
+  means the socket is open and the agent stopped reporting, so a restart, a
+  shell command or a reboot all still land on it. It is the one fault class
+  here whose remedy is actually available.
+
+They never both fire on one box. Whichever one applies, the other reads
+_unknown_ and leaves its ladder where it was.
+
+A box goes silent while staying connected when its heartbeat is blocked —
+`dumpsys` waiting on a framework that is restarting is the usual cause, and
+on Redroid a `stop && start` does exactly that without the agent noticing.
+
+</Callout>
 
 ### What the box is costing itself
 
@@ -298,6 +316,9 @@ measured against the heartbeat or the offline timeout, which sit directly above.
 | **Actions per box per hour**    | 4       | Circuit breaker. Past it, one critical alert and the box is left alone. This is what bounds a rule that turns out to be wrong.                                  |
 | **Reboots per box per day**     | 6       | The same, counted separately, because a reboot costs a scanning session and the other actions do not. Reboots sent through Rotom count here too.                |
 | **Repeat an alert after**       | 30 min  | The same signal on the same box is not announced again inside this. The action still happens and is still recorded.                                             |
+| **Collect logs on recovery**    | off     | When a box comes back from a real outage, fetch its logs automatically so the window that explains it is not lost. See [Logs](/docs/fleet/logs).                |
+| **One capture per box every**   | 60 min  | A box that flaps all night would otherwise be collected from all night.                                                                                         |
+| **Captures per hour, fleet**    | 10      | An outage at the hub end brings every box back at once; collecting from all of them together is a second outage on top of the first.                            |
 | **Keep history for**            | 30 days | How long the Monitoring feed is kept. 0 keeps it forever.                                                                                                       |
 
 The monitor pass itself is not configurable: it runs once per heartbeat,

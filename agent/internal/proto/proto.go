@@ -52,6 +52,25 @@ type DeviceInfo struct {
 	// proxy's address on its own network, so this is the only way it learns
 	// where the box sits on the local network.
 	LocalIp string `json:"localIp,omitempty"`
+
+	// When this Android booted, as unix seconds. Derived from the same
+	// arithmetic UptimeSeconds already does -- /proc/uptime less pid 1's own
+	// age -- so inside a container it is that container's boot and not the
+	// host's.
+	//
+	// The hub's discriminator for what a gap in contact was: a gap this moved
+	// across is a reboot, a gap it did not is not, whatever else happened. An
+	// absolute instant rather than a duration so that comparing the two ends
+	// of a gap needs no arithmetic about how long the gap was.
+	BootedAt int64 `json:"bootedAt,omitempty"`
+	// When this agent process started, as unix seconds. Same boot with a
+	// different value here means the agent restarted -- a self-update, a
+	// crash, an init respawn -- which is a different story from the box
+	// restarting and was previously indistinguishable from one.
+	AgentStartedAt int64 `json:"agentStartedAt,omitempty"`
+	// This connection's own id, so an episode in the dashboard names a stretch
+	// of the box's agent.log instead of a time range to squint at.
+	SessionID string `json:"sessionId,omitempty"`
 }
 
 // ProcessStats is what one tracked app costs the box, summed over every

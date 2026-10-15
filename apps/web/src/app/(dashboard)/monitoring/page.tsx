@@ -57,6 +57,7 @@ export default async function MonitoringPage() {
         actionOk: event.actionOk,
         detail: event.detail,
         notified: event.notified,
+        recovery: event.recovery,
       }))}
     />
   );

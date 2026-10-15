@@ -2,7 +2,7 @@
 
 import { useMemo, useState, useTransition } from "react";
 import Link from "next/link";
-import { Binoculars, CircleCheck, Play } from "lucide-react";
+import { Binoculars, CircleCheck, Play, ChevronRight } from "lucide-react";
 import { runMonitorNow } from "@/actions/monitoring";
 import type { ActionState } from "@/actions/rollouts";
 import { Badge } from "@/components/ui/badge";
@@ -37,6 +37,14 @@ export type MonitorActivityRow = {
   actionOk: boolean | null;
   detail: string | null;
   notified: boolean;
+  /**
+   * Whether this row is the all-clear rather than the fault.
+   *
+   * It is the only thing that distinguishes them, and the badge used to guess
+   * from the level instead — so every fault on an INFO rule was painted green
+   * and labelled "Recovered".
+   */
+  recovery: boolean;
 };
 
 const LEVEL_FILTER = [
@@ -151,6 +159,7 @@ export function MonitorActivity({
                   <TableHead>What happened</TableHead>
                   <TableHead>What was done</TableHead>
                   <TableHead className="text-right">When</TableHead>
+                  <TableHead className="w-8" />
                 </TableRow>
               </TableHeader>
               <TableBody>
@@ -172,7 +181,7 @@ export function MonitorActivity({
 
                     <TableCell>
                       <span className="flex flex-wrap items-center gap-2">
-                        <LevelBadge level={event.level} />
+                        <LevelBadge level={event.level} recovery={event.recovery} />
                         <span>{event.message}</span>
                       </span>
                       <span className="mt-0.5 block text-xs text-muted-foreground">
@@ -182,7 +191,12 @@ export function MonitorActivity({
                         {event.notified ? " · announced" : ""}
                       </span>
                       {event.detail ? (
-                        <span className="mt-1 block max-w-xl truncate font-mono text-xs text-muted-foreground">
+                        // `title` so the truncated half is reachable without a
+                        // primitive this codebase does not have.
+                        <span
+                          title={event.detail}
+                          className="mt-1 block max-w-xl truncate font-mono text-xs text-muted-foreground"
+                        >
                           {event.detail}
                         </span>
                       ) : null}
@@ -201,6 +215,21 @@ export function MonitorActivity({
 
                     <TableCell className="whitespace-nowrap text-right text-xs text-muted-foreground">
                       <RelativeTime value={event.at} />
+                    </TableCell>
+
+                    <TableCell>
+                      {/* To the page that can say why, with the window already
+                          centred on this alert. A link rather than a drawer:
+                          the correlation is server-rendered, so there is no
+                          API to add — and the URL pastes into Discord, which
+                          is where the alert was read in the first place. */}
+                      <Button asChild variant="ghost" size="icon" aria-label="What happened">
+                        <Link
+                          href={`/devices/${event.deviceId}/connectivity?at=${encodeURIComponent(event.at)}`}
+                        >
+                          <ChevronRight className="h-4 w-4" />
+                        </Link>
+                      </Button>
                     </TableCell>
                   </TableRow>
                 ))}
@@ -286,10 +315,15 @@ function Stat({ label, value, tone }: { label: string; value: number; tone?: "da
   );
 }
 
-function LevelBadge({ level }: { level: string }) {
+function LevelBadge({ level, recovery }: { level: string; recovery: boolean }) {
+  // Recovery first, and from the column that actually says so. Reading it off
+  // the level meant an INFO *fault* — the seeded "Pogo not in focus" rule is
+  // one — rendered as a green "Recovered", which is a straight lie in the one
+  // place somebody goes to find out what happened.
+  if (recovery) return <Badge variant="success">Recovered</Badge>;
   if (level === "CRITICAL") return <Badge variant="danger">Critical</Badge>;
   if (level === "WARN") return <Badge variant="warning">Warning</Badge>;
-  return <Badge variant="success">Recovered</Badge>;
+  return <Badge variant="info">Info</Badge>;
 }
 
 function Empty({ enabled, ruleCount }: { enabled: boolean; ruleCount: number }) {

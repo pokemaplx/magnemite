@@ -175,6 +175,12 @@ func main() {
 		log.Printf("enrolled as %q", cfg.Name)
 	}
 
+	// Ties this log file to one boot and one process. It is the first thing
+	// you want when two stretches of agent.log look alike: a box that rebooted
+	// and a box whose agent respawned leave the same gap, and the uptime here
+	// is what tells them apart.
+	log.Printf("agent %s starting: pid %d, uptime %ds", version, os.Getpid(), system.UptimeSeconds())
+
 	a := agent.New(cfg, system, version, path)
 	// Nil on a box, which is what keeps the host block absent from everything a
 	// box sends rather than present and empty.

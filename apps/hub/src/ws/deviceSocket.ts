@@ -11,6 +11,7 @@ import { maybeUpdateAgent, recordAgentUpdateFailure } from "../services/agentRel
 import { resolveExec } from "../services/deviceCommands.js";
 import { dropStreams, failBundle, publishLogLines, rearmStreams } from "../services/deviceLogs.js";
 import { failScreenshot } from "../services/deviceScreenshots.js";
+import { markTerminatedByHub, openEpisode } from "../services/connectivity.js";
 import { applyMetrics, markOffline, markOnline, trackedPackages } from "../services/devices.js";
 import { ACTIVE_STATES, applyProgress, completeJob, logJobEvent } from "../services/jobs.js";
 import { specForDevice } from "../services/monitor.js";
@@ -83,6 +84,11 @@ export function attachDeviceSocket(server: Server) {
       const s = state.get(ws);
       if (!s) continue;
       if (!s.alive) {
+        // Worth naming, because the close that follows is otherwise just a
+        // 1006 like any other: this one is the hub's own decision, and the
+        // episode should say so rather than guess at a lost link.
+        log.warn({ deviceId: s.deviceId }, "terminating the socket: two keepalives unanswered");
+        markTerminatedByHub(s.deviceId);
         ws.terminate();
         continue;
       }
@@ -110,6 +116,7 @@ async function onConnection(ws: WebSocket, req: IncomingMessage, deviceId: strin
     remoteIp: ip,
     agentVersion: null,
     abi: null,
+    sessionId: null,
     connectedAt: Date.now(),
     lastSeenAt: Date.now(),
     currentJobId: null,
@@ -140,9 +147,22 @@ async function onConnection(ws: WebSocket, req: IncomingMessage, deviceId: strin
     );
   });
 
+  // Up here with the message listener rather than after the setup below, for
+  // the reason that listener is: `ws` is an EventEmitter, and an `error` with
+  // nothing listening is thrown — it would take the hub down. The window was
+  // the five queries below, which is exactly the window in which a box that
+  // has just lost power errors.
+  ws.on("error", (err) => log.warn({ err, deviceId }, "socket error"));
+
   const device = await prisma.device.findUnique({ where: { id: deviceId } });
   if (!device) {
     releaseSetup();
+    // `register` already ran, and the close handler that would undo it is not
+    // attached until the bottom of this function — so without this the entry
+    // stayed in the registry forever, and `isOnline` lied about a box that no
+    // longer exists. That matters a great deal now that the offline sweep and
+    // AGENT_OFFLINE both trust it.
+    unregister(deviceId, ws);
     ws.close(4004, "device deleted");
     return;
   }
@@ -183,15 +203,20 @@ async function onConnection(ws: WebSocket, req: IncomingMessage, deviceId: strin
 
   ws.on("close", (code, reason) => {
     unregister(deviceId, ws);
-    // Whatever logcat was running went with the socket — unless this is a late
-    // close from a socket that has already been replaced, in which case the
-    // live one's follows are none of its business.
-    if (!isOnline(deviceId)) dropStreams(deviceId);
+    // `unregister` only drops the socket when it is the registered one, so
+    // from here `isOnline` true means a *newer* socket is already live. Nothing
+    // this corpse has to say is about the box any more — which is why the
+    // follows were already guarded, and why `markOffline` writing OFFLINE over
+    // the new socket's ONLINE was the bug sitting next to that guard.
+    if (isOnline(deviceId)) {
+      log.info({ deviceId, code }, "a replaced socket closed; the newer one is live");
+      return;
+    }
+    dropStreams(deviceId);
     void markOffline(deviceId);
+    void openEpisode(deviceId, { closeCode: code, closeReason: reason.toString() || null });
     log.info({ deviceId, code, reason: reason.toString() }, "device disconnected");
   });
-
-  ws.on("error", (err) => log.warn({ err, deviceId }, "socket error"));
 
   // The box may have been offline while a rollout was created for it.
   nudge();
@@ -217,6 +242,22 @@ async function handleMessage(ws: WebSocket, deviceId: string, ip: string | null,
 
   switch (msg.type) {
     case "hello": {
+      // Kept on the connection so the periodic sweep can update a box that was
+      // busy — or over the batch limit — when it said hello.
+      //
+      // Set before anything that reads it back, which this used to be after.
+      // `applyMetrics` below closes the connectivity episode this hello ends,
+      // and that episode wants to name the session which ended it — so with
+      // the assignment further down, every episode's `sessionAfter` came out
+      // null, losing the one field that points into the box's own agent.log.
+      const conn = getConnection(deviceId);
+      if (conn) {
+        conn.agentVersion = msg.agentVersion;
+        conn.abi = msg.device.abi ?? null;
+        conn.sessionId = msg.device.sessionId ?? null;
+        conn.currentJobId = msg.currentJobId ?? null;
+      }
+
       await markOnline(deviceId, {
         agentVersion: msg.agentVersion,
         publicIp: ip,
@@ -229,15 +270,6 @@ async function handleMessage(ws: WebSocket, deviceId: string, ip: string | null,
       // has -- what docker is, and what containers it is holding.
       if (msg.host) await applyHostReport(deviceId, msg.host);
       await reconcileJobs(deviceId, msg.currentJobId ?? null, (m) => ws.send(JSON.stringify(m)));
-      // Kept on the connection so the periodic sweep can update a box that
-      // was busy — or over the batch limit — when it said hello.
-      const conn = getConnection(deviceId);
-      if (conn) {
-        conn.agentVersion = msg.agentVersion;
-        conn.abi = msg.device.abi ?? null;
-        conn.currentJobId = msg.currentJobId ?? null;
-      }
-
       // A box on an older binary than the hub ships gets told to update
       // itself. It re-execs and comes straight back with a new hello, which
       // is where the update is confirmed.

@@ -172,6 +172,12 @@ export async function updateMonitorSettings(
   const maxRebootsPerDeviceDay = int("maxRebootsPerDeviceDay", 1, stored.maxRebootsPerDeviceDay);
   const alertDedupeMinutes = int("alertDedupeMinutes", 0, stored.alertDedupeMinutes);
   const eventRetentionDays = int("eventRetentionDays", 0, stored.eventRetentionDays);
+  const autoCollectMinIntervalMinutes = int(
+    "autoCollectMinIntervalMinutes",
+    1,
+    stored.autoCollectMinIntervalMinutes,
+  );
+  const autoCollectMaxPerHour = int("autoCollectMaxPerHour", 1, stored.autoCollectMaxPerHour);
 
   if (
     rotomSyncSeconds === null ||
@@ -181,7 +187,9 @@ export async function updateMonitorSettings(
     maxActionsPerDeviceHour === null ||
     maxRebootsPerDeviceDay === null ||
     alertDedupeMinutes === null ||
-    eventRetentionDays === null
+    eventRetentionDays === null ||
+    autoCollectMinIntervalMinutes === null ||
+    autoCollectMaxPerHour === null
   ) {
     return {
       error:
@@ -256,6 +264,13 @@ export async function updateMonitorSettings(
     maxRebootsPerDeviceDay,
     alertDedupeMinutes,
     eventRetentionDays,
+    // Same shape as `enabled` above: only read when this form actually carried
+    // it, so a save from the other card cannot silently switch it off.
+    autoCollectLogsOnRecovery: submitted("autoCollectLogsOnRecovery")
+      ? formData.get("autoCollectLogsOnRecovery") === "on"
+      : stored.autoCollectLogsOnRecovery,
+    autoCollectMinIntervalMinutes,
+    autoCollectMaxPerHour,
     discordWebhookUrl: webhook,
     discordMentionRoleId: submitted("discordMentionRoleId")
       ? String(formData.get("discordMentionRoleId")).trim()

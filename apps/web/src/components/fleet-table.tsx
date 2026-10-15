@@ -82,6 +82,16 @@ export type DeviceRow = {
    * Update is refused while it is set.
    */
   maintenanceUntil: string | null;
+  /**
+   * ISO string while we still hold this box's socket and its heartbeats have
+   * stopped anyway, null otherwise.
+   *
+   * The third state the two-value status cannot say. `online` stays true
+   * because the socket is genuinely there — and that is the useful half: a
+   * restart or a reboot can still be sent to this box, which is not true of
+   * one that is simply gone.
+   */
+  beatStaleSince: string | null;
   model: string | null;
   androidVersion: string | null;
   agentVersion: string | null;
@@ -535,6 +545,17 @@ function DeviceRowView({
       <TableCell className="min-w-44">
         {!row.approved ? (
           <Badge variant="warning">pending approval</Badge>
+        ) : row.beatStaleSince ? (
+          // Ahead of maintenance and the job both: a box that has stopped
+          // reporting is not running that job either, and the dot beside the
+          // name says "online" because the socket really is there. Without
+          // this the row reads as perfectly healthy.
+          <Badge
+            variant="warning"
+            title={`Connected, but nothing since ${new Date(row.beatStaleSince).toLocaleString()}`}
+          >
+            not reporting
+          </Badge>
         ) : row.maintenanceUntil && new Date(row.maintenanceUntil).getTime() > Date.now() ? (
           // Ahead of the job, deliberately: a box with a job still queued on
           // it and a window open is not going to run that job, and showing the

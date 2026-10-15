@@ -12,6 +12,9 @@ icon: Users
 - Changing someone's password deletes their sessions, signing them out
   everywhere.
 - `ADMIN_EMAIL` must be a well-formed address. `admin@localhost` is rejected.
+- There is one account and no sign-up, so changing `ADMIN_EMAIL` renames it on the
+  next boot instead of adding a second admin. Sessions survive the rename; the
+  old address does not.
 
 <Callout type="info" title="Locked out?">
   The hub syncs the admin account to `ADMIN_EMAIL`/`ADMIN_PASSWORD` on every

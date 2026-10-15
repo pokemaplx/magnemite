@@ -384,10 +384,19 @@ function readSignal(
   hosts: Map<string, HostInstances>,
   offlineAfterMs: number,
   rotomStaleMs: number,
+  heartbeatMs: number,
 ): boolean | null {
   switch (rule.signal) {
     case "AGENT_OFFLINE": {
-      if (device.status === "ONLINE") return false;
+      // The registry before the row. A row is a record of the last write; the
+      // socket is the fact. Asking the row first is how a box whose socket had
+      // already come back stayed "unreachable" for a whole pass — and, with a
+      // sweep that could not tell a mute box from a gone one, how a box that
+      // never disconnected at all got announced as unreachable.
+      if (isOnline(device.id)) return false;
+      // No socket, and the row has not caught up. Nothing is known either way
+      // yet: establishing it is the sweep's job, and it runs on its own clock.
+      if (device.status === "ONLINE") return null;
       if (!device.lastSeenAt) return null;
       const gone = Date.now() - device.lastSeenAt.getTime();
       // The same timeout that decided the box is offline, rather than a second
@@ -398,6 +407,26 @@ function readSignal(
       // Below it nothing is known yet: a box is allowed to be away for a
       // moment without that being either a fault or a recovery.
       return gone >= offlineAfterMs ? true : null;
+    }
+
+    case "AGENT_STALLED": {
+      // Only knowable while we hold the socket. A box that is simply gone is
+      // AGENT_OFFLINE's fault, not this one — two ladders over one silence is
+      // what `rulesFor` exists to prevent, and it would be one box told off
+      // twice for the same quiet.
+      //
+      // The distinction earns its own signal because the remediation differs
+      // completely: this box is reachable, so exec, RESTART_APP and REBOOT all
+      // land on it. AGENT_OFFLINE can only ever tell you.
+      if (!isOnline(device.id)) return null;
+      if (!device.lastSeenAt) return null;
+      const late = Date.now() - device.lastSeenAt.getTime();
+      if (late >= offlineAfterMs) return true;
+      // Inside two beats it is plainly reporting. Between that and the timeout
+      // nothing is known: a beat is allowed to be late without that being
+      // either a fault or a recovery, which is the shape AGENT_OFFLINE has
+      // above, for the same reason.
+      return late <= heartbeatMs * 2 ? false : null;
     }
 
     case "ROTOM_DISCONNECTED": {
@@ -638,6 +667,7 @@ export async function evaluate(): Promise<void> {
         rules,
         settings,
         deviceOfflineTimeoutSeconds * 1000,
+        heartbeatSeconds * 1000,
         budgets,
         hosts,
       );
@@ -761,6 +791,7 @@ async function evaluateDevice(
   rules: RuleRow[],
   settings: Settings,
   offlineAfterMs: number,
+  heartbeatMs: number,
   budgets: Budgets,
   hosts: Map<string, HostInstances>,
 ): Promise<void> {
@@ -774,6 +805,7 @@ async function evaluateDevice(
       hosts,
       offlineAfterMs,
       settings.rotomStaleSeconds * 1000,
+      heartbeatMs,
     );
     if (bad === null) continue;
 
@@ -817,7 +849,23 @@ async function recover(
   // channels the fault did, which is the only answer that makes sense — a
   // recovery announced somewhere the fault was not is a message about
   // nothing.
-  const announce = rule.notifyRecovery && state.failures >= rule.threshold ? channelsOf(rule) : [];
+  //
+  // And "nobody was told" has a second cause that the threshold cannot see.
+  // `recover` clears the ladder but leaves `lastActionAt`, so the *next*
+  // episode reaches `escalate` and dies at the cooldown — no action, no row,
+  // no message. Its recovery then passed every test here and announced
+  // itself: a lone "recovered" in Discord for a fault nobody had been told
+  // about, with nothing in the feed to explain it. So the last word on this
+  // rule has to have actually gone out.
+  const fault = await prisma.monitorEvent.findFirst({
+    where: { deviceId: device.id, ruleId: rule.id, recovery: false },
+    orderBy: { at: "desc" },
+    select: { notified: true },
+  });
+  const announce =
+    rule.notifyRecovery && state.failures >= rule.threshold && fault?.notified === true
+      ? channelsOf(rule)
+      : [];
   await record(
     device,
     rule,
@@ -1254,6 +1302,23 @@ const SEEDS: Seed[] = [
     notifyChannels: [...MONITOR_CHANNELS],
     notifyLevel: "WARN",
     steps: [{ atFailure: 1, action: "RESTART_APP" }],
+  },
+  {
+    name: "Box connected but silent",
+    signal: "AGENT_STALLED",
+    packageName: null,
+    config: {},
+    // Two beats of grace on top of the timeout, because the whole point of
+    // this signal is that the box is still there: there is no urgency a
+    // disconnection would carry, and a slow beat should not be an alert.
+    threshold: 2,
+    cooldownSeconds: 600,
+    notifyChannels: [...MONITOR_CHANNELS],
+    notifyLevel: "WARN",
+    // Unlike "Box unreachable", a ladder here could actually do something —
+    // the socket is open. It still ships as notify-only, because what to do
+    // about a wedged agent is a decision for whoever reads the first one.
+    steps: [{ atFailure: 1, action: "NOTIFY_ONLY" }],
   },
   {
     name: "Box unreachable",

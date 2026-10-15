@@ -34,7 +34,7 @@ CREATE TABLE `DeviceScreenshot` (
     `state` ENUM('PENDING', 'READY', 'FAILED') NOT NULL DEFAULT 'PENDING',
     `path` VARCHAR(191) NULL,
     `sizeBytes` BIGINT NULL,
-    `error` TEXT NULL,
+    `error` VARCHAR(191) NULL,
     `requestedById` VARCHAR(191) NULL,
     `requestedAt` DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
     `completedAt` DATETIME(3) NULL,

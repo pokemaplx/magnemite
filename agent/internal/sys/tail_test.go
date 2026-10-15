@@ -6,10 +6,26 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
 )
+
+// skipOnWindows guards the two cases that rotate or truncate a file while the
+// follow still holds it open.
+//
+// Both are ordinary on the platform the agent actually runs on, and neither is
+// possible on Windows: an open handle blocks the rename and the truncate, so
+// the test fails on the setup rather than on the behaviour it is about. The
+// Windows build of the agent exists for the fake fleet, not for a box, so
+// there is nothing here that Windows needs to be right about.
+func skipOnWindows(t *testing.T) {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("rotating or truncating an open file is POSIX-only; the agent targets Linux/Android")
+	}
+}
 
 // readLines pulls lines off the stream until it has want of them, or gives up.
 // The follow polls once a second, so the deadline has to be generous.
@@ -110,6 +126,8 @@ func TestFileStreamFollowsAppends(t *testing.T) {
 // A log the app rotates keeps streaming, rather than following a file nobody
 // writes to any more.
 func TestFileStreamSurvivesRotation(t *testing.T) {
+	skipOnWindows(t)
+
 	dir := t.TempDir()
 	path := filepath.Join(dir, "app.log")
 	if err := os.WriteFile(path, []byte("before\n"), 0o644); err != nil {
@@ -144,6 +162,8 @@ func TestFileStreamSurvivesRotation(t *testing.T) {
 
 // Truncation in place — the other way logs get reset — is not a reason to stop.
 func TestFileStreamSurvivesTruncation(t *testing.T) {
+	skipOnWindows(t)
+
 	path := filepath.Join(t.TempDir(), "app.log")
 	if err := os.WriteFile(path, []byte("before\n"), 0o644); err != nil {
 		t.Fatal(err)

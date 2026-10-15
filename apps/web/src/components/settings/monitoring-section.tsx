@@ -35,6 +35,9 @@ export type MonitorSettingsRow = {
   maxActionsPerDeviceHour: number;
   maxRebootsPerDeviceDay: number;
   alertDedupeMinutes: number;
+  autoCollectLogsOnRecovery: boolean;
+  autoCollectMinIntervalMinutes: number;
+  autoCollectMaxPerHour: number;
   eventRetentionDays: number;
   discordWebhookUrl: string;
   discordMentionRoleId: string;

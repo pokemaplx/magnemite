@@ -1,0 +1,77 @@
+---
+title: Where a box went
+description: Every stretch Magnemite lost contact with a box, and what each one was.
+---
+
+A box going quiet used to leave nothing behind. The close code went to the
+hub's stdout and was gone with it, so "why did POKELX03 go unreachable at
+21:54" had no answer anywhere — and the two tools that could have answered it,
+[live logs and the log bundle](/docs/fleet/logs), both need the box online,
+which is precisely what it was not.
+
+Every loss of contact is now a row. Open **Connectivity** from a box's page, or
+follow the arrow on any row in **Monitoring** to land on the same page with the
+window already centred on that alert.
+
+## Lost contact is two different faults
+
+They look identical from the outside and they are not the same thing.
+
+- **The socket went.** The box lost power, lost the network, rebooted, or its
+  agent restarted. Nothing could be sent to it while it was away.
+- **The socket stayed and the beats stopped.** The box was reachable the whole
+  time; its agent was wedged. A restart, a shell command or a reboot would all
+  have landed on it.
+
+The second one used to be announced as _unreachable_ and recovered a minute
+later, because the offline sweep compared only how long ago a box last reported
+and never asked whether its socket was still there. It now reads as **not
+reporting** on the fleet table and the box's page, and the box keeps its
+`ONLINE` status, because the socket really is up.
+
+## What each episode says
+
+| Cause                            | What happened                                                                  |
+| -------------------------------- | ------------------------------------------------------------------------------ |
+| **the box rebooted**             | Its boot instant moved. Where Android says why, the reason is on the row.      |
+| **the agent restarted**          | Same boot, new agent process — a self-update, a crash, an init respawn.        |
+| **the connection dropped**       | The socket went without a goodbye and nothing restarted: power or network.     |
+| **stopped answering**            | Two keepalives went unanswered, so the hub hung up.                            |
+| **connected, stopped reporting** | The socket never closed. The box was reachable throughout.                     |
+| **reconnected early**            | A newer connection took over before the old one had timed out.                 |
+| **Magnemite restarted**          | The hub itself was down for part of the gap, so nothing here is about the box. |
+
+Expanding a row shows the close code, the uptime either side, the agent version
+either side, Android's boot reason when there is one, and the agent's session
+id — which is what to grep `agent.log` for.
+
+<Callout title="Uptime is the discriminator">
+  A reboot and an agent restart leave exactly the same gap. What separates them is that the box's
+  boot instant moves on one and not the other, so both ends of it are recorded against every
+  episode. An agent too old to report its boot instant falls back to uptime arithmetic, which is
+  less precise but still answers the question.
+</Callout>
+
+`Magnemite restarted` rows are hidden behind a toggle. They are honest, and
+they are not about the box.
+
+## The half hour around an alert
+
+Arriving from a Monitoring row, the page opens with the thirty minutes either
+side of it, drawn from everything that was writing at the time: connection
+episodes, whether beats were landing, whether Rotom could still see the box,
+monitor events, agent updates and installs.
+
+The two bands are the diagnosis and neither says it alone. Rotom is written on
+its own clock, so it keeps recording while the agent is silent:
+
+- **agent silent, Rotom still seeing it** — the box is alive and its agent is
+  wedged.
+- **both lost it together** — the box really went away.
+
+## How long it is kept
+
+**Settings → Tuning → Connectivity**, 30 days by default. One row per episode
+rather than one per heartbeat, so months of it costs almost nothing. Setting it
+to 0 turns the record off and drops what is stored; an outage still in progress
+is never pruned out from under the page showing it.

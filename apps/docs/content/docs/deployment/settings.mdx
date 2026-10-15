@@ -36,12 +36,13 @@ was offline adopts it when it comes back.
 
 ### Metric history
 
-| Setting                            | Default  | Min        | What it does                                                                      |
-| ---------------------------------- | -------- | ---------- | --------------------------------------------------------------------------------- |
-| Device metrics → **Sample every**  | `60s`    | heartbeat  | CPU, memory, storage, temperature and per-app usage, off the heartbeat.           |
-| Device metrics → **Keep for**      | `7 days` | `0`        | `0` turns device recording off and drops what is stored on the next prune.        |
-| Scanner (Rotom) → **Sample every** | `60s`    | Rotom sync | Workers, request rate and the four Rotom flags, off the Rotom sync.               |
-| Scanner (Rotom) → **Keep for**     | `7 days` | `0`        | `0` turns scanner recording off. The Scanner column and the rules are unaffected. |
+| Setting                            | Default   | Min        | What it does                                                                                                                                       |
+| ---------------------------------- | --------- | ---------- | -------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Device metrics → **Sample every**  | `60s`     | heartbeat  | CPU, memory, storage, temperature and per-app usage, off the heartbeat.                                                                            |
+| Device metrics → **Keep for**      | `7 days`  | `0`        | `0` turns device recording off and drops what is stored on the next prune.                                                                         |
+| Scanner (Rotom) → **Sample every** | `60s`     | Rotom sync | Workers, request rate and the four Rotom flags, off the Rotom sync.                                                                                |
+| Scanner (Rotom) → **Keep for**     | `7 days`  | `0`        | `0` turns scanner recording off. The Scanner column and the rules are unaffected.                                                                  |
+| Connectivity → **Keep for**        | `30 days` | `0`        | Every stretch a box was out of contact, and what it was. One row per episode rather than one per beat, so months of it is cheap. `0` turns it off. |
 
 <Callout type="warn" title="The heartbeat is what the others are measured in">
   **Offline after ≥ 3 × heartbeat** is refused on the card above, at the default 20s beat that is

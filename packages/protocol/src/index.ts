@@ -78,6 +78,18 @@ export const deviceInfoSchema = z.object({
    * report it.
    */
   localIp: z.string().nullish(),
+  /**
+   * When this Android booted and when this agent process started, as unix
+   * seconds, plus the id of the connection carrying this hello.
+   *
+   * All three absent from an agent too old to send them, and that absence is
+   * the signal — the same shape `monitorRan` uses. The hub falls back to
+   * uptime arithmetic for the one question it needs them for, so an old box
+   * still classifies, just less precisely.
+   */
+  bootedAt: z.number().int().nonnegative().nullish(),
+  agentStartedAt: z.number().int().nonnegative().nullish(),
+  sessionId: z.string().nullish(),
 });
 
 /**
