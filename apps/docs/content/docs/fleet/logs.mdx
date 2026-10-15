@@ -129,6 +129,14 @@ Opening the dialog takes the capture, and **Capture again** takes another.
   arrives as that sentence rather than as a broken image in the dialog.
 </Callout>
 
+<Callout type="warn" title="could not upload the screenshot: HTTP 404">
+  Same cause as the bundle's 404 above, on a different path: the edge is not routing `POST
+  /api/screenshots/*` to the hub, so the capture had nowhere to go. It is the newer of the two
+  routes, so an edge built before screenshots existed forwards logs and refuses pictures. Rebuild
+  the edge, see [deploying without dropping the
+  fleet](/docs/deployment/coolify#deploying-without-dropping-the-fleet).
+</Callout>
+
 ## What to look for in logs?
 
 | Symptom                           | Where                                                                          |

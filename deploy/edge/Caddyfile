@@ -52,6 +52,14 @@
 		reverse_proxy hub:{$HUB_PORT}
 	}
 
+	# --- Screenshots the boxes upload ---------------------------------------
+	# A PNG off `screencap`, pushed the same way and for the same reason a log
+	# bundle is: the socket caps a frame at 1 MB and a 1080p screen is
+	# regularly more than that. Authenticated by the device's own token.
+	handle /api/screenshots/* {
+		reverse_proxy hub:{$HUB_PORT}
+	}
+
 	# --- Live job/device updates for the dashboard --------------------------
 	# The *dashboard*, not the hub. /api/events is a Next route that checks the
 	# session cookie and then proxies the hub's /internal/events with the

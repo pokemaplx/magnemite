@@ -54,6 +54,14 @@
 		reverse_proxy hub:{$HUB_PORT}
 	}
 
+	# --- Screenshots the boxes upload ---------------------------------------
+	# A PNG off `screencap`, pushed the same way and for the same reason a log
+	# bundle is: the socket caps a frame at 1 MB and a 1080p screen is
+	# regularly more than that. Authenticated by the device's own token.
+	handle /api/screenshots/* {
+		reverse_proxy hub:{$HUB_PORT}
+	}
+
 	# --- Liveness -----------------------------------------------------------
 	handle /healthz {
 		reverse_proxy hub:{$HUB_PORT}

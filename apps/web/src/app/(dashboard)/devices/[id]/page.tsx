@@ -1,15 +1,15 @@
 import type { ReactNode } from "react";
 import Link from "next/link";
 import { notFound, redirect } from "next/navigation";
-import { ArrowLeft, RadioTower } from "lucide-react";
+import { ArrowLeft, RadioTower, History } from "lucide-react";
 import { CAPABILITY_SCREENSHOT, hasCapability } from "@magnemite/protocol";
 import { prisma } from "@magnemite/db";
 import { requireUser } from "@/lib/session";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import { DeviceConnectivityCard } from "@/components/device-connectivity-card";
-import { loadConnectivityTrend, loadEpisodes } from "@/lib/connectivity";
+import { ConnectivityBands } from "@/components/device-connectivity-bands";
+import { loadConnectivityTrend } from "@/lib/connectivity";
 import { actionPastLabel } from "@/lib/monitor-vocabulary";
 import { OnlineDot } from "@/components/status";
 import { DeviceControls } from "@/components/device-controls";
@@ -31,7 +31,7 @@ export default async function DevicePage({ params }: { params: Promise<{ id: str
   const user = await requireUser();
   const { id } = await params;
 
-  const [device, groups, targets, trend, connectivity, episodes] = await Promise.all([
+  const [device, groups, targets, trend, connectivity] = await Promise.all([
     prisma.device.findUnique({
       where: { id },
       include: {
@@ -74,8 +74,6 @@ export default async function DevicePage({ params }: { params: Promise<{ id: str
     loadRecentTrend(id),
     // Two bands of the same hour: was the socket up, and were beats landing.
     loadConnectivityTrend(id),
-    // A day is the window the card's counts are about.
-    loadEpisodes(id, 24 * 60 * 60 * 1000),
   ]);
 
   if (!device) notFound();
@@ -195,8 +193,21 @@ export default async function DevicePage({ params }: { params: Promise<{ id: str
         </Card>
 
         <Card>
-          <CardHeader>
+          {/* Same shape as the Agent and Load cards: the one control lives in
+              the header, so the body stays entirely readings. */}
+          <CardHeader className="flex-row items-center justify-between gap-2 space-y-0">
             <CardTitle className="text-sm">State</CardTitle>
+            <Button
+              asChild
+              variant="ghost"
+              size="icon"
+              className="-my-1 -mr-2 h-7 w-7"
+              title="Connectivity history"
+            >
+              <Link href={`/devices/${device.id}/connectivity`} aria-label="Connectivity history">
+                <History />
+              </Link>
+            </Button>
           </CardHeader>
           <CardContent className="flex flex-col gap-1 text-sm">
             <Field label="Group" value={device.group?.name ?? "—"} />
@@ -225,6 +236,7 @@ export default async function DevicePage({ params }: { params: Promise<{ id: str
               label="Last heartbeat"
               value={<DeviceHeartbeat lastSeenAt={device.lastSeenAt?.toISOString() ?? null} />}
             />
+            <ConnectivityBands trend={connectivity} beatStaleSince={device.beatStaleSince} />
           </CardContent>
         </Card>
 
@@ -274,14 +286,6 @@ export default async function DevicePage({ params }: { params: Promise<{ id: str
           </CardContent>
         </Card>
 
-        <DeviceConnectivityCard
-          deviceId={device.id}
-          trend={connectivity}
-          episodes={episodes}
-          bootedAt={device.bootedAt}
-          agentStartedAt={device.agentStartedAt}
-          beatStaleSince={device.beatStaleSince}
-        />
         <DeviceLoadCard
           load={{
             deviceId: device.id,
