@@ -135,9 +135,19 @@ func deviceSummary(ctx context.Context, system sys.System, agentVersion string) 
 	return out.String()
 }
 
-// Upload PUTs the bundle at url, authenticated with the device token — the
+// Upload posts the bundle at url, authenticated with the device token — the
 // same bearer the agent uses for artifact downloads.
 func Upload(ctx context.Context, url, deviceToken, path string) error {
+	return UploadFile(ctx, url, deviceToken, path, "application/zip", "/api/logs/*")
+}
+
+// UploadFile is the same courier for anything else the box has to hand over
+// out of band — a screenshot, today.
+//
+// `route` is only for the 404 hint: a box answering "404" tells you nothing,
+// and naming the route the edge is not forwarding tells you where to look. It
+// differs per feature, which is the whole reason this parameter exists.
+func UploadFile(ctx context.Context, url, deviceToken, path, contentType, route string) error {
 	file, err := os.Open(path)
 	if err != nil {
 		return err
@@ -154,7 +164,7 @@ func Upload(ctx context.Context, url, deviceToken, path string) error {
 		return err
 	}
 	req.Header.Set("Authorization", "Bearer "+deviceToken)
-	req.Header.Set("Content-Type", "application/zip")
+	req.Header.Set("Content-Type", contentType)
 	req.ContentLength = stat.Size()
 
 	resp, err := http.DefaultClient.Do(req)
@@ -164,7 +174,7 @@ func Upload(ctx context.Context, url, deviceToken, path string) error {
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
-		return fmt.Errorf("HTTP %d: %s%s", resp.StatusCode, strings.TrimSpace(string(body)), hint(resp.StatusCode))
+		return fmt.Errorf("HTTP %d: %s%s", resp.StatusCode, strings.TrimSpace(string(body)), hint(resp.StatusCode, route))
 	}
 	return nil
 }
@@ -172,11 +182,11 @@ func Upload(ctx context.Context, url, deviceToken, path string) error {
 // hint turns the two failures that are really deployment problems into
 // something the person reading the dashboard can act on. A box saying "404"
 // tells you nothing; "the edge is not routing this" tells you where to look.
-func hint(status int) string {
+func hint(status int, route string) string {
 	switch status {
 	case http.StatusNotFound:
-		return " — the reverse proxy in front of the hub is not routing POST /api/logs/*, " +
-			"so the upload never reached it (see the Caddyfile)"
+		return " — the reverse proxy in front of the hub is not routing POST " + route +
+			", so the upload never reached it (see the Caddyfile)"
 	case http.StatusUnauthorized:
 		return " — the hub rejected this box's device token"
 	default:

@@ -41,6 +41,41 @@ tab counts how many boxes are behind, and rules skip a box that cannot answer.
 The last four the hub sees for itself and work on every box today; all of them
 need [Rotom turned on](/docs/fleet/rotom).
 
+### What the box is costing itself
+
+Three more, and these are the cheapest signals in the feature: no probe, no
+agent version, nothing new on the wire. The agent has reported all of it on
+every heartbeat since before monitoring existed — it is what the **Load** card
+draws — and the hub simply never compared it against anything.
+
+| Signal                   | The number               | Compared against   |
+| ------------------------ | ------------------------ | ------------------ |
+| **Box is low on memory** | available / total memory | a percentage floor |
+| **Box is low on disk**   | free / total on `/data`  | a percentage floor |
+| **Box is running hot**   | the SoC's thermal zones  | a ceiling in °C    |
+
+The disk one is the one to turn on first, and not for the reason it looks: an
+install already refuses on low space and fails the job. A rule that clears
+caches at 10% turns a failed rollout into nothing happening at all.
+
+The temperature one only tells you, and there is no second rung to write. No
+action on the catalog cools a box down, and rebooting one does not — it comes
+back to the same cupboard. The answer is air.
+
+<Callout type="warn" title="A container with no memory limit can never trip the memory rule">
+  Inside a container the agent reads the **cgroup**, not `/proc/meminfo`, so ten boxes on one
+  machine each report their own memory rather than all reporting the machine's. That is what makes
+  this signal safe where a `/proc/loadavg` probe is not. The exception is a container with no memory
+  limit set at all: there is no cgroup ceiling to read, the reading falls back to the machine's, and
+  a 15% floor will never be crossed. The rule stays enabled and silent, which is the one failure
+  this feature otherwise refuses — so set a limit per machine, or use `HOST_MEMORY_LOW` for that
+  fleet.
+</Callout>
+
+A box whose ROM exposes no thermal sensor reads **unknown** rather than cold,
+which is common on TV hardware and means the rule simply never fires there.
+That is the usual rule working: unknown neither counts nor resets.
+
 The three Rotom signals are deliberately exclusive, so one fault never lights
 two ladders: a box Rotom has lost is only ever **Rotom lost the box**, a box
 with nothing allocated is only ever **no workers**, and **doing nothing** is
@@ -232,6 +267,10 @@ into a fleet rebooting itself in a loop:
   <Card
     title="Nothing acts just after the hub restarts"
     description="A restart drops every socket at once. The startup grace is what stops a deploy looking like a fleet-wide outage."
+  />
+  <Card
+    title="Nothing acts on a box in maintenance"
+    description="Somebody is working on it and its scanner was stopped on purpose — the install case with a person holding the box. See maintenance windows."
   />
   <Card
     title="Two ceilings per box"

@@ -3,7 +3,7 @@
 import { revalidatePath } from "next/cache";
 import { prisma } from "@magnemite/db";
 import { requireOperator } from "@/lib/session";
-import { type RotomDeviceAction, hub } from "@/lib/hub";
+import { type MaintenanceResult, type RotomDeviceAction, hub } from "@/lib/hub";
 import {
   planFromNames,
   planRename,
@@ -274,6 +274,96 @@ export async function collectDeviceLogs(
   });
 
   return { ok: true, bundleId };
+}
+
+/**
+ * Take one screenshot and hand back its id to render.
+ *
+ * Blocks exactly like the log bundle above, for a few seconds at most, so the
+ * dialog gets either an id to point an `<img>` at or the reason there is none.
+ *
+ * Audited with everything else a person does to a box, and that row matters
+ * more here than it does for a log: this is a picture of somebody's living
+ * room, and who looked is part of the answer to whether that was reasonable.
+ */
+export async function captureScreenshot(
+  deviceId: string,
+): Promise<ActionState & { screenshotId?: string }> {
+  const user = await requireOperator();
+  let screenshotId: string;
+  try {
+    ({ screenshotId } = await hub.captureScreenshot(deviceId, user.id));
+  } catch (err) {
+    return { error: toMessage(err) };
+  }
+
+  await prisma.auditLog.create({
+    data: {
+      userId: user.id,
+      userEmail: user.email,
+      action: "device.screenshot",
+      targetType: "Device",
+      targetId: deviceId,
+      meta: { screenshotId },
+    },
+  });
+
+  return { ok: true, screenshotId };
+}
+
+/**
+ * Park a box for a while, or put it back.
+ *
+ * `minutes` of 0 is the release. One action rather than two, because both
+ * halves run the group's matching hook and neither makes sense alone.
+ *
+ * What comes back includes what happened to that hook, which the dialog says
+ * out loud: "parked" that quietly meant "and the scanner is still running" is
+ * a different thing to be holding than what was asked for.
+ */
+export async function setDeviceMaintenance(
+  deviceId: string,
+  minutes: number,
+): Promise<ActionState & { until?: string | null; hookNote?: string | null }> {
+  const user = await requireOperator();
+
+  let result: MaintenanceResult;
+  try {
+    result = await hub.setDeviceMaintenance(deviceId, minutes, user.email);
+  } catch (err) {
+    return { error: toMessage(err) };
+  }
+
+  await prisma.auditLog.create({
+    data: {
+      userId: user.id,
+      userEmail: user.email,
+      action: minutes > 0 ? "device.maintenance.start" : "device.maintenance.end",
+      targetType: "Device",
+      targetId: deviceId,
+      meta: {
+        device: result.deviceName,
+        minutes,
+        until: result.until,
+        hookRan: result.hook.ran,
+        // The command itself, because "the hook failed" six weeks later is not
+        // a question this row can answer without it.
+        hookCommand: result.hook.command,
+        hookError: result.hook.error,
+      },
+    },
+  });
+
+  // The badge shows up on the fleet table and on the device page, and a parked
+  // box changes what the rollout forms will accept.
+  revalidateDeviceViews();
+  return {
+    ok: true,
+    until: result.until,
+    hookNote: result.hook.error
+      ? `The hook failed: ${result.hook.error}`
+      : (result.hook.skipped ?? null),
+  };
 }
 
 /**

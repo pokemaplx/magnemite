@@ -1,6 +1,7 @@
 import { prisma } from "@magnemite/db";
 import { log } from "../log.js";
 import { cacheVersion } from "./artifacts.js";
+import { notInMaintenance } from "./maintenance.js";
 import { createRollout } from "./rollouts.js";
 import { nudge } from "./scheduler.js";
 import { compareVersions } from "./sources/types.js";
@@ -51,8 +52,16 @@ export async function runAutoUpdate(appTargetId: string) {
   if (!latest) return null;
 
   // Anything the fleet is already running, or ahead of, is not an update.
+  // Parked boxes are left out of the count as well as out of the rollout. If
+  // the only box behind is one somebody is working on, there is nothing to
+  // ship: counting it would have this create a rollout every cycle that
+  // `createRollout` then refuses for having no target, which is a loop of log
+  // noise about a decision already made correctly.
   const installed = await prisma.devicePackage.findMany({
-    where: { packageName: target.packageName, device: { approved: true } },
+    where: {
+      packageName: target.packageName,
+      device: { approved: true, ...notInMaintenance() },
+    },
     select: { versionName: true },
   });
   const behind = installed.filter(

@@ -288,11 +288,17 @@ type Hello struct {
 // handler that implements it, not before.
 const (
 	CapabilityWriteConfig = "write_config"
+	// CapabilityScreenshot says this build knows collect_screenshot. The hub
+	// checks it so the dashboard can leave the menu item out rather than offer
+	// a button that waits half a minute and then says the box never answered
+	// -- which is what an unknown message type looks like from the other side,
+	// because the switch in handle() has no default branch.
+	CapabilityScreenshot = "screenshot"
 )
 
 // AgentCapabilities is what this binary claims it can do.
 func AgentCapabilities() []string {
-	return []string{CapabilityWriteConfig}
+	return []string{CapabilityWriteConfig, CapabilityScreenshot}
 }
 
 type Heartbeat struct {
@@ -346,6 +352,17 @@ type LogBundleResult struct {
 	BundleID string `json:"bundleId"`
 	OK       bool   `json:"ok"`
 	Error    string `json:"error,omitempty"`
+}
+
+// ScreenshotResult closes out a capture the box could not deliver. Like a
+// bundle's, only failures travel this way -- the upload landing is the hub's
+// proof of the other case, and a second signal would only be a way for the two
+// to disagree.
+type ScreenshotResult struct {
+	Type         string `json:"type"` // "screenshot_result"
+	ScreenshotID string `json:"screenshotId"`
+	OK           bool   `json:"ok"`
+	Error        string `json:"error,omitempty"`
 }
 
 // LogLines is a batch of live logcat lines. Dropped counts what was thrown
@@ -476,6 +493,15 @@ type CollectLogs struct {
 	BundleID  string `json:"bundleId"`
 	UploadURL string `json:"uploadUrl"`
 	MaxLines  int    `json:"maxLines"`
+}
+
+// CollectScreenshot asks for one `screencap`, uploaded to UploadURL with the
+// device token. The same courier arrangement a log bundle uses, and for the
+// same reason: a socket frame is capped at 1 MB and a 1080p PNG is not.
+type CollectScreenshot struct {
+	Type         string `json:"type"`
+	ScreenshotID string `json:"screenshotId"`
+	UploadURL    string `json:"uploadUrl"`
 }
 
 // LogStreamStart runs logcat live. DurationSeconds is a hard stop the agent

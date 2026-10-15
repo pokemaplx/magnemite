@@ -7,6 +7,7 @@ import { bus } from "../bus.js";
 import { env } from "../env.js";
 import { log } from "../log.js";
 import { listConnections } from "../registry.js";
+import { inMaintenance } from "./maintenance.js";
 
 /**
  * Agent self-updates, driven by the hub.
@@ -249,6 +250,21 @@ export async function maybeUpdateAgent(
 
   const { agentUpdateConcurrency } = await getHubSettings();
   if (inFlight.size >= agentUpdateConcurrency) return false;
+
+  // A box somebody is working on is not a box to swap the agent binary under:
+  // a self-update drops the socket and comes back as a different process, in
+  // the middle of whatever they are doing.
+  //
+  // Read here rather than at the top of the function, and deliberately: this
+  // is the only branch that acts, so the query costs one read per update
+  // rather than one per box per sweep. The connection cannot answer it either
+  // — it is held in memory from the box's hello and would be stale the moment
+  // somebody parked the box.
+  const parked = await prisma.device.findUnique({
+    where: { id: device.id },
+    select: { maintenanceUntil: true },
+  });
+  if (parked && inMaintenance(parked)) return false;
 
   inFlight.set(device.id, Date.now());
   send({ type: "agent_update", url: build.url, sha256: build.sha256, version: release.version });

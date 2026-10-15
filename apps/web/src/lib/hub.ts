@@ -49,6 +49,28 @@ async function call<T>(path: string, body?: unknown): Promise<T> {
  */
 export type HookMode = "NORMAL" | "POST_ONLY" | "NONE";
 
+/**
+ * What happened when a box was parked or released.
+ *
+ * `hook` is the half that is worth reporting: entering maintenance runs the
+ * group's pre-install hook to stop the scanner and leaving runs the
+ * post-install hook to start it again, and either can legitimately not happen
+ * — the group may have no hook, or the box may be offline. Both are states to
+ * say out loud rather than to paper over, because "parked" meaning "and the
+ * scanner is still running" is a different thing to be holding.
+ */
+export type MaintenanceResult = {
+  deviceName: string;
+  /** ISO timestamp, or null once released. */
+  until: string | null;
+  hook: {
+    command: string | null;
+    ran: boolean;
+    skipped: string | null;
+    error: string | null;
+  };
+};
+
 export type CreateRolloutInput = {
   appVersionId: string;
   deviceIds?: string[];
@@ -170,6 +192,21 @@ export const hub = {
    */
   collectDeviceLogs: (id: string, requestedById: string | null) =>
     call<{ bundleId: string }>(`/internal/devices/${id}/logs`, { requestedById }),
+  /**
+   * Ask a box what is on its screen. Waits like the bundle above, and for the
+   * same reason: the dialog renders the image as soon as this comes back.
+   */
+  captureScreenshot: (id: string, requestedById: string | null) =>
+    call<{ screenshotId: string }>(`/internal/devices/${id}/screenshot`, { requestedById }),
+  /**
+   * Park a box, or put it back with `minutes: 0`.
+   *
+   * It goes through the hub rather than the dashboard writing the column
+   * itself, for the one thing the dashboard cannot do: the group's hooks that
+   * stop and start the scanner need the box's live socket.
+   */
+  setDeviceMaintenance: (id: string, minutes: number, byEmail: string | null) =>
+    call<MaintenanceResult>(`/internal/devices/${id}/maintenance`, { minutes, byEmail }),
   /** Run a command on the box, as root, and get back what it printed. */
   execOnDevice: (id: string, command: string, timeoutSeconds?: number) =>
     call<{ ok: boolean; output: string; error: string | null }>(`/internal/devices/${id}/exec`, {

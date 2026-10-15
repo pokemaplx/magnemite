@@ -238,6 +238,23 @@ model Device {
   /// depend on the agent skip it rather than reading its silence as a fault.
   monitorReportedAt DateTime?
 
+  // --- Maintenance ---------------------------------------------------------
+  /// Until when somebody is working on this box by hand. While it is in the
+  /// future the box is left alone by everything the fleet does on its own
+  /// initiative — monitoring rules, auto-rollouts, join installs, agent
+  /// self-updates — and a rollout aimed straight at it is refused saying so,
+  /// rather than queued to land halfway through somebody's repair.
+  ///
+  /// A timestamp rather than a boolean, because the failure mode of a flag is
+  /// a box that quietly stops being watched: somebody sets it, forgets, and
+  /// six months later there is one box no rule has ever fired on. This one
+  /// runs out on its own.
+  ///
+  /// The diagnostics are deliberately *not* blocked — logs, live logs,
+  /// Execute, screenshots and reboot are the tools somebody in maintenance is
+  /// holding, and taking them away would be taking away the point.
+  maintenanceUntil DateTime?
+
   notes   String?
   groupId String?
   group   DeviceGroup? @relation(fields: [groupId], references: [id], onDelete: SetNull)
@@ -246,6 +263,7 @@ model Device {
   jobs           Job[]
   agentUpdates   AgentUpdate[]
   logBundles     DeviceLogBundle[]
+  screenshots    DeviceScreenshot[]
   metricSamples  DeviceMetricSample[]
   packageSamples DevicePackageMetricSample[]
   rotomSamples   RotomSample[]
@@ -268,6 +286,12 @@ model Device {
   /// Every fleet-wide query is "the boxes, by state". Leading on kind keeps
   /// the hosts out of it without a second scan.
   @@index([kind, status])
+  /// Read on every scheduler tick and every monitor pass, always as "which
+  /// boxes are parked right now". Declared here rather than left as a
+  /// hand-written partial index in the migration: Prisma compares the database
+  /// to this file, so an index it cannot see is an index the next
+  /// `migrate dev` writes a migration to drop.
+  @@index([maintenanceUntil])
 }
 
 /// One attempt at swapping the agent binary on a box.
@@ -331,6 +355,44 @@ enum DeviceLogBundleState {
   PENDING // asked for, waiting on the box
   READY // uploaded and downloadable
   FAILED // the agent could not collect it, or never answered
+}
+
+/// One `screencap` off a box, on request.
+///
+/// What it answers is the question no reading can: a box can be online,
+/// heartbeating, with the scanner process alive, and sitting on a dialog
+/// nobody has read. `APP_NOT_FOREGROUND` says the launcher owns the screen;
+/// this says *what is on it*.
+///
+/// Shaped like `DeviceLogBundle` and uploaded the same way, over HTTP with the
+/// box's own device token, because the socket caps a frame at 1 MB and a 1080p
+/// PNG is regularly more than that. Kept few and briefly: this is a look at a
+/// box, not an archive of what it has ever shown.
+model DeviceScreenshot {
+  id       String @id @default(cuid())
+  deviceId String
+  device   Device @relation(fields: [deviceId], references: [id], onDelete: Cascade)
+
+  state DeviceScreenshotState @default(PENDING)
+  /// Path inside ARTIFACT_DIR. Null until the upload lands.
+  path      String?
+  sizeBytes BigInt?
+  /// Why it never arrived. Null unless state is FAILED.
+  error     String?
+
+  /// Who asked. An id rather than a relation, for the same reason a log
+  /// bundle's is: the image outliving the account is not a reason to lose it.
+  requestedById String?
+  requestedAt   DateTime  @default(now())
+  completedAt   DateTime?
+
+  @@index([deviceId, requestedAt])
+}
+
+enum DeviceScreenshotState {
+  PENDING // asked for, waiting on the box
+  READY // uploaded and viewable
+  FAILED // the box could not capture it, or never answered
 }
 
 /// One point on a box's health timeline.
@@ -1310,6 +1372,21 @@ enum MonitorSignal {
   ROTOM_DISCONNECTED // Rotom stopped seeing the box, or has no workers on it
   ROTOM_NOT_SCANNING // Rotom has the box and no worker is allocated on it
   ROTOM_IDLE // a worker is allocated and making no requests at all
+
+  // --- the box's own resources ---------------------------------------------
+  // Read off the columns the agent already fills on every heartbeat, exactly
+  // as the host three below are. No probe, nothing new on the wire, and they
+  // work on every box in the fleet the moment a rule exists -- including
+  // agents older than monitoring itself, because these readings predate it.
+  //
+  // The two floors are honest inside a container: `sys.Memory` reads the
+  // cgroup rather than /proc/meminfo, so ten boxes on one machine do not all
+  // report the machine's RAM. A container with *no* memory limit set is the
+  // exception, and falls back to the host's figure -- which is why the form
+  // says so rather than leaving a rule that can never fire.
+  DEVICE_MEMORY_LOW // available memory under the rule's percentage floor
+  DEVICE_STORAGE_LOW // free space on /data under that floor
+  DEVICE_TEMP_HIGH // the SoC over the rule's ceiling, in degrees Celsius
 
   // --- hosts ---------------------------------------------------------------
   // Each one is its own value rather than a HEALTH_CHECK_FAILED rule with a

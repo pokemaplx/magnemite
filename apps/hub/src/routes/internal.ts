@@ -15,9 +15,15 @@ import { cacheVersion, pruneArtifacts } from "../services/artifacts.js";
 import { execOnDevice } from "../services/deviceCommands.js";
 import { broadcastWelcome } from "../services/devices.js";
 import { normaliseLogPath, requestBundle, subscribeToLogs } from "../services/deviceLogs.js";
+import { requestScreenshot } from "../services/deviceScreenshots.js";
 import { collectHealth } from "../services/health.js";
 import { cancelJob, retryFailedJobs, retryJob } from "../services/jobs.js";
 import { queueJoinInstalls } from "../services/joinInstalls.js";
+import {
+  MAX_MAINTENANCE_MINUTES,
+  enterMaintenance,
+  releaseMaintenance,
+} from "../services/maintenance.js";
 import { evaluate } from "../services/monitor.js";
 import { sendTestAlert } from "../services/notify.js";
 import { cancelRollout, createRollout, resumeRollout } from "../services/rollouts.js";
@@ -376,6 +382,101 @@ export async function internalRoutes(app: FastifyInstance) {
       reply.header("Content-Length", String(stat.size));
       reply.header("X-Magnemite-Serial", bundle.device.serial);
       return reply.send(createReadStream(bundle.path));
+    },
+  );
+
+  /**
+   * Ask a box what is on its screen, and wait for the PNG.
+   *
+   * The log bundle route's shape, and the wait is the point for the same
+   * reason: the dashboard renders the image straight afterwards, so there is
+   * nothing to poll.
+   */
+  app.post<{ Params: { id: string }; Body: { requestedById?: string | null } }>(
+    "/internal/devices/:id/screenshot",
+    async (request, reply) => {
+      const body = (request.body ?? {}) as { requestedById?: string | null };
+      try {
+        return await requestScreenshot(request.params.id, body.requestedById ?? null);
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        return reply.status(message === "device is offline" ? 409 : 504).send({ error: message });
+      }
+    },
+  );
+
+  app.get<{ Params: { id: string; screenshotId: string } }>(
+    "/internal/devices/:id/screenshot/:screenshotId",
+    async (request, reply) => {
+      const shot = await prisma.deviceScreenshot.findUnique({
+        where: { id: request.params.screenshotId },
+        select: { deviceId: true, state: true, path: true },
+      });
+      if (!shot || shot.deviceId !== request.params.id) {
+        return reply.status(404).send({ error: "no such screenshot" });
+      }
+      if (shot.state !== "READY" || !shot.path) {
+        return reply.status(409).send({ error: `screenshot is ${shot.state.toLowerCase()}` });
+      }
+
+      const stat = await fsp.stat(shot.path).catch(() => null);
+      // The row outliving the file means the volume was wiped, or the prune ran
+      // between the capture and the click. Captures are kept for a day, so this
+      // is a good deal more likely here than it is for a log bundle.
+      if (!stat?.isFile()) return reply.status(410).send({ error: "the screenshot is gone" });
+
+      reply.header("Content-Type", "image/png");
+      reply.header("Content-Length", String(stat.size));
+      // A capture is immutable once it has landed, and the id is in the path,
+      // so the browser may keep it for as long as it likes.
+      reply.header("Cache-Control", "private, max-age=86400, immutable");
+      return reply.send(createReadStream(shot.path));
+    },
+  );
+
+  /**
+   * Park a box, or put it back.
+   *
+   * `minutes` of zero or less is the release — one route rather than two,
+   * because both halves have to run the group's matching hook and neither is
+   * meaningful without the other.
+   *
+   * The hub does this rather than the dashboard writing the column directly,
+   * for the one reason the dashboard cannot: the hooks that stop and start the
+   * scanner need the box's live socket.
+   */
+  app.post<{ Params: { id: string }; Body: { minutes?: number; byEmail?: string | null } }>(
+    "/internal/devices/:id/maintenance",
+    async (request, reply) => {
+      const body = z
+        .object({
+          minutes: z.number().int().min(0).max(MAX_MAINTENANCE_MINUTES),
+          byEmail: z.string().nullish(),
+        })
+        .safeParse(request.body);
+      if (!body.success) return reply.status(400).send({ error: "invalid body" });
+
+      try {
+        const outcome =
+          body.data.minutes > 0
+            ? await enterMaintenance(
+                request.params.id,
+                body.data.minutes,
+                body.data.byEmail ?? null,
+              )
+            : await releaseMaintenance(request.params.id, body.data.byEmail ?? null);
+        // A released box may have a job that has been waiting for it, and the
+        // next tick is five seconds away for no reason.
+        if (body.data.minutes <= 0) nudge();
+        return {
+          deviceName: outcome.deviceName,
+          until: outcome.until?.toISOString() ?? null,
+          hook: outcome.hook,
+        };
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        return reply.status(message === "device not found" ? 404 : 400).send({ error: message });
+      }
     },
   );
 

@@ -70,6 +70,11 @@ export type MonitorRuleRow = {
    * the hub reads as unknown and never acts on.
    */
   minFreePercent?: number | null;
+  /**
+   * The ceiling out of the rule's `config`, for the one signal that compares a
+   * reading against an absolute. Absent is unknown here too.
+   */
+  maxTempC?: number | null;
   threshold: number;
   cooldownSeconds: number;
   windowStart: string | null;
@@ -293,9 +298,9 @@ function RuleForm({
             />
           </Field>
 
-          {/* The floor is the whole rule for the two signals that have one:
-              the hub compares what a machine reports against it, and reads a
-              rule without one as unknown rather than as a fault. */}
+          {/* The floor is the whole rule for the signals that have one: the hub
+              compares what the box or the machine reports against it, and reads
+              a rule without one as unknown rather than as a fault. */}
           {meta.floor ? (
             <Field label={meta.floor.label} htmlFor={id("minFreePercent")} hint={meta.floor.hint}>
               <Suffixed suffix="% free">
@@ -306,6 +311,26 @@ function RuleForm({
                   min={1}
                   max={99}
                   defaultValue={rule?.minFreePercent ?? 10}
+                  className="max-w-[8rem]"
+                />
+              </Suffixed>
+            </Field>
+          ) : null}
+
+          {/* Its own field rather than the floor with a sign, because the two
+              read in opposite directions — and one control that sometimes
+              meant "under" and sometimes "over" is the kind that gets set
+              backwards once and reboots a fleet. */}
+          {meta.ceiling ? (
+            <Field label={meta.ceiling.label} htmlFor={id("maxTempC")} hint={meta.ceiling.hint}>
+              <Suffixed suffix={meta.ceiling.unit}>
+                <Input
+                  id={id("maxTempC")}
+                  name="maxTempC"
+                  type="number"
+                  min={1}
+                  max={149}
+                  defaultValue={rule?.maxTempC ?? 85}
                   className="max-w-[8rem]"
                 />
               </Suffixed>

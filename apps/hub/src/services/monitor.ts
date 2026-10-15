@@ -250,6 +250,24 @@ function underFloor(rule: RuleRow, free: bigint | null, total: bigint | null): b
   return Number((free * 10000n) / total) / 100 < percent;
 }
 
+/**
+ * Is `reading` over the rule's ceiling?
+ *
+ * The mirror of `underFloor` for the one reading that is an absolute rather
+ * than a share: degrees are degrees, and 85 means the same thing on every box.
+ *
+ * Zero is treated as no reading at all, not as a cold box. `Temperatures()`
+ * returns zero where the ROM exposes no sensor — common enough on TV hardware
+ * to be a normal answer — and a floor of "under 85" would otherwise call every
+ * sensorless box healthy forever. Unknown is the honest reading, and unknown
+ * neither counts nor resets.
+ */
+function overCeiling(rule: RuleRow, reading: number | null, key: string): boolean | null {
+  const ceiling = numberOf(rule, key);
+  if (ceiling === null || reading === null || reading <= 0) return null;
+  return reading > ceiling;
+}
+
 /** One machine's desired containers, tallied by what docker last said. */
 export type HostInstances = { desired: number; running: number; unknown: number };
 
@@ -457,6 +475,36 @@ function readSignal(
     case "LOOP_STALLED":
       return checkResult(rule, reading);
 
+    // --- the box's own resources -------------------------------------------
+    // Read straight off the columns, like the host three below and for the same
+    // reason: the agent reports all of this on every heartbeat already, the
+    // Load card draws it, and nothing here needs a probe, a protocol message
+    // or an agent new enough to have heard of monitoring.
+
+    case "DEVICE_MEMORY_LOW":
+      // No swap in the sum, unlike the machine's: a box has none, and adding
+      // `?? 0n` would turn a reading the kernel does not have into a zero that
+      // reads as "no headroom".
+      //
+      // Honest inside a container, because `sys.Memory` reads the cgroup
+      // rather than /proc/meminfo. The exception is a container with no memory
+      // limit at all, which falls back to the machine's figure and will never
+      // trip this -- the rule dialog says so, because a rule that cannot fire
+      // is worse than no rule.
+      return underFloor(rule, device.memAvailableBytes, device.memTotalBytes);
+
+    case "DEVICE_STORAGE_LOW":
+      // `/data`, which is the partition an install writes to -- so this is the
+      // signal that gets ahead of a failure rather than reporting one. An
+      // install refuses on low space and the job fails; a rule that clears
+      // caches at 10% turns that into nothing happening at all.
+      return underFloor(rule, device.freeBytes, device.totalBytes);
+
+    case "DEVICE_TEMP_HIGH":
+      // The SoC, not the battery: a TV box has no battery, and the boxes that
+      // report one are reporting a cell nothing is drawing from.
+      return overCeiling(rule, device.cpuTempC, "maxTempC");
+
     // --- hosts -------------------------------------------------------------
     // These read the machine's own columns rather than a probe result, because
     // a host reports them on every heartbeat like any other box. What makes
@@ -632,10 +680,13 @@ async function hostInstances(devices: DeviceRow[]): Promise<Map<string, HostInst
 /**
  * Boxes and machines that must be left alone this pass.
  *
- * Three reasons, all of which look like a fault and are not:
+ * Four reasons, all of which look like a fault and are not:
  *
  *  - **An install is running.** It force-stops the scanner on purpose, so every
  *    probe would faithfully report the damage the hub itself asked for.
+ *  - **Somebody is working on it.** A box in maintenance has had its scanner
+ *    stopped by the hook that put it there, which is the install case with a
+ *    person holding the box instead of the hub.
  *  - **We just rebooted it.** A box takes minutes to come back. Without this
  *    its own reboot reads as unreachable and it is rebooted again, forever.
  *  - **A machine is converging.** Its containers are being created, recreated
@@ -644,7 +695,7 @@ async function hostInstances(devices: DeviceRow[]): Promise<Map<string, HostInst
  *    container that failed. The install case for a machine, in other words.
  */
 async function busyDeviceIds(rebootGraceSeconds: number): Promise<Set<string>> {
-  const [installing, rebooted, converging] = await Promise.all([
+  const [installing, rebooted, converging, parked] = await Promise.all([
     prisma.job.findMany({
       where: { state: { in: ACTIVE_STATES } },
       select: { deviceId: true },
@@ -661,8 +712,23 @@ async function busyDeviceIds(rebootGraceSeconds: number): Promise<Set<string>> {
       where: { convergingSince: { not: null } },
       select: { deviceId: true },
     }),
+    // **Somebody is working on it.** The install case with a person in it: the
+    // scanner is stopped on purpose, by the hook entering maintenance ran, and
+    // the only thing a rule could report is the damage an operator asked for.
+    //
+    // `gt` rather than `not: null`, so a window that has run out stops
+    // protecting the box on the same tick the sweep closes it.
+    prisma.device.findMany({
+      where: { maintenanceUntil: { gt: new Date() } },
+      select: { id: true },
+    }),
   ]);
-  return new Set([...installing, ...rebooted, ...converging].map((row) => row.deviceId));
+  return new Set([
+    ...installing.map((row) => row.deviceId),
+    ...rebooted.map((row) => row.deviceId),
+    ...converging.map((row) => row.deviceId),
+    ...parked.map((row) => row.id),
+  ]);
 }
 
 type Budgets = { actions: Map<string, number>; reboots: Map<string, number> };
@@ -1255,6 +1321,71 @@ const SEEDS: Seed[] = [
       { atFailure: 5, action: "ROTOM_DISCONNECT" },
       { atFailure: 8, action: "ROTOM_RESTART" },
     ],
+  },
+
+  // --- the box's own resources ----------------------------------------------
+  // The three that need nothing from the box it is not already saying. Their
+  // lineage is the two tools this fleet was run with before Magnemite:
+  // magisk-furtif restarts the stack under 200 MB free, and Rotomina has a
+  // per-device `memory_threshold` that does the same. A share rather than a
+  // fixed number of megabytes, because 200 MB means something different on a
+  // 2 GB TV box and an 8 GB container.
+
+  {
+    name: "Box is low on memory",
+    signal: "DEVICE_MEMORY_LOW",
+    // Pogo rather than the scanner: the game is what eats the memory, and
+    // restarting it is the narrower of the two things that would free any.
+    packageName: POGO,
+    config: { minFreePercent: 15 },
+    // Three readings, because a box that has just booted is a spike: Android
+    // takes most of its memory in the first minute and hands some back.
+    threshold: 3,
+    cooldownSeconds: 1800,
+    notifyChannels: [...MONITOR_CHANNELS],
+    notifyLevel: "WARN",
+    steps: [
+      { atFailure: 1, action: "CLEAR_CACHE_RESTART" },
+      { atFailure: 2, action: "REBOOT" },
+    ],
+  },
+  {
+    name: "Box is low on disk",
+    signal: "DEVICE_STORAGE_LOW",
+    packageName: POGO,
+    config: { minFreePercent: 10 },
+    // A disk fills slowly, so two in a row is a trend rather than a spike.
+    threshold: 2,
+    cooldownSeconds: 3600,
+    notifyChannels: [...MONITOR_CHANNELS],
+    notifyLevel: "WARN",
+    // The first rung is the only action on the catalog that actually frees
+    // space, and the point of this rule is to run it *before* a rollout
+    // arrives and fails on the refusal. The second says so and stops: a box
+    // whose /data is full of something other than a cache is not a thing more
+    // force-stops will fix, and the last rung repeats at the cooldown.
+    steps: [
+      { atFailure: 1, action: "CLEAR_CACHE_RESTART" },
+      { atFailure: 2, action: "NOTIFY_ONLY" },
+    ],
+  },
+  {
+    name: "Box is running hot",
+    signal: "DEVICE_TEMP_HIGH",
+    packageName: null,
+    // 85°C is where these SoCs start throttling, which is the temperature at
+    // which a box is still scanning and doing it slowly -- the failure this
+    // catches before it becomes a stalled loop nobody can explain.
+    config: { maxTempC: 85 },
+    threshold: 3,
+    cooldownSeconds: 3600,
+    notifyChannels: [...MONITOR_CHANNELS],
+    notifyLevel: "WARN",
+    // Telling you is the whole rule, and there is no honest second rung: no
+    // action on the catalog cools a box down, and rebooting one does not --
+    // it comes back to the same cupboard. The answer is air, and that is not
+    // something a hub can send.
+    steps: [{ atFailure: 1, action: "NOTIFY_ONLY" }],
   },
 
   // --- machines -------------------------------------------------------------

@@ -72,7 +72,22 @@ const HOST_SIGNALS = new Set<string>([
 ]);
 
 /** The two that compare what is free against a floor in `config`. */
-const FLOOR_SIGNALS = new Set<string>(["HOST_MEMORY_LOW", "HOST_DISK_LOW"]);
+const FLOOR_SIGNALS = new Set<string>([
+  "HOST_MEMORY_LOW",
+  "HOST_DISK_LOW",
+  "DEVICE_MEMORY_LOW",
+  "DEVICE_STORAGE_LOW",
+]);
+
+/**
+ * The signals that compare a reading against an absolute rather than a share.
+ *
+ * One, today. It is its own set rather than a flag on the floor because the
+ * two read in opposite directions, and a single field that sometimes meant
+ * "under" and sometimes "over" is the kind of control somebody sets backwards
+ * once and reboots a fleet with.
+ */
+const CEILING_SIGNALS = new Set<string>(["DEVICE_TEMP_HIGH"]);
 
 /**
  * What a machine can be told to do.
@@ -384,13 +399,23 @@ function parseRule(formData: FormData): ParsedRule | string {
       : "That signal is about a machine. Switch what the rule watches, or pick a signal about the box.";
   }
 
-  // The floor the two machine signals compare against. Without it the hub's
-  // `underFloor` reads *unknown*, which neither counts nor resets, so the rule
-  // would sit there enabled and silent.
+  // The floor the four share-shaped signals compare against. Without it the
+  // hub's `underFloor` reads *unknown*, which neither counts nor resets, so
+  // the rule would sit there enabled and silent.
   const floor = Number(formData.get("minFreePercent"));
   const minFreePercent = Number.isFinite(floor) && floor > 0 && floor < 100 ? floor : null;
   if (FLOOR_SIGNALS.has(signal) && minFreePercent === null) {
     return "That signal compares what is free against a floor — give it a percentage between 1 and 99.";
+  }
+
+  // The same refusal for the same reason, one direction up. The range is wide
+  // on purpose: these sensors report nonsense on some ROMs, and a form that
+  // argued about plausible temperatures would be arguing with hardware it
+  // cannot see.
+  const ceiling = Number(formData.get("maxTempC"));
+  const maxTempC = Number.isFinite(ceiling) && ceiling > 0 && ceiling < 150 ? ceiling : null;
+  if (CEILING_SIGNALS.has(signal) && maxTempC === null) {
+    return "That signal compares a temperature against a ceiling — give it a number between 1 and 149.";
   }
 
   const notifyLevel = String(formData.get("notifyLevel") ?? "WARN");
@@ -428,7 +453,7 @@ function parseRule(formData: FormData): ParsedRule | string {
     appliesTo: appliesTo as DeviceKind,
     packageName,
     groupId: String(formData.get("groupId") ?? "").trim() || null,
-    config: parseConfig(formData, minFreePercent),
+    config: parseConfig(formData, minFreePercent, maxTempC),
     threshold: int("threshold", 1, 1),
     cooldownSeconds: int("cooldownSeconds", 0, 300),
     windowStart,
@@ -462,11 +487,18 @@ function parseRule(formData: FormData): ParsedRule | string {
  * patterns and a ratio, and modelling all of that as nullable columns would be
  * a table nobody could read.
  */
-function parseConfig(formData: FormData, minFreePercent: number | null): Prisma.InputJsonValue {
-  // The floor sits at the top of `config` rather than inside `probe`, because
-  // nothing runs anywhere to answer it: the hub compares the columns a machine
-  // already reports on every heartbeat.
-  const floor = minFreePercent === null ? {} : { minFreePercent };
+function parseConfig(
+  formData: FormData,
+  minFreePercent: number | null,
+  maxTempC: number | null,
+): Prisma.InputJsonValue {
+  // Both thresholds sit at the top of `config` rather than inside `probe`,
+  // because nothing runs anywhere to answer them: the hub compares the columns
+  // a box or a machine already reports on every heartbeat.
+  const floor = {
+    ...(minFreePercent === null ? {} : { minFreePercent }),
+    ...(maxTempC === null ? {} : { maxTempC }),
+  };
 
   const kind = String(formData.get("probeKind") ?? "").trim();
   const target = String(formData.get("probeTarget") ?? "").trim();

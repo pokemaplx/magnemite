@@ -1,11 +1,11 @@
 ---
 title: Logs and commands
-description: A box's logcat as a zip, live, or a root shell, from the device page.
+description: A box's logcat as a zip, live, a root shell, or a picture of its screen — from the device page.
 icon: ScrollText
 ---
 
-Three items in a device page's **⋯** menu, all needing the box online:
-**Logcat (.zip)**, **Live logs** and **Execute**.
+Four items in a device page's **⋯** menu, all needing the box online:
+**Logcat (.zip)**, **Live logs**, **Execute** and **Screenshot**.
 
 ## Logcat (.zip)
 
@@ -75,6 +75,36 @@ needs longer belongs in a script on the box).
 
 <Callout type="warn">
   This is a root shell on hardware,`rm -rf` does exactly what you would expect.
+</Callout>
+
+## Screenshot
+
+One `screencap`, taken when you ask. It answers the question no reading can: a
+box can be online, heartbeating, with the scanner's process alive, and sitting
+on a dialog nobody has read. `APP_NOT_FOREGROUND` says the launcher owns the
+screen; this says _what is on it_ — the login that expired, the crash dialog,
+the Play Store page, the black screen.
+
+Opening the dialog takes the capture, and **Capture again** takes another.
+
+- **Nothing is captured on a schedule, and nothing is captured on an alert.**
+  These are boxes in somebody's living room. One capture, because a person
+  pressed a button, with their name on the audit row.
+- The PNG goes up over HTTP with the box's own device token, the same road a
+  log bundle takes and for the same reason: a socket frame is capped at 1 MB
+  and a 1080p capture is regularly more.
+- **The last five per box are kept, for a day.** Tighter than the log bundles'
+  week, deliberately: a log is evidence about something that happened, and a
+  picture of somebody's television is not worth keeping once it has answered
+  the question.
+- The menu item is **absent**, not greyed, on a box whose agent predates the
+  feature — the fix is an agent update, which is not on that menu.
+
+<Callout type="warn" title="screencap wrote an empty file">
+  The box has no display to capture. On hardware that is a ROM without `screencap` or a display
+  service that is not up; in a [Redroid container](/docs/fleet/redroid) it is an image with no
+  virtual display. The agent checks the PNG's first eight bytes before it uploads anything, so this
+  arrives as that sentence rather than as a broken image in the dialog.
 </Callout>
 
 ## What to look for in logs?

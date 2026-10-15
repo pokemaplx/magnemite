@@ -1,6 +1,7 @@
 import { prisma } from "@magnemite/db";
 import { log } from "../log.js";
 import { TERMINAL_STATES } from "./jobs.js";
+import { inMaintenance } from "./maintenance.js";
 import { createRollout } from "./rollouts.js";
 
 /**
@@ -25,6 +26,7 @@ export async function queueJoinInstalls(deviceId: string): Promise<number> {
       kind: true,
       approved: true,
       groupId: true,
+      maintenanceUntil: true,
       // What it already has. The agent reports only the packages the hub
       // tracks, which is exactly the set a join install can name.
       packages: {
@@ -38,6 +40,21 @@ export async function queueJoinInstalls(deviceId: string): Promise<number> {
   // unapproved box is refused by createRollout anyway -- it would build a
   // rollout targeting nothing and report success.
   if (!device || device.kind !== "BOX" || !device.approved || !device.groupId) return 0;
+
+  // A parked box is one somebody is holding, and this is the one path that
+  // installs with nobody watching -- so it waits. Checked here rather than
+  // left to `createRollout`, which would throw and leave a warning in the log
+  // that reads like a fault: a box that will get its builds when its window
+  // closes is not a box anything went wrong on.
+  //
+  // Nothing re-runs this at expiry, and that is correct: the next enrolment,
+  // approval or group change calls it, and in the meantime the group's set is
+  // still what it was. A box parked through its own first minute gets its
+  // builds the next time it reconnects.
+  if (inMaintenance(device)) {
+    log.info({ deviceId }, "join installs held: this box is in maintenance");
+    return 0;
+  }
 
   const wanted = await prisma.groupJoinInstall.findMany({
     where: { groupId: device.groupId },

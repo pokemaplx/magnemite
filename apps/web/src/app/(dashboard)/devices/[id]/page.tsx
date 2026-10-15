@@ -2,6 +2,7 @@ import type { ReactNode } from "react";
 import Link from "next/link";
 import { notFound, redirect } from "next/navigation";
 import { ArrowLeft, RadioTower } from "lucide-react";
+import { CAPABILITY_SCREENSHOT, hasCapability } from "@magnemite/protocol";
 import { prisma } from "@magnemite/db";
 import { requireUser } from "@/lib/session";
 import { Badge } from "@/components/ui/badge";
@@ -77,6 +78,9 @@ export default async function DevicePage({ params }: { params: Promise<{ id: str
   if (device.kind === "HOST") redirect(`/hosts/${device.id}`);
 
   const online = device.status === "ONLINE";
+  // An expired window reads as not parked, before the hub's sweep has cleared
+  // the column — the window is what the field means, not the row.
+  const parked = device.maintenanceUntil !== null && device.maintenanceUntil.getTime() > Date.now();
 
   const jobRows: DeviceJobRow[] = device.jobs.map((job) => ({
     id: job.id,
@@ -133,6 +137,13 @@ export default async function DevicePage({ params }: { params: Promise<{ id: str
             <p className="mt-1 font-mono text-xs text-muted-foreground">{device.serial}</p>
           </div>
           {!device.approved ? <Badge variant="warning">pending approval</Badge> : null}
+          {/* Next to the name rather than in a card, because it changes what
+              every other control on this page will do. */}
+          {parked ? (
+            <Badge variant="info" title={`Until ${device.maintenanceUntil!.toLocaleString()}`}>
+              in maintenance
+            </Badge>
+          ) : null}
         </div>
 
         {user.role !== "VIEWER" ? (
@@ -143,6 +154,8 @@ export default async function DevicePage({ params }: { params: Promise<{ id: str
             online={online}
             groupId={device.groupId}
             groups={groups.map((g) => ({ id: g.id, name: g.name }))}
+            maintenanceUntil={device.maintenanceUntil?.toISOString() ?? null}
+            canScreenshot={hasCapability(device.capabilities, CAPABILITY_SCREENSHOT)}
           />
         ) : null}
       </header>

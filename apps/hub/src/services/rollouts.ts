@@ -3,6 +3,7 @@ import { bus } from "../bus.js";
 import { log } from "../log.js";
 import { isOnline } from "../registry.js";
 import { logJobEvent, recomputeRollout } from "./jobs.js";
+import { inMaintenance } from "./maintenance.js";
 
 export type CreateRolloutInput = {
   appVersionId: string;
@@ -62,13 +63,37 @@ export async function createRollout(input: CreateRolloutInput) {
 
   if (devices.length === 0) throw new Error("no approved devices matched the selection");
 
+  // A box somebody is working on takes no installs, and *how* it is kept out
+  // depends on how it got into the selection — which is the one place in this
+  // file where naming a box and asking for "the fleet" mean different things.
+  //
+  // Named explicitly, the refusal is loud: you picked that box, and silently
+  // dropping it would be the button doing less than it said. Picked up by a
+  // fleet-wide or group rollout, it is dropped quietly, because "everything"
+  // has always meant the boxes that can take it — refusing a 200-box rollout
+  // over one parked box would be the opposite of useful.
+  const parked = devices.filter((device) => inMaintenance(device));
+  if (parked.length > 0 && input.deviceIds?.length) {
+    const names = parked.map((d) => d.name).join(", ");
+    throw new Error(
+      parked.length === 1
+        ? `${names} is in maintenance — take it out of maintenance, or leave it out of the selection`
+        : `${parked.length} boxes are in maintenance (${names}) — take them out, or leave them out of the selection`,
+    );
+  }
+
+  const targets = devices.filter((device) => !inMaintenance(device));
+  if (targets.length === 0) {
+    throw new Error("every box that matched is in maintenance");
+  }
+
   const target = appVersion.appTarget;
   const canaryCount = input.canaryCount ?? 0;
   const skipUpToDate = input.skipUpToDate ?? true;
 
   // Canaries should be boxes that can actually start now, otherwise the whole
   // fleet sits behind an offline device waiting for a soak that never begins.
-  const eligible = devices.filter(
+  const eligible = targets.filter(
     (d) => !skipUpToDate || d.packages[0]?.versionName !== appVersion.version,
   );
   const ordered = [...eligible].sort((a, b) => {
@@ -99,7 +124,7 @@ export async function createRollout(input: CreateRolloutInput) {
       note: input.note ?? null,
       startedAt: new Date(),
       jobs: {
-        create: devices.map((device) => {
+        create: targets.map((device) => {
           const current = device.packages[0]?.versionName ?? null;
           const upToDate = skipUpToDate && current === appVersion.version;
           return {

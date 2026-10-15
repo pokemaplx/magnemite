@@ -74,6 +74,14 @@ export type DeviceRow = {
   serial: string;
   online: boolean;
   approved: boolean;
+  /**
+   * ISO string while somebody is working on this box, null otherwise.
+   *
+   * It earns a column's worth of space in the status cell because it changes
+   * what the rest of this table will do to the box: selecting it and pressing
+   * Update is refused while it is set.
+   */
+  maintenanceUntil: string | null;
   model: string | null;
   androidVersion: string | null;
   agentVersion: string | null;
@@ -527,6 +535,13 @@ function DeviceRowView({
       <TableCell className="min-w-44">
         {!row.approved ? (
           <Badge variant="warning">pending approval</Badge>
+        ) : row.maintenanceUntil && new Date(row.maintenanceUntil).getTime() > Date.now() ? (
+          // Ahead of the job, deliberately: a box with a job still queued on
+          // it and a window open is not going to run that job, and showing the
+          // job would say the opposite.
+          <Badge variant="info" title={`Until ${new Date(row.maintenanceUntil).toLocaleString()}`}>
+            in maintenance
+          </Badge>
         ) : row.job ? (
           <div className="flex flex-col gap-1">
             <div className="flex items-center gap-2">

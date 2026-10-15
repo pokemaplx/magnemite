@@ -10,6 +10,7 @@ import { getConnection, isOnline, register, unregister } from "../registry.js";
 import { maybeUpdateAgent, recordAgentUpdateFailure } from "../services/agentRelease.js";
 import { resolveExec } from "../services/deviceCommands.js";
 import { dropStreams, failBundle, publishLogLines, rearmStreams } from "../services/deviceLogs.js";
+import { failScreenshot } from "../services/deviceScreenshots.js";
 import { applyMetrics, markOffline, markOnline, trackedPackages } from "../services/devices.js";
 import { ACTIVE_STATES, applyProgress, completeJob, logJobEvent } from "../services/jobs.js";
 import { specForDevice } from "../services/monitor.js";
@@ -328,6 +329,15 @@ async function handleMessage(ws: WebSocket, deviceId: string, ip: string | null,
       // being uploaded.
       if (!msg.ok) {
         await failBundle(msg.bundleId, msg.error ?? "the agent could not collect the logs");
+      }
+      break;
+    }
+
+    case "screenshot_result": {
+      // Same as the bundle above: only failures arrive here, because a capture
+      // that worked announces itself by landing on the upload route.
+      if (!msg.ok) {
+        await failScreenshot(msg.screenshotId, msg.error ?? "the box could not take a screenshot");
       }
       break;
     }

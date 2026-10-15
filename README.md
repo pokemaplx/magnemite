@@ -81,3 +81,33 @@ routes and reads the same database for fleet state.
   the fleet honest.
 - 🔐 **Auth & audit** — accounts, sessions, and an audit log of admin
   actions.
+- 📸 **Screenshots** — ask a box what is on its screen, on request. The one
+  question a reading cannot answer.
+- 🔧 **Maintenance windows** — park a box while you work on it. Nothing
+  automatic touches it, a rollout aimed at it is refused, and the window
+  closes by itself.
+- 🌡️ **Resource monitoring** — rules on a box's own memory, disk and
+  temperature, read from the heartbeat it already sends.
+
+## Acknowledgements
+
+This tool exists because other people solved these problems first, on the same
+hardware, and were generous enough to publish how.
+
+- **[aconf](https://github.com/TechG3n/aconf)** by
+  [@TechG3n](https://github.com/TechG3n) — the lineage of most of what
+  Magnemite does per box. The MITM config paths and the per-device name
+  substitution are its design, and the seeded monitoring rules are not
+  invented: their thresholds and ladders are what its `atlas_monitor.sh` has
+  been doing on this hardware for years.
+- **[magisk-furtif](https://github.com/Furtif/magisk-furtif)** by
+  [@Furtif](https://github.com/Furtif) — a per-box watchdog as a Magisk
+  module: process checks, recovery, Discord alerts and Rotom health. It is
+  where the low-memory rule comes from, and it answered the question of what a
+  box should do about itself before a hub was holding the other end.
+- **[Rotomina](https://github.com/f3ger/rotomina)** by
+  [@f3ger](https://github.com/f3ger) — fleet management over ADB, with a
+  per-device memory threshold and a per-device switch to stop touching a box.
+  Magnemite's maintenance windows are that second idea with an expiry on it.
+
+None of the three is a dependency, and all three are worth reading.

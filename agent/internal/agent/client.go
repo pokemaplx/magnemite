@@ -573,6 +573,15 @@ func (a *Agent) handle(ctx context.Context, data []byte) {
 		}
 		go a.collectLogs(msg)
 
+	case "collect_screenshot":
+		var msg proto.CollectScreenshot
+		if json.Unmarshal(data, &msg) != nil {
+			return
+		}
+		// Its own goroutine, like the bundle above: the read loop has to keep
+		// taking frames while a megabyte goes up whatever uplink this box has.
+		go a.collectScreenshot(msg)
+
 	case "log_stream_start":
 		var msg proto.LogStreamStart
 		if json.Unmarshal(data, &msg) != nil {

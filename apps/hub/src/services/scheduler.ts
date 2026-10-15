@@ -7,6 +7,7 @@ import { log } from "../log.js";
 import { isOnline, sendTo } from "../registry.js";
 import { hasWriteConfig, renderConfig } from "./deviceConfig.js";
 import { ACTIVE_STATES, logJobEvent, recomputeRollout, requeueStalled } from "./jobs.js";
+import { sweepExpiredMaintenance, notInMaintenance } from "./maintenance.js";
 import { pruneMetrics } from "./metrics.js";
 import { evaluate } from "./monitor.js";
 
@@ -51,6 +52,11 @@ async function tick() {
     const settings = await getHubSettings();
     await promoteSoakingRollouts();
     await requeueStalled(settings.jobStallTimeoutSeconds);
+    // Before the monitor pass and before the dispatch, both deliberately: a
+    // box whose window just closed should have the hook that starts its
+    // scanner run before a rule looks at it, and before a job held for it
+    // goes out.
+    await sweepExpiredMaintenance();
     // Keeps its own hourly clock, so riding the 5-second tick costs nothing.
     await pruneMetrics();
     // Same idea, on the heartbeat's clock — one pass per beat, since that is
@@ -105,7 +111,15 @@ async function dispatchQueued(maxConcurrentJobs: number) {
     where: {
       state: "QUEUED",
       rollout: { status: { in: ["CANARY", "RUNNING"] } },
-      device: { approved: true },
+      // A parked box keeps its job queued, exactly as an offline one does, and
+      // it dispatches when the window closes. `createRollout` refuses a
+      // selection that names a parked box, so what this catches is the other
+      // order: a rollout created first and the box parked while it was still
+      // waiting for a slot.
+      //
+      // Safe to spread here: the `OR` it carries is on the device, and the
+      // one below is on the job.
+      device: { approved: true, ...notInMaintenance() },
       // A job that has just failed is held for its rollout's backoff. Filtered
       // here rather than skipped in the loop below so a held job does not eat
       // one of the 500 candidate slots on every tick.

@@ -3,6 +3,7 @@
 import { useState, useTransition } from "react";
 import { useRouter } from "next/navigation";
 import {
+  Camera,
   MoreHorizontal,
   Pencil,
   Power,
@@ -12,6 +13,7 @@ import {
   ShieldOff,
   Terminal,
   Trash2,
+  Wrench,
 } from "lucide-react";
 import {
   collectDeviceLogs,
@@ -22,6 +24,8 @@ import {
 } from "@/actions/devices";
 import { DeviceExec } from "@/components/device-exec";
 import { DeviceLiveLogs } from "@/components/device-live-logs";
+import { DeviceMaintenance } from "@/components/device-maintenance";
+import { DeviceScreenshot } from "@/components/device-screenshot";
 import { RenameDevicesDialog } from "@/components/rename-devices-dialog";
 import { Button } from "@/components/ui/button";
 import {
@@ -49,6 +53,8 @@ export function DeviceControls({
   online,
   groupId,
   groups,
+  maintenanceUntil,
+  canScreenshot,
 }: {
   deviceId: string;
   name: string;
@@ -56,6 +62,15 @@ export function DeviceControls({
   online: boolean;
   groupId: string | null;
   groups: { id: string; name: string }[];
+  /** ISO string while the box is parked, null otherwise. */
+  maintenanceUntil: string | null;
+  /**
+   * Whether this box's agent knows `collect_screenshot`. False leaves the item
+   * out rather than offering a button that waits half a minute and then says
+   * the box never answered, which is what an unknown message looks like from
+   * here.
+   */
+  canScreenshot: boolean;
 }) {
   const router = useRouter();
   const toast = useToast();
@@ -64,6 +79,10 @@ export function DeviceControls({
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [liveLogs, setLiveLogs] = useState(false);
   const [executing, setExecuting] = useState(false);
+  const [screenshot, setScreenshot] = useState(false);
+  const [maintaining, setMaintaining] = useState(false);
+
+  const parked = maintenanceUntil !== null && new Date(maintenanceUntil).getTime() > Date.now();
 
   /**
    * Collecting takes as long as the box takes to zip and upload, so the menu
@@ -144,6 +163,17 @@ export function DeviceControls({
               Live logs
             </DropdownMenuItem>
 
+            {/* Left out entirely rather than disabled on an agent too old for
+                it: a greyed item invites a hover for a reason it cannot give,
+                and the fix is an agent update rather than anything on this
+                menu. */}
+            {canScreenshot ? (
+              <DropdownMenuItem disabled={!online} onSelect={() => setScreenshot(true)}>
+                <Camera />
+                Screenshot
+              </DropdownMenuItem>
+            ) : null}
+
             <DropdownMenuItem disabled={!online} onSelect={() => downloadLogs()}>
               <ScrollText />
               Logcat (.zip)
@@ -152,6 +182,17 @@ export function DeviceControls({
             <DropdownMenuItem disabled={!online} onSelect={() => run(() => rebootDevice(deviceId))}>
               <Power />
               Reboot
+            </DropdownMenuItem>
+
+            <DropdownMenuSeparator />
+
+            {/* Not disabled when the box is offline. Parking one that is not
+                answering is exactly what somebody about to go and unplug it
+                wants, and the hook simply does not run — which the dialog
+                says. */}
+            <DropdownMenuItem onSelect={() => setMaintaining(true)}>
+              <Wrench />
+              {parked ? "End maintenance" : "Maintenance…"}
             </DropdownMenuItem>
 
             <DropdownMenuSeparator />
@@ -174,6 +215,21 @@ export function DeviceControls({
       <DeviceExec deviceId={deviceId} name={name} open={executing} onOpenChange={setExecuting} />
 
       <DeviceLiveLogs deviceId={deviceId} name={name} open={liveLogs} onOpenChange={setLiveLogs} />
+
+      <DeviceScreenshot
+        deviceId={deviceId}
+        name={name}
+        open={screenshot}
+        onOpenChange={setScreenshot}
+      />
+
+      <DeviceMaintenance
+        deviceId={deviceId}
+        name={name}
+        maintenanceUntil={maintenanceUntil}
+        open={maintaining}
+        onOpenChange={setMaintaining}
+      />
 
       {/* The same dialog the fleet table opens, with one box in it. It used to
           be a bare name field here, which quietly cost this page everything

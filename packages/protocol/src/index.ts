@@ -389,6 +389,22 @@ export const logBundleResultSchema = z.object({
 });
 
 /**
+ * Closes out a screenshot the box could not deliver.
+ *
+ * The same shape and the same reason as `log_bundle_result`: the PNG goes up
+ * over HTTP, because a 1080p capture is regularly more than the 1 MB a socket
+ * frame is capped at. There is no success frame on either — the upload landing
+ * is the hub's proof, and a second one would only be a way for the two to
+ * disagree.
+ */
+export const screenshotResultSchema = z.object({
+  type: z.literal("screenshot_result"),
+  screenshotId: z.string(),
+  ok: z.boolean(),
+  error: z.string().nullish(),
+});
+
+/**
  * A batch of live logcat lines, while someone has the panel open.
  *
  * Batched rather than sent per line: a busy box writes thousands a second and
@@ -469,6 +485,7 @@ export const agentMessageSchema = z.discriminatedUnion("type", [
   logSchema,
   agentUpdateResultSchema,
   logBundleResultSchema,
+  screenshotResultSchema,
   logLinesSchema,
   execResultSchema,
   pongSchema,
@@ -626,6 +643,21 @@ export const collectLogsSchema = z.object({
   maxLines: z.number().int().positive().default(50_000),
 });
 
+/**
+ * Take one `screencap` and POST it at `uploadUrl`, which carries the
+ * screenshot's own id and is authenticated with the device token.
+ *
+ * What this answers is the question no reading can. A box can be online,
+ * heartbeating, with the scanner process alive, and sitting on a dialog nobody
+ * has read — `APP_NOT_FOREGROUND` says the launcher owns the screen, and this
+ * says *what is on it*.
+ */
+export const collectScreenshotSchema = z.object({
+  type: z.literal("collect_screenshot"),
+  screenshotId: z.string(),
+  uploadUrl: z.string().url(),
+});
+
 export const logStreamStartSchema = z.object({
   type: z.literal("log_stream_start"),
   streamId: z.string(),
@@ -672,6 +704,28 @@ export const execCommandSchema = z.object({
  * agent look incapable until it updated.
  */
 export const CAPABILITY_WRITE_CONFIG = "write_config";
+
+/**
+ * The agent knows `collect_screenshot`.
+ *
+ * Checked so the dashboard can leave the menu item out on a box whose agent
+ * predates it, rather than offering a button that waits two minutes and then
+ * says the box never answered — which is what an unknown message type looks
+ * like from this side, since the agent's type switch has no default branch.
+ */
+export const CAPABILITY_SCREENSHOT = "screenshot";
+
+/**
+ * Does this box's `hello.capabilities` claim one?
+ *
+ * Null is the honest answer for an agent old enough not to send the field at
+ * all, and it reads as false here — a box that cannot say it can do something
+ * is treated as not being able to, which is the safe direction for every
+ * capability there is.
+ */
+export function hasCapability(capabilities: unknown, name: string): boolean {
+  return Array.isArray(capabilities) && capabilities.includes(name);
+}
 
 /**
  * What a group's config template may substitute.
@@ -798,6 +852,7 @@ export const serverMessageSchema = z.discriminatedUnion("type", [
   rebootSchema,
   agentUpdateSchema,
   collectLogsSchema,
+  collectScreenshotSchema,
   logStreamStartSchema,
   logStreamStopSchema,
   execCommandSchema,

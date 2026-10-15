@@ -18,6 +18,7 @@ import {
   ServerCrash,
   ServerOff,
   Terminal,
+  Thermometer,
   Timer,
   Trash2,
   Unplug,
@@ -82,6 +83,20 @@ export type SignalMeta = {
    * looks complete and never fires.
    */
   floor: { label: string; hint: string } | null;
+  /**
+   * The absolute ceiling the hub compares a reading against, for the one
+   * signal whose reading is not a share of anything.
+   *
+   * Degrees are degrees: 85 means the same thing on a 2 GB TV box and an 8 GB
+   * container, where "15% free" does not. Separate from `floor` rather than a
+   * sign on it, because the two read in opposite directions and a single field
+   * that sometimes meant "under" and sometimes "over" is the kind of control
+   * that gets set backwards once and then rebooted a fleet.
+   *
+   * `unit` is only a suffix in the form. Null on every other signal, like the
+   * floor, so a signal added here has to say which kind of number it wants.
+   */
+  ceiling: { label: string; hint: string; unit: string } | null;
 };
 
 export const SIGNALS: SignalMeta[] = [
@@ -97,6 +112,7 @@ export const SIGNALS: SignalMeta[] = [
     needsAgent: true,
     kinds: ["BOX"],
     floor: null,
+    ceiling: null,
   },
   {
     value: "APP_NOT_FOREGROUND",
@@ -108,6 +124,7 @@ export const SIGNALS: SignalMeta[] = [
     needsAgent: true,
     kinds: ["BOX"],
     floor: null,
+    ceiling: null,
   },
   {
     value: "APP_ANR",
@@ -119,6 +136,7 @@ export const SIGNALS: SignalMeta[] = [
     needsAgent: true,
     kinds: ["BOX"],
     floor: null,
+    ceiling: null,
   },
   {
     value: "HEALTH_CHECK_FAILED",
@@ -130,6 +148,7 @@ export const SIGNALS: SignalMeta[] = [
     needsAgent: true,
     kinds: ["BOX"],
     floor: null,
+    ceiling: null,
   },
   {
     value: "LOOP_STALLED",
@@ -141,6 +160,7 @@ export const SIGNALS: SignalMeta[] = [
     needsAgent: true,
     kinds: ["BOX"],
     floor: null,
+    ceiling: null,
   },
   {
     value: "AGENT_OFFLINE",
@@ -158,6 +178,7 @@ export const SIGNALS: SignalMeta[] = [
     // that notices never asked which it was.
     kinds: ["BOX", "HOST"],
     floor: null,
+    ceiling: null,
   },
   {
     value: "ROTOM_DISCONNECTED",
@@ -169,6 +190,7 @@ export const SIGNALS: SignalMeta[] = [
     needsAgent: false,
     kinds: ["BOX"],
     floor: null,
+    ceiling: null,
   },
   {
     value: "ROTOM_NOT_SCANNING",
@@ -180,6 +202,7 @@ export const SIGNALS: SignalMeta[] = [
     needsAgent: false,
     kinds: ["BOX"],
     floor: null,
+    ceiling: null,
   },
   {
     value: "ROTOM_IDLE",
@@ -191,6 +214,7 @@ export const SIGNALS: SignalMeta[] = [
     needsAgent: false,
     kinds: ["BOX"],
     floor: null,
+    ceiling: null,
   },
 
   // --- machines ------------------------------------------------------------
@@ -208,6 +232,58 @@ export const SIGNALS: SignalMeta[] = [
     needsAgent: false,
     kinds: ["HOST"],
     floor: null,
+    ceiling: null,
+  },
+  {
+    value: "DEVICE_MEMORY_LOW",
+    label: "Box is low on memory",
+    hint: "The box is running out of memory, which is where a scanner starts being killed off and nothing says why. Read off the heartbeat it already sends — no probe, and it works on every box in the fleet.",
+    icon: MemoryStick,
+    // Pogo, or whatever the ladder should restart. The signal is about the box
+    // and the actions are not: a rule that restarts an app has to know which.
+    needsPackage: true,
+    probe: "none",
+    // The readings predate monitoring, which is the nice part: an agent too
+    // old to run a probe still reports its memory.
+    needsAgent: false,
+    kinds: ["BOX"],
+    floor: {
+      label: "Alert under",
+      hint: "Available memory as a share of the box's total. A container reports its cgroup's figure, so ten boxes on one machine each report their own — unless the container has no memory limit set, in which case it reports the machine's and this rule can never fire.",
+    },
+    ceiling: null,
+  },
+  {
+    value: "DEVICE_STORAGE_LOW",
+    label: "Box is low on disk",
+    hint: "/data is filling up. Worth catching before a rollout does: an install refuses on low space, so the job fails instead of the box quietly clearing a cache first.",
+    icon: HardDrive,
+    needsPackage: true,
+    probe: "none",
+    needsAgent: false,
+    kinds: ["BOX"],
+    floor: {
+      label: "Alert under",
+      hint: "Free space on /data as a share of its total. A bundle of splits is about 170 MB, so leave room for one plus what it unpacks to.",
+    },
+    ceiling: null,
+  },
+  {
+    value: "DEVICE_TEMP_HIGH",
+    label: "Box is running hot",
+    hint: "The SoC is over its ceiling, which on this hardware means it is throttling — still scanning, slowly. The failure it gets ahead of is a stalled loop nobody can explain.",
+    icon: Thermometer,
+    // There is no app to restart, because no action cools a box down.
+    needsPackage: false,
+    probe: "none",
+    needsAgent: false,
+    kinds: ["BOX"],
+    floor: null,
+    ceiling: {
+      label: "Alert over",
+      hint: "Degrees Celsius off the box's own thermal zones. A box whose ROM exposes no sensor reads as unknown rather than cold, so this rule simply never fires on one — which is most TV hardware.",
+      unit: "°C",
+    },
   },
   {
     value: "HOST_MEMORY_LOW",
@@ -225,6 +301,7 @@ export const SIGNALS: SignalMeta[] = [
       // both pairs together before it compares.
       hint: "Free memory and free swap together, as a share of the machine's total. 10% is roughly one more box's worth of headroom.",
     },
+    ceiling: null,
   },
   {
     value: "HOST_DISK_LOW",
@@ -239,6 +316,7 @@ export const SIGNALS: SignalMeta[] = [
       label: "Alert under",
       hint: "Free space as a share of the filesystem's total. Leave room for one more image: a Redroid layer is a couple of gigabytes.",
     },
+    ceiling: null,
   },
   {
     value: "REDROID_INSTANCE_DOWN",
@@ -250,6 +328,7 @@ export const SIGNALS: SignalMeta[] = [
     needsAgent: false,
     kinds: ["HOST"],
     floor: null,
+    ceiling: null,
   },
 ];
 
@@ -306,6 +385,7 @@ export function signalMeta(value: string): SignalMeta {
       // that exists.
       kinds: ["BOX", "HOST"],
       floor: null,
+      ceiling: null,
     }
   );
 }

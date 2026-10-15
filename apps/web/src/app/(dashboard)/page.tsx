@@ -64,6 +64,7 @@ export default async function FleetPage() {
       serial: device.serial,
       online: device.status === "ONLINE",
       approved: device.approved,
+      maintenanceUntil: device.maintenanceUntil?.toISOString() ?? null,
       model: [device.manufacturer, device.model].filter(Boolean).join(" ") || null,
       androidVersion: device.androidVersion,
       agentVersion: device.agentVersion,
