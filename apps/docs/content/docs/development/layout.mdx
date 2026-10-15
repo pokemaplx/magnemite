@@ -34,6 +34,7 @@ apps/hub/src
 │   ├── files.ts          GET  /files/*          (only when SERVE_ARTIFACTS)
 │   ├── events.ts         GET  /internal/events  (SSE to the dashboard)
 │   ├── logs.ts           POST /api/logs/*       (log bundles a box uploads)
+│   ├── screenshots.ts    POST /api/screenshots/* (screen captures a box uploads)
 │   └── internal.ts       Everything the dashboard commands
 ├── services/
 │   ├── scheduler.ts      Dispatch, concurrency caps, stall detection

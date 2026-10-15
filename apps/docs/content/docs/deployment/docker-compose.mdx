@@ -74,8 +74,8 @@ One virtual host, four requirements.
 
 `http://127.0.0.1:8090`, TLS terminated by you. Caddy fans the requests out by
 path: `/files/*` off the artifacts volume behind `forward_auth`, `/ws/device`,
-`/api/enroll`, `/api/logs/*` and `/healthz` to the hub, everything else to the
-dashboard.
+`/api/enroll`, `/api/logs/*`, `/api/screenshots/*` and `/healthz` to the hub,
+everything else to the dashboard.
 
 </Step>
 
@@ -101,12 +101,14 @@ dashboard that no longer updates by itself.
 
 <Step>
 
-### Let `/files/*` and `/api/logs/*` through whole
+### Let `/files/*`, `/api/logs/*` and `/api/screenshots/*` through whole
 
 Downloads are ~170 MB and boxes resume them with `Range`.
 
-A log bundle a box uploads goes the other way on the same host. Buffering to disk, a body-size
-cap, or a short read timeout each turn into failed installs.
+A log bundle and a screen capture a box uploads go the other way on the same host. Buffering to
+disk, a body-size cap, or a short read timeout each turn into failed installs — and a capture is
+on this list for the same reason it is not sent over the socket: a 1080p PNG is regularly past the
+1 MB frame cap.
 
 </Step>
 

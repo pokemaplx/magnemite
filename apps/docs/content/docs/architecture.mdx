@@ -79,15 +79,16 @@ little for its own deployment. Nothing routes `/internal/*`, which is what keeps
 the hub's internal API unreachable from outside — the protection is the absence
 of a route, not a rule.
 
-| Path          | Handled by | What asks for it                                                  |
-| ------------- | ---------- | ----------------------------------------------------------------- |
-| `/ws/device`  | hub        | The persistent WebSocket every device opens and keeps             |
-| `/api/enroll` | hub        | First boot, trading an enrollment token for a device token        |
-| `/files/*`    | edge       | Cached `.apkm` downloads, gated by `forward_auth` against the hub |
-| `/api/logs/*` | hub        | The log bundle a box uploads when the dashboard asks for one      |
+| Path                 | Handled by | What asks for it                                                  |
+| -------------------- | ---------- | ----------------------------------------------------------------- |
+| `/ws/device`         | hub        | The persistent WebSocket every device opens and keeps             |
+| `/api/enroll`        | hub        | First boot, trading an enrollment token for a device token        |
+| `/files/*`           | edge       | Cached `.apkm` downloads, gated by `forward_auth` against the hub |
+| `/api/logs/*`        | hub        | The log bundle a box uploads when the dashboard asks for one      |
+| `/api/screenshots/*` | hub        | The screen capture a box uploads, too big for a socket frame      |
 
 <Callout type="warn" title="The two edge configs are not the same file">
-  `deploy/edge/Caddyfile` fronts **one** virtual host, so after those four it falls through to the
+  `deploy/edge/Caddyfile` fronts **one** virtual host, so after those five it falls through to the
   dashboard on `web:3000` — nothing 404s there, and it also routes `/api/events*` to the hub.
   `deploy/edge/Caddyfile.coolify` fronts the **agents'** domain only: it adds `/healthz` on the hub
   and answers everything else with a flat 404, because the dashboard lives on its own domain. So
