@@ -470,6 +470,34 @@ export const hostBootstrapResultSchema = z.object({
 export type HostBootstrapResult = z.infer<typeof hostBootstrapResultSchema>;
 
 /**
+ * One thing the probe learned about one box.
+ *
+ * Fixed leading fields and a free-text tail, mirroring the `::fact` line the
+ * script prints, because `ro.product.model` is routinely "Chromecast with
+ * Google TV" and `key=value` pairs break on the spaces. An address of `-`
+ * means the fact is about the run -- the machine's own adb public key arrives
+ * that way.
+ */
+export const boxFactSchema = z.object({
+  address: z.string(),
+  key: z.string(),
+  value: z.string().default(""),
+});
+export type BoxFact = z.infer<typeof boxFactSchema>;
+
+/** What running adb against the LAN found, or did. */
+export const boxAdbResultSchema = z.object({
+  type: z.literal("box_adb_result"),
+  requestId: z.string(),
+  ok: z.boolean(),
+  steps: listOf(bootstrapStepSchema),
+  facts: listOf(boxFactSchema).default([]),
+  /** Capped by the agent: this rides the socket and a frame is 1 MB. */
+  error: z.string().nullish(),
+});
+export type BoxAdbResult = z.infer<typeof boxAdbResultSchema>;
+
+/**
  * What the machine did about it.
  *
  * `output` is docker's own, capped by the agent: a frame is 1 MB and the
@@ -503,6 +531,7 @@ export const agentMessageSchema = z.discriminatedUnion("type", [
   pongSchema,
   hostConvergeResultSchema,
   hostBootstrapResultSchema,
+  boxAdbResultSchema,
 ]);
 export type AgentMessage = z.infer<typeof agentMessageSchema>;
 
@@ -728,6 +757,17 @@ export const CAPABILITY_WRITE_CONFIG = "write_config";
 export const CAPABILITY_SCREENSHOT = "screenshot";
 
 /**
+ * This agent can run adb against boxes on its LAN, on the hub's behalf.
+ *
+ * Only ever claimed by an agent in `-host` mode that was given an enroller --
+ * a box must never advertise it. Checked for the same reason
+ * `CAPABILITY_SCREENSHOT` is: the agent's type switch has no default branch,
+ * so asking a machine whose agent predates this produces silence until the
+ * request times out, and the operator is told nothing.
+ */
+export const CAPABILITY_BOX_ADB = "box_adb";
+
+/**
  * Does this box's `hello.capabilities` claim one?
  *
  * Null is the honest answer for an agent old enough not to send the field at
@@ -857,6 +897,61 @@ export const hostConvergeSchema = z.object({
 });
 export type HostConverge = z.infer<typeof hostConvergeSchema>;
 
+/**
+ * Run adb against boxes on this machine's LAN, on the hub's behalf.
+ *
+ * The relay half of box enrollment, and the reason it exists: boxes live
+ * behind NAT in other people's homes, so a hub on a VPS cannot open
+ * `192.168.1.10:5555`. A machine already on that LAN can, over the socket it
+ * already holds outwards.
+ *
+ * One message for both modes rather than two near-identical pairs. The
+ * payload is the same either way and the result differs only in which array
+ * fills, so splitting it would double the type switch, the goroutine guard
+ * and the capability for nothing.
+ *
+ * **The module zip is not in here.** It is ~5 MB of binary, and
+ * `files[].content` is a JSON string -- base64 would put ~7 MB on the wire
+ * and the same again as a string on the hub's event loop, per machine, with
+ * no resume and no checksum. The machine is an approved Device holding a
+ * token and `/files/*` is token-authenticated, so it fetches the zip the same
+ * way it fetches an agent update.
+ */
+export const boxAdbSchema = z.object({
+  type: z.literal("box_adb"),
+  /** Correlates the result, since a run outlives the beat that asked. */
+  requestId: z.string(),
+  /** `probe` reads and writes nothing; `enroll` provisions. */
+  mode: z.enum(["probe", "enroll"]),
+  /** The adb-enroll script itself, as the hub has it now. */
+  script: z.string(),
+  /** Probe mode: what to sweep. */
+  addresses: listOf(z.string()).default([]),
+  /**
+   * Enroll mode: one entry per box.
+   *
+   * `serial` empty means "let the box use its own ro.serialno" -- the hub
+   * only overrides when that value is missing, junk, or already taken.
+   */
+  targets: listOf(
+    z.object({
+      address: z.string(),
+      serial: z.string().default(""),
+      token: z.string(),
+    }),
+  ).default([]),
+  /** Enroll mode: where to fetch the Magisk module zip, and what it hashes to. */
+  moduleUrl: z.string().nullish(),
+  moduleSha256: z.string().nullish(),
+  /** What gets written into each box's config as its hub. */
+  serverUrl: z.string().default(""),
+  reboot: z.boolean().default(true),
+  reprovision: z.boolean().default(false),
+  /** Seconds the whole run may take: a sweep is fast, a batch of pushes is not. */
+  timeoutSeconds: z.number().int().positive().default(1800),
+});
+export type BoxAdb = z.infer<typeof boxAdbSchema>;
+
 export const serverMessageSchema = z.discriminatedUnion("type", [
   welcomeSchema,
   installJobSchema,
@@ -871,6 +966,7 @@ export const serverMessageSchema = z.discriminatedUnion("type", [
   pingSchema,
   hostConvergeSchema,
   hostBootstrapSchema,
+  boxAdbSchema,
 ]);
 export type ServerMessage = z.infer<typeof serverMessageSchema>;
 

@@ -18,12 +18,16 @@ icon: Users
 
 <Callout type="info" title="Locked out?">
   The hub syncs the admin account to `ADMIN_EMAIL`/`ADMIN_PASSWORD` on every
-  boot. Change `ADMIN_PASSWORD` and restart the hub container — that is the
+  boot. Change `ADMIN_PASSWORD` and bring the hub up again — that is the
   way back in, and it is why both live on the **hub** service's environment
   rather than in a file inside the container.
 
 ```sh
-docker compose --env-file .env -f deploy/docker-compose.yml restart hub
+docker compose --env-file .env -f deploy/docker-compose.yml up -d hub
 ```
+
+`restart` is not enough: it starts the same container again, with the
+environment it was created with. `up -d` sees the changed value and
+replaces the container.
 
 </Callout>

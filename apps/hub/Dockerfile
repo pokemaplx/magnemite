@@ -44,6 +44,48 @@ COPY agent/host/bootstrap.sh /out/bootstrap.sh
 COPY agent/redroid/Dockerfile agent/redroid/magnemite-start.sh \
 	agent/redroid/magnemite-root-grant.sh agent/redroid/magnemite.rc /out/redroid/
 
+# What enrols a hardware box over adb. Pushed to a machine when the hub asks it
+# to relay, and run in place when the hub reaches the boxes itself -- one script
+# either way, which is the only reason the quirks in it are written down once.
+COPY agent/box/adb-enroll.sh /out/adb-enroll.sh
+
+# The Magisk module zip, built here rather than fetched, because the hub is what
+# hands it to a box over adb and `make module` only ever ran on somebody's
+# laptop.
+#
+# This block, Makefile:50-66 and scripts/build-agent.ps1:72-104 all build the
+# same artifact and all have to agree -- especially the versionCode derivation,
+# which Magisk compares instead of the version string. Three copies is one too
+# many; if a fourth is ever wanted, extract a script instead.
+RUN apk add --no-cache zip >/dev/null; \
+    set -e; \
+    v=$(awk -F= '/^agent=/ { print $2 }' /VERSION); \
+    vc=$(echo "$v" | awk -F. '{ print $1 * 10000 + $2 * 100 + $3 }'); \
+    mkdir -p /tmp/module/bin; \
+    cp magisk/* /tmp/module/; \
+    cp /out/magnemite-agent-linux-arm64 /out/magnemite-agent-linux-arm /tmp/module/bin/; \
+    sed -i -e "s/^version=.*/version=v$v/" -e "s/^versionCode=.*/versionCode=$vc/" \
+      /tmp/module/module.prop; \
+    (cd /tmp/module && zip -qr "/out/magnemite-agent-$v.zip" . -x '.*'); \
+    rm -rf /tmp/module
+
+# adb, for the boxes the hub can reach itself.
+#
+# Extracted rather than installed: `apk add android-tools` is 66 MiB and
+# `android-tools-adb` alone is still 56, because it depends on python3, which
+# adb never calls. The binary and the libraries `ldd` names come to ~12 MiB.
+#
+# The stage is `node:22-alpine` and not something smaller on purpose -- same
+# base as the runtime, so musl and libstdc++ cannot drift. ld-musl is left
+# behind deliberately: the runtime has its own loader and clobbering it with
+# one apk may have upgraded is a way to break the whole image, not just adb.
+FROM node:22-alpine AS adb
+RUN apk add --no-cache android-tools-adb \
+ && mkdir -p /adb/usr/bin /adb/usr/lib \
+ && cp /usr/bin/adb /adb/usr/bin/ \
+ && ldd /usr/bin/adb | awk '{print $3}' | grep '^/' | grep -v 'ld-musl' \
+      | xargs -I{} cp -L {} /adb/usr/lib/
+
 FROM node:22-alpine AS build
 # pnpm is baked into the image below with `corepack install`: with only
 # `corepack enable`, the first pnpm call in a fresh container downloads the
@@ -84,6 +126,11 @@ RUN corepack install
 # What the hub hands out as the agent's target version, with the VERSION file
 # it was built from next to it. AGENT_BIN_DIR points here.
 COPY --from=agent /out /app/agent-bin
+# Enrolling a box over adb needs adb. Verified rather than assumed: a library
+# this stage missed would otherwise surface as an ENOENT the first time an
+# operator tried to add a box, which is both late and somewhere else.
+COPY --from=adb /adb/ /
+RUN adb --version >/dev/null || { echo "adb does not run in the runtime image"; exit 1; }
 # The same release, where the hub itself can read it for the Status page.
 COPY VERSION /app/VERSION
 COPY apps/hub/docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh

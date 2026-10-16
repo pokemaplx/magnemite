@@ -18,6 +18,7 @@ import {
 } from "./services/agentRelease.js";
 import { ensureArtifactDir } from "./services/artifacts.js";
 import { sweepOffline } from "./services/devices.js";
+import { reapOrphanedBoxEnrolls } from "./services/boxEnroll.js";
 import { reapOrphanedBootstraps } from "./services/hostBootstrap.js";
 import { loadOpenEpisodes } from "./services/connectivity.js";
 import { markMonitorStart, seedDefaultMonitorRules } from "./services/monitor.js";
@@ -45,6 +46,7 @@ async function main() {
   // Anything still RUNNING cannot be ours -- ours had not started yet -- so it
   // belongs to a hub that is gone, and nothing else will ever move it.
   await reapOrphanedBootstraps();
+  await reapOrphanedBoxEnrolls();
   // Publishes the agent binaries this image was built with, so boxes on an
   // older build are updated as they reconnect.
   await loadAgentRelease();

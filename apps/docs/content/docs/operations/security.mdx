@@ -44,6 +44,28 @@ A MITM config holds credentials of its own: a bearer token, a device auth token,
 an account email. It is never written to the hub's log, never into an audit
 entry.
 
+## adb keys
+
+[Adding a box over adb](/docs/fleet/box-enrollment) needs the box to trust a
+key, and an adb key on a box that has `su` is an unrestricted root shell on it.
+So the keys are handled as the credentials they are:
+
+- **The hub has one keypair**, generated on first use and kept in the database
+  — not on the artifacts volume, which is served, and where a file called
+  `adbkey` would be downloadable by anything holding a device token.
+- **Each machine keeps its own**, in `/etc/magnemite/adb`, generated the first
+  time it is asked to relay. The hub's private key is never sent anywhere. One
+  compromised relay is then root on the boxes that trusted _that machine_, not
+  on the fleet.
+- **Settings → Enrollment → adb keys** offers all of the public halves as one
+  `adb_keys` file to preseed into a golden image. Removing a machine from that
+  file and reflashing is how a key is revoked; there is no way to un-trust one
+  on a box that is already running except to edit
+  `/data/misc/adb/adb_keys` on it.
+
+Network adb is worth turning off on a box once it is enrolled. The agent never
+needs it again — it dials out, and every later update rides that socket.
+
 ## Integrity of what gets installed
 
 The hub computes a sha256 while caching a bundle. Every agent verifies that
@@ -53,9 +75,10 @@ _Success_ is not taken as proof.
 
 ## What to rotate, and when
 
-| Secret                | Rotate when                                                                  |
-| --------------------- | ---------------------------------------------------------------------------- |
-| `HUB_INTERNAL_SECRET` | Anyone who had shell on the server leaves. Restart `hub` and `web` together. |
-| `AUTH_SECRET`         | Same, note it signs out every session.                                       |
-| Enrollment tokens     | A batch is flashed and done, or a laptop with the token on it goes missing.  |
-| A device token        | The box is lost or reimaged: delete the device, let it enroll again.         |
+| Secret                | Rotate when                                                                                                                                  |
+| --------------------- | -------------------------------------------------------------------------------------------------------------------------------------------- |
+| `HUB_INTERNAL_SECRET` | Anyone who had shell on the server leaves. Restart `hub` and `web` together.                                                                 |
+| `AUTH_SECRET`         | Same, note it signs out every session.                                                                                                       |
+| Enrollment tokens     | A batch is flashed and done, or a laptop with the token on it goes missing.                                                                  |
+| A device token        | The box is lost or reimaged: delete the device, let it enroll again.                                                                         |
+| The hub's adb key     | A hub server is compromised. Delete the `AdbIdentity` row, then reseed `adb_keys` on the boxes — until you do, they still trust the old one. |

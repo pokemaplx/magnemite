@@ -18,6 +18,7 @@ import (
 	"syscall"
 
 	"magnemite/agent/internal/agent"
+	boxpkg "magnemite/agent/internal/box"
 	"magnemite/agent/internal/certfix"
 	"magnemite/agent/internal/config"
 	hostpkg "magnemite/agent/internal/host"
@@ -105,6 +106,7 @@ func main() {
 	var reporter agent.HostReporter
 	var converger agent.Converger
 	var bootstrapper agent.Bootstrapper
+	var boxEnroller agent.BoxEnroller
 
 	switch {
 	case *hostMode:
@@ -133,6 +135,10 @@ func main() {
 		// laptop that was asked to re-run its bootstrap should fail the way a
 		// machine without the script would, not pretend.
 		bootstrapper = &hostpkg.Bootstrapper{}
+		// Real in both modes too, and only here: this is what lets the hub
+		// reach boxes it cannot address itself, and a box that set it would
+		// advertise a capability it could not honour.
+		boxEnroller = &boxpkg.Enroller{}
 		log.SetPrefix("[" + cfg.Serial + "] ")
 		log.Printf("running as a Redroid host, measuring disk on %s", host.DiskPath())
 
@@ -187,6 +193,7 @@ func main() {
 	a.Host = reporter
 	a.Converger = converger
 	a.Bootstrapper = bootstrapper
+	a.BoxEnroller = boxEnroller
 	if err := a.Run(ctx); err != nil && ctx.Err() == nil {
 		log.Fatalf("agent stopped: %v", err)
 	}

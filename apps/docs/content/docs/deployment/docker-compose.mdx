@@ -13,14 +13,46 @@ already fronting your server terminates TLS and forwards to `EDGE_PORT`.
 
 ## What runs
 
-| Service | Image / build         | Ports                           |
-| ------- | --------------------- | ------------------------------- |
-| `hub`   | `apps/hub/Dockerfile` | 3001, internal                  |
-| `web`   | `apps/web/Dockerfile` | 3000, internal                  |
-| `caddy` | `deploy/edge`         | `EDGE_PORT` (8090) → 8090, HTTP |
+| Service | Image                                      | Ports                           |
+| ------- | ------------------------------------------ | ------------------------------- |
+| `hub`   | `ghcr.io/pokemaplx/magnemite/hub:latest`   | 3001, internal                  |
+| `web`   | `ghcr.io/pokemaplx/magnemite/web:latest`   | 3000, internal                  |
+| `caddy` | `ghcr.io/pokemaplx/magnemite/caddy:latest` | `EDGE_PORT` (8090) → 8090, HTTP |
 
 No database service: it connects to one you already run, MariaDB/MySQL or
 Postgres, over `DATABASE_URL`.
+
+## Images
+
+CI builds one image per deployable on every push to `main` and publishes it to
+GHCR, so a deploy is a pull and a restart rather than a Go cross-compile and a
+Next build on the machine holding the fleet's sockets:
+
+```sh
+make pull && make up
+```
+
+Each service's image is a variable, so pinning a release is naming its tag in
+`.env` — the numbers are the `VERSION` file's, one per deployable — and rolling
+back is naming the previous one:
+
+```sh title=".env"
+HUB_IMAGE=ghcr.io/pokemaplx/magnemite/hub:1.0.4
+#WEB_IMAGE=
+#CADDY_IMAGE=
+```
+
+<Callout type="warn">
+  The published `hub` and `web` carry a **MariaDB/MySQL** Prisma Client, which is what `DB_PROVIDER`
+  defaults to. The client is generated into the image, so on Postgres these are the wrong half of
+  that build: leave the variables unset and deploy with `make build && make up`, which tags your
+  local build under the same name. The `-mysql` suffix on the version tags (`hub:1.0.4-mysql`) is
+  the same image, named so that this cannot be a guess.
+</Callout>
+
+Building locally always wins over a published image, and is also the way out on
+a machine that cannot reach `ghcr.io` — where `make up` fails on the pull rather
+than quietly building what it could not fetch.
 
 ## Configuration
 
@@ -43,22 +75,27 @@ openssl rand -base64 32   # HUB_INTERNAL_SECRET
 
 ## Running it
 
-| Target         | Runs                                                          |
-| -------------- | ------------------------------------------------------------- |
-| `make up`      | `up -d` (builds only images that do not exist yet)            |
-| `make build`   | `build` (rebuild after a `git pull` or a `Dockerfile` change) |
-| `make down`    | `down` (stops and removes containers)                         |
-| `make logs`    | `logs -f hub web`                                             |
-| `make migrate` | `pnpm --filter @magnemite/db run deploy` inside `hub`         |
-| `make seed`    | optional starter data and a first enrollment token            |
+| Target         | Runs                                                        |
+| -------------- | ----------------------------------------------------------- |
+| `make pull`    | `pull` (fetch what the last push to `main` published)       |
+| `make up`      | `up -d` (pulls only images that are not on the machine yet) |
+| `make build`   | `build` (build locally instead — a fork, or Postgres)       |
+| `make down`    | `down` (stops and removes containers)                       |
+| `make logs`    | `logs -f hub web`                                           |
+| `make migrate` | `pnpm --filter @magnemite/db run deploy` inside `hub`       |
+| `make seed`    | optional starter data and a first enrollment token          |
 
-`SERVICE=web` narrows `build` and `up` to one service.
+`SERVICE=web` narrows `pull`, `build` and `up` to one service — which is how a
+dashboard deploy leaves the hub, and the device sockets it holds, untouched.
 
 Without `make`, both flags are required, the compose file lives under
 `deploy/`, `.env` at the repo root, and Compose would otherwise start with
 every variable blank:
 
 ```sh
+docker compose --env-file .env -f deploy/docker-compose.yml pull
+docker compose --env-file .env -f deploy/docker-compose.yml up -d
+# or, building this checkout instead of pulling:
 docker compose --env-file .env -f deploy/docker-compose.yml up -d --build
 ```
 

@@ -344,6 +344,20 @@ gap, and the next scale-up refills it. Closing the gap would rewrite the serial
 of every instance above it, and a changed serial is a new box with no history —
 seven boxes silently replaced to make a list look tidy.
 
+## A machine can also enrol hardware boxes
+
+A machine sits on a LAN the hub cannot reach, which is exactly what
+[adding a box over adb](/docs/fleet/box-enrollment) needs. Pick it under
+**Reach them from** and it runs adb against the boxes around it, reporting back
+over the socket it already holds — nothing new is opened, on the machine or
+anywhere else.
+
+It needs `adb`, which its bootstrap installs as a **warn-level** step: a
+machine without it is still a perfectly good Redroid host and the provisioning
+does not fail over it. A machine provisioned before this existed has no `adb`
+and no key; re-running its bootstrap installs the first, and the agent
+generates the second in `/etc/magnemite/adb` the first time it is asked.
+
 ## Known limits
 
 ### Rollout concurrency is not host-aware

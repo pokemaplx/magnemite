@@ -260,6 +260,72 @@ type BootstrapStep struct {
 	Detail string `json:"detail,omitempty"`
 }
 
+// BoxAdb asks a machine to run adb against boxes on its LAN.
+//
+// The relay half of box enrollment, and the reason it exists: boxes live
+// behind NAT in other people's homes, so a hub on a VPS cannot open
+// 192.168.1.10:5555. A machine already on that LAN can.
+//
+// One message for both modes rather than two near-identical pairs: the
+// payload is the same either way and the result differs only in which slice
+// fills.
+//
+// The module zip is deliberately *not* in here. It is ~5 MB of binary and
+// Content fields on this protocol are JSON strings, so it would travel as
+// base64 and be held in memory twice. The machine fetches it instead, with
+// its own token, the same way it fetches an agent update.
+type BoxAdb struct {
+	Type      string `json:"type"` // "box_adb"
+	RequestID string `json:"requestId"`
+	// "probe" reads and writes nothing; "enroll" provisions.
+	Mode   string `json:"mode"`
+	Script string `json:"script"`
+	// Probe mode: what to sweep.
+	Addresses []string `json:"addresses,omitempty"`
+	// Enroll mode: one entry per box.
+	Targets []BoxTarget `json:"targets,omitempty"`
+	// Enroll mode: where to fetch the Magisk module, and what it hashes to.
+	ModuleURL    string `json:"moduleUrl,omitempty"`
+	ModuleSHA256 string `json:"moduleSha256,omitempty"`
+	// What gets written into each box's config as its hub.
+	ServerURL   string `json:"serverUrl,omitempty"`
+	Reboot      bool   `json:"reboot"`
+	Reprovision bool   `json:"reprovision"`
+	// The whole run: a sweep is fast, a batch of pushes is not.
+	TimeoutSeconds int `json:"timeoutSeconds"`
+}
+
+type BoxTarget struct {
+	Address string `json:"address"`
+	// Empty means "let the box use its own ro.serialno". The hub only
+	// overrides when that value is missing, junk, or already taken.
+	Serial string `json:"serial,omitempty"`
+	Token  string `json:"token"`
+}
+
+// BoxFact is one `::fact <address> <key> <value...>` line the probe printed.
+//
+// Fixed leading fields and a free-text tail, like a step, because
+// ro.product.model is routinely "Chromecast with Google TV". An address of
+// "-" means the fact is about the run -- this machine's own adb public key
+// arrives that way.
+type BoxFact struct {
+	Address string `json:"address"`
+	Key     string `json:"key"`
+	Value   string `json:"value,omitempty"`
+}
+
+type BoxAdbResult struct {
+	Type      string `json:"type"` // "box_adb_result"
+	RequestID string `json:"requestId"`
+	Ok        bool   `json:"ok"`
+	// Never nil, for the reason HostBootstrapResult.Steps is not: a nil slice
+	// is JSON null and the hub's schema takes an array.
+	Steps []BootstrapStep `json:"steps"`
+	Facts []BoxFact       `json:"facts"`
+	Error string          `json:"error,omitempty"`
+}
+
 type HostBootstrapResult struct {
 	Type      string `json:"type"` // "host_bootstrap_result"
 	RequestID string `json:"requestId"`
@@ -313,11 +379,25 @@ const (
 	// -- which is what an unknown message type looks like from the other side,
 	// because the switch in handle() has no default branch.
 	CapabilityScreenshot = "screenshot"
+
+	// CapabilityBoxAdb says this agent can run adb against boxes on its LAN
+	// for the hub. Only ever claimed by a machine -- see AgentCapabilities.
+	CapabilityBoxAdb = "box_adb"
 )
 
 // AgentCapabilities is what this binary claims it can do.
-func AgentCapabilities() []string {
-	return []string{CapabilityWriteConfig, CapabilityScreenshot}
+//
+// boxAdb is a parameter rather than a constant because it is the one
+// capability that is not a property of the build: only a machine, running
+// with -host and given an enroller, can relay adb. A box advertising it would
+// have the hub send it work it cannot do, and the switch in handle() has no
+// default branch -- so the hub would wait for a reply that never comes.
+func AgentCapabilities(boxAdb bool) []string {
+	caps := []string{CapabilityWriteConfig, CapabilityScreenshot}
+	if boxAdb {
+		caps = append(caps, CapabilityBoxAdb)
+	}
+	return caps
 }
 
 type Heartbeat struct {

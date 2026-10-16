@@ -55,10 +55,29 @@ export const HUB_VERSION = VERSIONS.hub ?? "dev";
  * release would change the rendered compose file and have Docker recreate every
  * container on the machine for nothing.
  *
- * One place, because two halves depend on it: the bootstrap builds this tag on
- * a new machine and the compose file names it. If they drifted, a freshly
- * provisioned machine would build one image and be asked to run another -- and
- * fail on a pull that cannot succeed, since the tag is local and there is no
- * registry behind it.
+ * One place, because two halves depend on it: the bootstrap puts this tag on a
+ * new machine and the compose file names it. If they drifted, a freshly
+ * provisioned machine would have one image and be asked to run another.
+ *
+ * Still a **local** tag, now that CI publishes the image: see the source below
+ * for why that is deliberate.
  */
 export const REDROID_IMAGE = `magnemite/redroid:${VERSIONS.redroid ?? "1"}`;
+
+/**
+ * Where a machine gets that image when it does not already have it.
+ *
+ * CI builds this on an arm64 runner and publishes it per `redroid=`, so
+ * provisioning pulls it instead of spending a 780 MB build on every new
+ * machine -- the step that used to be the slowest part of a bootstrap, and the
+ * one most likely to fail on a machine nobody is watching.
+ *
+ * The bootstrap pulls this and retags it as REDROID_IMAGE above rather than
+ * naming it in the compose file, which looks redundant and is not: the
+ * rendered `image:` line is compared by docker as a string, so moving it to a
+ * registry reference would recreate every container on every machine already
+ * running -- a cold boot of every Android on it -- to deliver a byte-identical
+ * image. The local tag is what the fleet runs; this is only where it comes
+ * from.
+ */
+export const REDROID_IMAGE_SOURCE = `ghcr.io/pokemaplx/magnemite/redroid:${VERSIONS.redroid ?? "1"}`;

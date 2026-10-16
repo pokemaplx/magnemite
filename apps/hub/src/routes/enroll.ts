@@ -2,6 +2,7 @@ import type { FastifyInstance } from "fastify";
 import { enrollRequestSchema } from "@magnemite/protocol";
 import { generateToken, hashToken, prisma, renderInstanceName } from "@magnemite/db";
 import { bus } from "../bus.js";
+import { claimBoxEnroll, findLiveBoxEnroll } from "../services/boxEnroll.js";
 import { claimBootstrap } from "../services/hostBootstrap.js";
 import { queueJoinInstalls } from "../services/joinInstalls.js";
 import { env } from "../env.js";
@@ -87,13 +88,28 @@ export async function enrollRoutes(app: FastifyInstance) {
         }) || null
       : null;
 
+    // A hardware box the hub enrolled over adb, which is the other way a box
+    // arrives with the hub already knowing where it belongs.
+    //
+    // Read *before* the create below rather than patched in afterwards, for
+    // the reason the Redroid instance above is: a group set after the fact is
+    // a box that was already in `default` and was already handed default's
+    // MITM config by the first rollout to reach it.
+    //
+    // Only consulted when no instance matched. A serial the hub minted for a
+    // container is the stronger claim -- the container cannot be anything
+    // else -- and an adb row for the same serial would have to be a
+    // coincidence.
+    const boxEnroll =
+      kind === "BOX" && !instance ? await findLiveBoxEnroll(body.device.serial) : null;
+
     // A host belongs to no group: a group is a site with a MITM config and
     // install hooks, and a machine runs neither.
     const group =
       kind === "HOST"
         ? undefined
-        : instance?.host.defaultGroupId
-          ? { connect: { id: instance.host.defaultGroupId } }
+        : (instance?.host.defaultGroupId ?? boxEnroll?.desiredGroupId)
+          ? { connect: { id: (instance?.host.defaultGroupId ?? boxEnroll?.desiredGroupId)! } }
           : {
               connectOrCreate: {
                 where: { name: "default" },
@@ -129,6 +145,13 @@ export async function enrollRoutes(app: FastifyInstance) {
             name:
               body.name ??
               templated ??
+              // What the operator typed in the add-a-box dialog. Carried on
+              // the row rather than written into the box's config.json,
+              // which would look equivalent and is not: the update branch
+              // above does `body.name ?? existing.name`, so a name the box
+              // reports for itself would undo every later rename, on every
+              // re-enrolment.
+              boxEnroll?.desiredName ??
               defaultName(body.device.serial, body.device.manufacturer, body.device.model),
             tokenHash: hashToken(deviceToken),
             // A host is always approved. `/internal/authz` refuses an
@@ -188,6 +211,18 @@ export async function enrollRoutes(app: FastifyInstance) {
         where: { id: instance.id },
         data: { deviceId: device.id },
       });
+    }
+
+    // Close out the adb run that put the agent on this box. Until this lands
+    // the row reads as WAITING, which is exactly what it was -- adb finished
+    // and the box had not dialled in yet.
+    //
+    // Never allowed to throw: a box that has enrolled must get its token back
+    // even if the hub cannot tidy up the row it came from.
+    if (boxEnroll) {
+      await claimBoxEnroll(boxEnroll.id, device.id).catch((err) =>
+        log.warn({ err, deviceId: device.id }, "could not claim the box enrollment"),
+      );
     }
 
     // What its group says every new box needs, if its group says anything.

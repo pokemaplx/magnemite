@@ -43,7 +43,10 @@ adb shell "su -c 'magisk --install-module /data/local/tmp/magnemite-agent-1.0.0.
 adb reboot
 ```
 
-In bulk over the LAN:
+In bulk, this is what [Fleet → Add boxes](/docs/fleet/box-enrollment) does for
+you — it scans for the boxes, mints a token each and installs the module over
+adb without a laptop in the loop. The script is still there for a box neither
+the hub nor a machine can reach:
 
 ```sh
 ./scripts/enroll.sh dist/magnemite-agent-1.0.0.zip 192.168.1.10 192.168.1.11
@@ -150,16 +153,18 @@ that never returned, no power, or a binary that cannot reach the hub.
   the old binary or the new one, never half of one. If the new one cannot start, the module's
   respawn loop puts `.old` back. `tail /data/adb/magnemite/agent.log` for `self-update:` lines.
 
-  A `checksum mismatch` means the box was served a different file than the hub published.
+A `checksum mismatch` means the box was served a different file than the hub published.
+
 </Callout>
 
 ## When the module is needed again
+
 Scenarios that require a new module zip:
 
 1. A **brand-new box** (obviously no agent to update).
 2. A box that **never comes online**, it cannot be told anything. Check [troubleshooting](/docs/operations/troubleshooting#a-box-enrolled-but-never-appears-online) first.
 3. `service.sh` or `customize.sh` **changed** (those live in the module, not in
-  the binary).
+   the binary).
 
 > Reinstalling an old zip over an updated box puts the old binary back, so keep a
-freshly built one.
+> freshly built one.

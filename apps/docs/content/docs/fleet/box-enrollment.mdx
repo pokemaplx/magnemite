@@ -1,0 +1,137 @@
+---
+title: Adding boxes over adb
+description: Scan a LAN for rooted boxes and put the agent on the ones you pick, from the dashboard.
+icon: Radar
+---
+
+Getting a hardware box into the fleet used to be the one job that needed a
+laptop: build the module zip, run `scripts/enroll.sh`, paste a token. **Fleet →
+Add boxes** does the same thing from the dashboard — sweep for boxes, tick the
+ones you want, and each gets the agent, its own enrollment token and a reboot.
+
+It is the same shape as [adding a machine](/docs/deployment/redroid-bootstrap):
+one dialog, a row per box with its progress, and a run that ends by _waiting_
+rather than by claiming success. The box proves it worked by dialling in.
+
+```
+scan ──► adb connect, getprop, su -c id -u      (reads; writes nothing)
+            │
+            ▼
+pick ──► push config.json ─► push module.zip ─► magisk --install-module ─► reboot
+            │
+            ▼
+         WAITING ──► the box boots, enrols on its own ──► DONE
+```
+
+## What a box needs first
+
+Three things, and the scan reports all three so you find out before you commit:
+
+| Needs                      | What the scan shows if it is missing |
+| -------------------------- | ------------------------------------ |
+| **Network adb on**         | `no answer on this address`          |
+| **adb authorised**         | `adb is not authorised` — see below  |
+| **Magisk, `su` for shell** | `no root via su`                     |
+
+Nothing is written to a box that fails any of them. A run of twelve where three
+fail enrols the other nine and says which three, rather than stopping.
+
+## The authorisation wall, and how to get past it
+
+adb over TCP is not open access: a box that has never seen the hub's key shows
+**Allow USB debugging?** on the television and refuses everything until
+somebody presses it. Once. The box remembers.
+
+For one box in your own house that is a walk to the sofa. For a hundred it is
+not, so the hub's key can be installed ahead of time instead:
+
+**Settings → Enrollment → adb keys** downloads an `adb_keys` file holding the
+hub's public key and every machine's. Drop it at `/data/misc/adb/adb_keys` in
+the image you flash, and every box built from it trusts Magnemite from first
+boot with no dialog at all.
+
+<Callout type="warn" title="An adb key is a root shell">
+  Combined with `su` — which these boxes have — a key in `adb_keys` is unrestricted access to that
+  box. That is why each machine keeps **its own** key rather than carrying the hub's: a relay in
+  somebody's living room being compromised must not mean root on the whole fleet. It is also why the
+  file is one download of several keys rather than one key to share around.
+</Callout>
+
+## Direct, or through a machine
+
+The dialog asks where adb should run from, and the answer is usually not the
+hub.
+
+**The hub itself** only works when the hub shares a network with the boxes — a
+hub you run at the site, a development laptop, or a mesh like Tailscale that
+makes them neighbours. A hub on a VPS cannot open `192.168.1.10:5555`, and that
+is not a limitation to work around: boxes living behind NAT where nothing can
+reach them is the assumption the whole fleet is built on.
+
+**A machine** is the normal answer. Any enrolled [machine](/docs/fleet/redroid-hosts)
+on the boxes' LAN can run adb on the hub's behalf, over the socket it already
+holds outwards. Nothing new is opened anywhere. The machine needs `adb`
+installed, which its bootstrap does — a machine provisioned before this feature
+existed just needs its bootstrap re-run.
+
+## Serials, and when the hub overrides one
+
+A box's identity is its serial, and the fleet keys everything on it. Most boxes
+report a real one in `ro.serialno` and the hub leaves it alone.
+
+Cheap Amlogic and Rockchip boxes frequently do not. They ship reference
+firmware with `0123456789ABCDEF`, or all zeros, or nothing — so a dozen boxes
+off one batch all claim the same identity, and the second to enrol would quietly
+overwrite the first's row, name, group and history.
+
+So the hub checks, and **mints a serial whenever the reported one is not
+trustworthy**: junk, empty, already held by a different device in the fleet, or
+duplicated by another box in the same scan. The scan says so before you commit —
+`new serial box-a1b2c3d4e5 — it reports "0123456789ABCDEF", which is a
+placeholder rather than an identity`. A minted serial is written into the box's
+config and is what it enrols under from then on.
+
+<Callout type="info" title="Re-provisioning keeps the identity">
+  A box that is already enrolled keeps the serial it has, which is what keeps its row, its name and
+  its history. Replacing its agent is an upgrade, not a new box.
+</Callout>
+
+## What the box is given
+
+Only what it needs to call home: `serverUrl`, an enrollment token of its own,
+and a serial if the hub is overriding one. Written to
+`/data/adb/magnemite/config.json`, mode `0600`, _before_ the module is
+installed — Magisk's installer keeps an existing config and only lays down a
+bundled one when there is none, so the order is what makes re-provisioning work.
+
+The token is **single use and expires in a week**. It enrols exactly one box
+and is useless afterwards, so a token recovered from a box that never came back
+is not a way into the fleet. Its plaintext exists only in that file; the
+database holds a sha256.
+
+The name you type is kept on the enrollment row, not written into the box. A
+name a box reported for itself would silently undo every later rename, on every
+re-enrolment.
+
+## After the reboot
+
+The module's `service.sh` runs at boot, and Magisk stages modules and swaps them
+on restart — so until the box reboots, nothing is running. That is what the
+reboot step is for, and why the row sits at **waiting for it to reboot and dial
+in** rather than claiming to be done.
+
+A minute or so later the box appears in the fleet, in the group you chose, with
+the name you gave it, approved and ready for rollouts. The enrollment row
+disappears on its own.
+
+If it never arrives, the row says which stage it reached. The usual causes are a
+box that did not actually reboot, a `serverUrl` the box cannot reach from its own
+network, or a module that refused to install because the box is 32-bit — the zip
+carries `arm64` and `arm`, and `customize.sh` aborts on anything else.
+
+## The manual path
+
+`scripts/enroll.sh` still works and still does the same sequence from a laptop.
+It is the fallback for a box no network can reach from either the hub or a
+machine, and for flashing a batch from a golden image with the config already
+baked in via `make module SERVER=… TOKEN=…`.

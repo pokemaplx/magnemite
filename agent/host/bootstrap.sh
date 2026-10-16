@@ -320,18 +320,34 @@ fi
 
 # --- 5b. the Redroid image --------------------------------------------------
 #
-# Built here rather than pulled, because there is nothing to pull from: the tag
-# is local and this project publishes no registry. Without this step a freshly
-# provisioned machine enrols, reports, and then fails its first converge with
-# "pull access denied" on an image that was never going to exist.
+# Pulled when CI has it, built when it does not. Either way this step is what
+# puts $MAGNEMITE_IMAGE on the machine: without it a freshly provisioned
+# machine enrols, reports, and then fails its first converge with "pull access
+# denied" on an image that was never going to exist.
 #
-# It is the same build `make redroid` does -- the base image plus the agent
-# binary, the start script and the init service -- and it is skipped when the
-# tag is already there, so re-running this is cheap.
-if [ -n "${MAGNEMITE_IMAGE:-}" ] && [ -d ./redroid ]; then
+# The pull is retagged to the local name rather than used under its registry
+# one, and that is deliberate. The compose file the hub renders names
+# $MAGNEMITE_IMAGE, docker compares that line as a string, and pointing it at a
+# registry would recreate every container on every machine already running -- a
+# full Android cold boot each -- to deliver a byte-identical image.
+#
+# The build is the fallback, for a machine with no route to ghcr.io and for an
+# image bumped ahead of what CI has published. It is the same build `make
+# redroid` does, and is skipped when the tag is already there, so re-running
+# this is cheap either way.
+if [ -n "${MAGNEMITE_IMAGE:-}" ] && { [ -d ./redroid ] || [ -n "${MAGNEMITE_IMAGE_SOURCE:-}" ]; }; then
 	if docker image inspect "$MAGNEMITE_IMAGE" >/dev/null 2>&1; then
-		step image ok "$MAGNEMITE_IMAGE already built"
-	else
+		step image ok "$MAGNEMITE_IMAGE already here"
+	elif [ -n "${MAGNEMITE_IMAGE_SOURCE:-}" ] &&
+		docker pull "$MAGNEMITE_IMAGE_SOURCE" >/tmp/magnemite-pull.log 2>&1; then
+		# Not in the condition above: `set -e` is on, and a tag that failed
+		# would leave the step reported ok with nothing on the machine.
+		if docker tag "$MAGNEMITE_IMAGE_SOURCE" "$MAGNEMITE_IMAGE"; then
+			step image ok "pulled $MAGNEMITE_IMAGE_SOURCE"
+		else
+			step image warn "could not tag $MAGNEMITE_IMAGE_SOURCE as $MAGNEMITE_IMAGE"
+		fi
+	elif [ -d ./redroid ]; then
 		# The build context is this directory: the Dockerfile copies
 		# bin/magnemite-agent-linux-arm64 and redroid/*, so the binary has to
 		# sit where it expects rather than where it was pushed.
@@ -356,6 +372,13 @@ if [ -n "${MAGNEMITE_IMAGE:-}" ] && [ -d ./redroid ]; then
 			# not watching a 780 MB pull.
 			step image warn "could not build $MAGNEMITE_IMAGE (see /tmp/magnemite-build.log)"
 		fi
+	else
+		# A pull that failed with no build context to fall back on: the re-run
+		# over the agent's socket sends the redroid/ files only on the first
+		# provisioning. Still a warning rather than a failure, and still the
+		# converge that says so -- but naming the pull, because this is the
+		# case where the operator has a registry to check.
+		step image warn "could not pull $MAGNEMITE_IMAGE_SOURCE (see /tmp/magnemite-pull.log)"
 	fi
 else
 	step image warn "no image build requested"
@@ -449,6 +472,33 @@ if have timedatectl; then
 fi
 
 step harden ok "$FIREWALL, $BANS"
+
+# --- 5d. adb, so this machine can enrol the boxes around it -----------------
+#
+# A hardware box lives on a LAN the hub cannot reach -- that is the invariant
+# the whole fleet is built on -- so enrolling one means asking a machine that
+# *is* on that LAN to run adb at it. This installs what that needs.
+#
+# A warning and never a failure. Plenty of machines have no boxes near them,
+# a Redroid host that cannot enrol hardware is still a perfectly good Redroid
+# host, and failing here would turn "this feature is unavailable" into "your
+# provisioning did not work".
+#
+# No client keypair is generated here: the agent makes one the first time it
+# is asked to relay, in /etc/magnemite/adb. Doing it at provisioning time
+# would put a root-equivalent credential on every machine, including the ones
+# that will never enrol a box.
+if have adb; then
+	step adb ok "$(adb --version 2>/dev/null | head -1)"
+elif have apt-get; then
+	if $APT install -y adb >/dev/null 2>&1 || $APT install -y android-tools-adb >/dev/null 2>&1; then
+		step adb ok "$(adb --version 2>/dev/null | head -1)"
+	else
+		step adb warn "could not install adb — this machine cannot enrol boxes over its LAN"
+	fi
+else
+	step adb warn "no apt — install adb by hand if this machine should enrol boxes"
+fi
 
 # --- 6. the agent, its config and its unit ----------------------------------
 #

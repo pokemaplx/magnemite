@@ -1,5 +1,6 @@
 agent=1.0.4
 redroid=5
-hub=1.0.3
+hub=1.0.4
 web=1.0.3
-docs=1.0.3
+docs=1.0.4
+edge=1.0.1

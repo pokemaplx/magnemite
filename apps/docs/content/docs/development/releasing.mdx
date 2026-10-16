@@ -22,15 +22,20 @@ and nothing is wrong in the logs either.
 
 ```sh title="VERSION"
 agent=1.0.0   # bump this and the boxes update themselves
-hub=1.0.0     # a label: shown on the Status page
+redroid=1     # the Redroid image: its base, start script and init service
+hub=1.0.0     # a label: shown on the Status page, and this image's tag
 web=1.0.0     # the same, for the dashboard
 docs=1.0.0    # the same, for the documentation site
+edge=1.0.0    # the same, for Caddy and the Caddyfile it carries
 ```
 
 One line per deployable, because they ship on different clocks. Only `agent=`
 changes what the fleet runs; the rest are how you tell, on the **Status**
 page, whether a deploy finished — a hub and a dashboard on different
 numbers is a half-applied release.
+
+These numbers are also the published image tags, so a bump is what gives a
+release a name to pin and to roll back to.
 
 Same string, same fleet. It is not semver, so a _lower_ `agent=` is a downgrade
 the boxes will happily apply — which is also how you roll the agent back on
@@ -52,6 +57,8 @@ purpose.
 | `packages/db/prisma/schema.prisma` | `hub=`          | Commit the migration; `hub` applies it on start                     |
 | `agent/magisk/`                    | **`agent=`**    | `make module` and reflash — this part is not delivered over the air |
 | `apps/docs`                        | `docs=`         | Redeploy `docs`                                                     |
+| `agent/redroid/`                   | `redroid=`      | CI publishes the image; machines pull it — see below                |
+| `deploy/edge/`                     | `edge=`         | Redeploy `caddy`                                                    |
 
 Adding a **version source** is not a release at all: it is a URL in Settings.
 Only a source publishing something other than the shared index format would
@@ -88,13 +95,20 @@ the protocol.
 $EDITOR VERSION
 git commit -am "agent: report the LAN address"
 git push
-# redeploy the hub
-docker compose --env-file .env -f deploy/docker-compose.yml up -d --build hub
+# wait for the images workflow, then deploy the hub
+docker compose --env-file .env -f deploy/docker-compose.yml pull hub
+docker compose --env-file .env -f deploy/docker-compose.yml up -d hub
 ```
 
 The hub's image cross-compiles the agent, publishes the binaries, and tells
 each box to update as it reconnects — full flow, settings and failure handling
 in [updating the agent](/docs/fleet/agent#the-agent-updates-itself).
+
+The wait is the one new thing a deploy has to think about: a pull started
+before `.github/workflows/images.yml` finished fetches the **previous** image
+and reports success, so the fleet sits on the old agent with nothing in any log
+saying why. `up -d --build hub` is still there and still builds this checkout,
+which is the shortcut when you would rather not wait.
 
 Before shipping something that touches the agent's connection or install path,
 run it against a [fake fleet](/docs/development/fake-fleet): a binary that
@@ -109,7 +123,22 @@ their own with backoff and queued jobs resume, so it is a few minutes of noise
 rather than damage — but on a large fleet, pick your moment. Narrowing a deploy
 so only the dashboard restarts is one setting on
 [Coolify](/docs/deployment/coolify#deploying-without-dropping-the-fleet), and free under plain compose
-(`docker compose --env-file .env -f deploy/docker-compose.yml up -d --build web`).
+(`docker compose --env-file .env -f deploy/docker-compose.yml up -d web`, after a `pull web`).
+
+## The Redroid image ships on its own clock
+
+`agent/redroid/` and the `redroid=` line build an arm64 image in CI, and the
+machines pull it: a new Redroid host no longer spends a 780 MB `docker build`
+inside its bootstrap. It is deliberately **not** rebuilt for an agent change —
+the binary inside is a seed each box replaces by self-updating within seconds —
+so bumping `agent=` leaves this image alone, which is why it has its own line.
+
+What a machine runs is still the local tag `magnemite/redroid:<redroid=>`; the
+bootstrap pulls the published image and retags it. That looks redundant and is
+not: the rendered compose file names that tag, docker compares it as a string,
+and pointing it at a registry would recreate every container on every machine
+already running — a full Android cold boot each — to deliver an identical
+image.
 
 ## Checklist
 

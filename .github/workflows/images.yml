@@ -1,0 +1,282 @@
+# The deployable images, built once on a runner instead of on every machine
+# that runs them.
+#
+# What this replaces: a deploy *was* a build. The hub's image cross-compiles
+# the agent for three architectures and the dashboard runs a Next build, both
+# on the VPS that is holding the fleet's sockets -- minutes of CPU, and on a
+# small box a real OOM candidate. With these published, a deploy is a pull and
+# a restart, and the image that was tested is the image that runs.
+#
+# Free on this repository, and quietly dependent on that: a public repo gets
+# unlimited standard-runner minutes, free GHCR storage for public packages, and
+# the arm64 runner the Redroid image needs. A fork that turns private loses all
+# three -- the arm64 labels do not even resolve there.
+name: images
+
+on:
+  push:
+    branches: [main]
+  # A manual run rebuilds and republishes everything. Not a choice offered as
+  # an input: a dispatch carries no push range to diff, so "only what changed"
+  # has nothing to mean here.
+  workflow_dispatch:
+
+# One run per ref. A second push while the first is still building cancels it:
+# the only thing anyone wants published is the newest commit.
+concurrency:
+  group: images-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # Which images this commit actually needs, and under which tags.
+  #
+  # Each image's filter is its *build context*, not its directory: the hub
+  # bundles packages/ and compiles agent/, so a change to either is a new hub
+  # image even though apps/hub never moved.
+  plan:
+    runs-on: ubuntu-latest
+    outputs:
+      # A matrix for the four server images, already carrying their tags.
+      stack: ${{ steps.plan.outputs.stack }}
+      # The Redroid image's version, or empty when it does not need rebuilding.
+      redroid: ${{ steps.plan.outputs.redroid }}
+      namespace: ${{ steps.plan.outputs.namespace }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # The push range decides what is rebuilt, so `before` has to be in
+          # the clone. A shallow one does not have it.
+          fetch-depth: 0
+
+      - id: plan
+        # Every value from the event arrives through the environment rather
+        # than through ${{ }} inside the script: interpolation happens before
+        # sh sees the line, and a ref or commit message is attacker-controlled
+        # text.
+        env:
+          BEFORE: ${{ github.event.before }}
+          SHA: ${{ github.sha }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -eu
+
+          # GHCR rejects uppercase and github.repository carries the owner's
+          # own casing. Derived rather than hardcoded, so a fork publishes to
+          # its own namespace without editing this file.
+          ns=$(printf 'ghcr.io/%s' "$REPO" | tr '[:upper:]' '[:lower:]')
+          short=$(printf '%s' "$SHA" | cut -c1-7)
+
+          # VERSION holds one key=value line per deployable, and is the only
+          # place a version is written -- here as everywhere else.
+          version() { awk -F= -v k="$1" '$1 == k { print $2 }' VERSION; }
+
+          # Everything, whenever there is no range to diff: a manual run sends
+          # no `before` at all, the first push of a branch reports an all-zero
+          # one, and a force-push can name a commit that is no longer in the
+          # clone. All three are "rebuild the lot" rather than "nothing
+          # changed", which is the safe direction to fail in.
+          all=no
+          if ! git cat-file -e "${BEFORE}^{commit}" 2>/dev/null; then
+            all=yes
+          fi
+          if [ "$all" = yes ]; then
+            changed=""
+          else
+            changed=$(git diff --name-only "$BEFORE" "$SHA")
+          fi
+          printf 'range: %s..%s\n' "${BEFORE:-(none)}" "$SHA"
+          printf '%s\n' "$changed" | sed 's/^/  /'
+
+          touched() {
+            [ "$all" = yes ] && return 0
+            for prefix in "$@"; do
+              if printf '%s\n' "$changed" | grep -q "^$prefix"; then return 0; fi
+            done
+            return 1
+          }
+
+          stack='[]'
+          # add <name> <context> <dockerfile> <version> <build-args> <alias>
+          add() {
+            tags=$(printf '%s\n' "$ns/$1:$4" "$ns/$1:latest" "$ns/$1:sha-$short")
+            if [ -n "${6:-}" ]; then
+              tags=$(printf '%s\n%s' "$tags" "$ns/$1:$4-$6")
+            fi
+            stack=$(printf '%s' "$stack" | jq -c \
+              --arg name "$1" --arg context "$2" --arg dockerfile "$3" \
+              --arg args "$5" --arg tags "$tags" --arg cache "$ns/$1:buildcache" \
+              '. + [{
+                 name: $name, context: $context, dockerfile: $dockerfile,
+                 build_args: $args, tags: $tags, cache: $cache
+               }]')
+            printf 'build: %s %s\n' "$1" "$4"
+          }
+
+          # The workspace files sit in every Node image's context, and VERSION
+          # is copied into the hub and the dashboard so the Status page can say
+          # which release is running -- so a bump is a rebuild, by design.
+          workspace='package.json pnpm-lock.yaml pnpm-workspace.yaml VERSION'
+
+          # DB_PROVIDER is passed explicitly, and this is the one line here
+          # worth reading twice. The Prisma Client is generated *into* these
+          # images; the Dockerfiles' ARG default is "postgresql" and every
+          # compose file defaults to "mysql". An image built without this arg
+          # would publish the Postgres client under the tag a MariaDB
+          # deployment pulls, and fail at container start rather than here.
+          # Hence the `-mysql` alias as well: whichever tag a compose file
+          # names, what is inside it is spelled out.
+          if touched apps/hub/ agent/ packages/ .github/workflows/images.yml $workspace; then
+            add hub . apps/hub/Dockerfile "$(version hub)" DB_PROVIDER=mysql mysql
+          fi
+          if touched apps/web/ packages/ .github/workflows/images.yml $workspace; then
+            add web . apps/web/Dockerfile "$(version web)" DB_PROVIDER=mysql mysql
+          fi
+          if touched apps/docs/ .github/workflows/images.yml $workspace; then
+            add docs . apps/docs/Dockerfile "$(version docs)" '' ''
+          fi
+          # The edge carries its Caddyfile inside the image, and only the plain
+          # one: `Caddyfile.coolify` is built by Coolify straight from this
+          # repository, so no deploy would ever pull it.
+          if touched deploy/edge/ .github/workflows/images.yml VERSION; then
+            add caddy deploy/edge deploy/edge/Dockerfile "$(version edge)" CADDYFILE=Caddyfile ''
+          fi
+
+          # The Redroid image is deliberately *not* rebuilt for an agent
+          # change. The binary inside it is a seed each box's own self-update
+          # replaces within seconds, so the image is versioned by what it is --
+          # the base, the start script, the init service -- and republishing
+          # one tag with a different seed would make that tag mean two things
+          # for nothing gained. So: its own directory, or a moved `redroid=`.
+          redroid=''
+          if [ "$all" = yes ] || printf '%s\n' "$changed" | grep -q '^agent/redroid/'; then
+            redroid=$(version redroid)
+          elif printf '%s\n' "$changed" | grep -q '^VERSION$'; then
+            was=$(git show "$BEFORE:VERSION" 2>/dev/null | awk -F= '$1 == "redroid" { print $2 }' || true)
+            if [ "$was" != "$(version redroid)" ]; then
+              redroid=$(version redroid)
+            fi
+          fi
+          if [ -n "$redroid" ]; then printf 'build: redroid %s\n' "$redroid"; fi
+
+          {
+            printf 'namespace=%s\n' "$ns"
+            printf 'stack=%s\n' "$stack"
+            printf 'redroid=%s\n' "$redroid"
+          } >> "$GITHUB_OUTPUT"
+
+  # The four server images: amd64 only, which is every host this stack is
+  # deployed on. The arm64 in this project is the boxes, and they run no part
+  # of it.
+  stack:
+    needs: plan
+    if: needs.plan.outputs.stack != '[]'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      # One image failing should not cancel the others: they are separate
+      # deployables that happen to share a commit.
+      fail-fast: false
+      matrix:
+        image: ${{ fromJSON(needs.plan.outputs.stack) }}
+    name: ${{ matrix.image.name }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+
+      # Every base image here comes from Docker Hub -- node, golang, alpine,
+      # caddy -- where an anonymous pull is 100 per 6 hours per IP, and a
+      # runner shares its IP with everything else on it. Logging in with any
+      # account at all moves the count onto that account. Without the secrets
+      # this step is skipped and the build is one `toomanyrequests` away from a
+      # red run that has nothing to do with the commit.
+      #
+      # The condition reads env rather than secrets: a secret is not available
+      # to a step's own `if`, so the value is lifted into the environment one
+      # line above it.
+      - uses: docker/login-action@v3
+        if: env.DOCKERHUB_USER != ''
+        env:
+          DOCKERHUB_USER: ${{ secrets.DOCKERHUB_USERNAME }}
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          # The run's own token: nothing to configure, and it can write to
+          # nothing but this repository's packages.
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: docker/build-push-action@v6
+        with:
+          context: ${{ matrix.image.context }}
+          file: ${{ matrix.image.dockerfile }}
+          build-args: ${{ matrix.image.build_args }}
+          tags: ${{ matrix.image.tags }}
+          push: true
+          # Layer cache in GHCR rather than in the Actions cache. That one is
+          # 10 GB per repository with LRU eviction, and these images carry
+          # hundreds of MB of node_modules each: it would evict itself between
+          # runs and never hit. A registry cache on a public package has
+          # neither the quota nor the eviction.
+          cache-from: type=registry,ref=${{ matrix.image.cache }}
+          cache-to: type=registry,ref=${{ matrix.image.cache }},mode=max
+          # No attestation manifest. It is what makes GHCR list a package with
+          # an `unknown/unknown` platform beside the real one, and nothing in
+          # this project verifies it.
+          provenance: false
+
+  # The Redroid image, on a native arm64 runner.
+  #
+  # Free for public repositories, and the only sane way to build this one: the
+  # image is Android -- the 64-only Redroid base plus a patched Magisk -- and
+  # the fleet it serves is arm64 only, so an emulated amd64 build would be
+  # slower *and* produce something nothing would run.
+  redroid:
+    needs: plan
+    if: needs.plan.outputs.redroid != ''
+    runs-on: ubuntu-24.04-arm
+    permissions:
+      contents: read
+      packages: write
+    env:
+      TAG: ${{ needs.plan.outputs.namespace }}/redroid:${{ needs.plan.outputs.redroid }}
+      LATEST: ${{ needs.plan.outputs.namespace }}/redroid:latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/login-action@v3
+        if: env.DOCKERHUB_USER != ''
+        env:
+          DOCKERHUB_USER: ${{ secrets.DOCKERHUB_USERNAME }}
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # Through the Makefile on purpose, rather than build-push-action.
+      #
+      # The Dockerfile's ARG defaults -- the Redroid base, the Magisk fork and
+      # its md5 -- are what the whole fleet gets, because every machine that
+      # builds this image locally runs a plain `docker build` with no
+      # --build-arg. A second set of defaults here would be one tag meaning two
+      # different images depending on who built it, which is the failure the
+      # Makefile's own comment exists to prevent. `make redroid` passes none of
+      # them either, so this is the image those machines would have built.
+      - run: make redroid REDROID_TAG="$TAG"
+
+      - name: push
+        run: |
+          set -eu
+          docker push "$TAG"
+          docker tag "$TAG" "$LATEST"
+          docker push "$LATEST"

@@ -20,6 +20,8 @@ import { startRollout, type ActionState } from "@/actions/rollouts";
 import { rebootDevice, setDeviceApproval } from "@/actions/devices";
 import { RenameDevicesDialog } from "@/components/rename-devices-dialog";
 import { ChangeGroupDialog } from "@/components/change-group-dialog";
+import { AddBoxDialog } from "@/components/add-box-dialog";
+import { EnrollingBanner, type EnrollingRow } from "@/components/enrolling-boxes";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
@@ -171,6 +173,8 @@ export function FleetTable({
   packageName,
   mitmColumns,
   canOperate,
+  machines,
+  enrolling,
 }: {
   rows: DeviceRow[];
   groups: { id: string; name: string }[];
@@ -179,6 +183,10 @@ export function FleetTable({
   packageName: string;
   mitmColumns: MitmColumn[];
   canOperate: boolean;
+  /** Online machines, the only things that can relay an adb enrollment. */
+  machines: { id: string; name: string }[];
+  /** Hardware boxes partway through being added over adb. */
+  enrolling: EnrollingRow[];
 }) {
   // The scanner column only earns its space once Rotom has matched something.
   const showRotom = rows.some((row) => row.rotom !== null);
@@ -298,15 +306,22 @@ export function FleetTable({
             depend on a selection. Everything that acts on picked boxes lives in
             the bar that appears at the bottom once there are any. */}
         {canOperate ? (
-          <RolloutDialog
-            versions={versions}
-            deviceIds={[]}
-            label="Update all"
-            disabled={rows.length === 0}
-            variant="outline"
-          />
+          <div className="flex items-center gap-2">
+            {/* A hardware box is a box, so it is added from the fleet rather
+                than from a page of its own. */}
+            <AddBoxDialog groups={groups} machines={machines} />
+            <RolloutDialog
+              versions={versions}
+              deviceIds={[]}
+              label="Update all"
+              disabled={rows.length === 0}
+              variant="outline"
+            />
+          </div>
         ) : null}
       </header>
+
+      {enrolling.length > 0 ? <EnrollingBanner rows={enrolling} canOperate={canOperate} /> : null}
 
       {stats.pending > 0 ? (
         <div className="flex items-center gap-2 rounded-lg border border-warning/30 bg-warning/5 px-3 py-2 text-sm">

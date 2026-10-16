@@ -3,6 +3,7 @@ import { requireUser } from "@/lib/session";
 import { compareVersions } from "@/lib/format";
 import { mitmColumns } from "@/lib/mitm-columns";
 import { FleetTable, type DeviceRow, type VersionOption } from "@/components/fleet-table";
+import type { EnrollingRow } from "@/components/enrolling-boxes";
 
 export const dynamic = "force-dynamic";
 
@@ -123,9 +124,50 @@ export default async function FleetPage() {
   const latestVersion =
     versionOptions.find((option) => option.targetId === target?.id)?.version ?? null;
 
+  // What can relay an adb enrollment, and what is already being enrolled.
+  // Both only matter to the dialog and the banner, so they are read here
+  // rather than threaded through the device query above.
+  const [machines, enrollingRows] = await Promise.all([
+    prisma.device.findMany({
+      where: { kind: "HOST", status: "ONLINE" },
+      select: { id: true, name: true },
+      orderBy: { name: "asc" },
+    }),
+    // DONE rows are left out: the box is in the table above by then, and a
+    // banner repeating it is noise. A failure stays until it is dismissed.
+    prisma.boxEnroll.findMany({
+      where: { state: { in: ["RUNNING", "WAITING", "FAILED"] } },
+      orderBy: { startedAt: "desc" },
+      take: 20,
+      select: {
+        id: true,
+        address: true,
+        serial: true,
+        state: true,
+        error: true,
+        steps: true,
+        relay: { select: { name: true } },
+      },
+    }),
+  ]);
+
+  const enrolling: EnrollingRow[] = enrollingRows.map((row) => ({
+    id: row.id,
+    address: row.address,
+    serial: row.serial,
+    state: row.state,
+    error: row.error,
+    // `steps` is Json, which is the one shape both providers agree on -- so
+    // it comes back as unknown and is narrowed here rather than trusted.
+    steps: Array.isArray(row.steps) ? (row.steps as EnrollingRow["steps"]) : [],
+    relayName: row.relay?.name ?? null,
+  }));
+
   return (
     <FleetTable
       rows={rows}
+      machines={machines}
+      enrolling={enrolling}
       groups={groups.map((g) => ({ id: g.id, name: g.name }))}
       versions={versionOptions}
       latestVersion={latestVersion}

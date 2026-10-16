@@ -29,7 +29,15 @@ type Build = { file: string; url: string; sha256: string };
 type Release = { version: string; builds: Map<string, Build> };
 
 /** Subdirectory of ARTIFACT_DIR the binaries are published under. */
-const PUBLISH_DIR = "agent";
+/**
+ * Where published agent artifacts live under ARTIFACT_DIR.
+ *
+ * Shared with boxEnroll.ts, which publishes the Magisk module zip into the
+ * *same* versioned directory -- `pruneOldReleases` deletes every other
+ * directory under here, so a zip published anywhere else would vanish on the
+ * next boot.
+ */
+export const PUBLISH_DIR = "agent";
 
 let release: Release | null = null;
 
@@ -45,7 +53,7 @@ function buildKeyForAbi(abi: string | null | undefined): string | null {
   return null;
 }
 
-async function sha256File(file: string): Promise<string> {
+export async function sha256File(file: string): Promise<string> {
   const hash = createHash("sha256");
   hash.update(await fs.readFile(file));
   return hash.digest("hex");

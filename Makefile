@@ -116,12 +116,20 @@ redroid: agent ## Build the Redroid image with the agent baked in (arm64 host)
 # sockets it holds -- untouched.
 SERVICE ?=
 
+# The usual deploy, now that CI publishes the images: fetch what main built and
+# restart. `make build` is still here and still wins over a published image --
+# it tags the result under the same name -- which is the path on Postgres,
+# whose client these images are not built with.
+.PHONY: pull
+pull: ## Fetch the published images, or one service with SERVICE=web
+	$(COMPOSE) pull $(SERVICE)
+
 .PHONY: build
-build: ## Rebuild the images, or one service with SERVICE=web
+build: ## Rebuild the images locally, or one service with SERVICE=web
 	$(COMPOSE) build $(SERVICE)
 
 .PHONY: up
-up: ## Start the stack, or one service with SERVICE=web. Builds only what is missing
+up: ## Start the stack, or one service with SERVICE=web. Pulls what is missing
 	$(COMPOSE) up -d $(SERVICE)
 
 .PHONY: down

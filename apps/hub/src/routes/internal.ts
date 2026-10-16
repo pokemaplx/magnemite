@@ -11,7 +11,9 @@ import {
 import { env } from "../env.js";
 import { log } from "../log.js";
 import { connectionCount, onlineDeviceIds, sendTo } from "../registry.js";
+import { adbKeysFile } from "../services/adbIdentity.js";
 import { cacheVersion, pruneArtifacts } from "../services/artifacts.js";
+import { getScan, startBoxEnroll, startScan } from "../services/boxEnroll.js";
 import { execOnDevice } from "../services/deviceCommands.js";
 import { broadcastWelcome } from "../services/devices.js";
 import { normaliseLogPath, requestBundle, subscribeToLogs } from "../services/deviceLogs.js";
@@ -801,6 +803,126 @@ export async function internalRoutes(app: FastifyInstance) {
       return await convergeHost(id, { force });
     } catch (err) {
       log.error({ err, hostId: id }, "converge failed");
+      return reply.status(500).send({ error: err instanceof Error ? err.message : String(err) });
+    }
+  });
+
+  // --- Hardware boxes, over adb --------------------------------------------
+  //
+  // Here rather than as server actions for the same reason the machine routes
+  // are: this needs adb, which lives in the hub's image, and a socket to the
+  // machine when the hub cannot reach the boxes itself.
+
+  /**
+   * Sweep for boxes, and report what answered.
+   *
+   * Returns an id immediately rather than the result. A /22 is minutes, a
+   * relay adds the socket round trip, and the adb runs are serialised -- so a
+   * synchronous call could block for an unbounded time behind an enrollment,
+   * and `hub.ts`'s fetch has no timeout to catch it with.
+   */
+  app.post("/internal/boxes/scan", async (request, reply) => {
+    const parsed = z
+      .object({
+        /** Free text: addresses one per line, or CIDR blocks, or both. */
+        addresses: z.string().min(1),
+        /** The machine to run adb from, or null for the hub itself. */
+        relayDeviceId: z.string().min(1).nullable().optional(),
+      })
+      .safeParse(request.body);
+    if (!parsed.success) {
+      return reply.status(400).send({ error: "invalid body", issues: parsed.error.issues });
+    }
+
+    try {
+      return startScan({
+        addresses: parsed.data.addresses,
+        relayDeviceId: parsed.data.relayDeviceId ?? null,
+      });
+    } catch (err) {
+      // 400, not 500: everything that throws synchronously here is the
+      // operator's input -- a range too wide, or nothing parseable in it.
+      return reply.status(400).send({ error: err instanceof Error ? err.message : String(err) });
+    }
+  });
+
+  app.get("/internal/boxes/scan/:id", async (request, reply) => {
+    const { id } = request.params as { id: string };
+    const scan = getScan(id);
+    // Gone rather than never existed, most likely: scans are held in memory
+    // and a hub restart drops them. Saying so is better than an empty result
+    // that looks like "found nothing".
+    if (!scan) return reply.status(404).send({ error: "that scan is no longer held" });
+    return scan;
+  });
+
+  /**
+   * Enrol the boxes the operator picked.
+   *
+   * Returns as soon as the rows exist: the run itself is a push and an
+   * install per box, and what it did lands on those rows as it happens.
+   */
+  app.post("/internal/boxes/enroll", async (request, reply) => {
+    const parsed = z
+      .object({
+        targets: z
+          .array(
+            z.object({
+              address: z.string().trim().min(1),
+              /** Empty lets the box keep its own `ro.serialno`. */
+              serial: z.string().trim().default(""),
+              serialSource: z.enum(["REPORTED", "MINTED"]).default("REPORTED"),
+              /** What the row is keyed on, which is what the claim matches. */
+              expectedSerial: z.string().trim().min(1),
+              name: z.string().trim().min(1).max(64).nullable().optional(),
+            }),
+          )
+          .min(1)
+          .max(64),
+        // Validated as a shape only, for the reason the machine bootstrap
+        // gives: whether the group still exists is the database's answer, and
+        // the foreign key is SET NULL.
+        desiredGroupId: z.string().min(1).nullable().optional(),
+        relayDeviceId: z.string().min(1).nullable().optional(),
+        reboot: z.boolean().default(true),
+        reprovision: z.boolean().default(false),
+      })
+      .safeParse(request.body);
+    if (!parsed.success) {
+      return reply.status(400).send({ error: "invalid body", issues: parsed.error.issues });
+    }
+
+    try {
+      return await startBoxEnroll({
+        targets: parsed.data.targets.map((t) => ({
+          address: t.address,
+          serial: t.serial,
+          serialSource: t.serialSource,
+          expectedSerial: t.expectedSerial,
+          name: t.name ?? null,
+        })),
+        desiredGroupId: parsed.data.desiredGroupId ?? null,
+        relayDeviceId: parsed.data.relayDeviceId ?? null,
+        reboot: parsed.data.reboot,
+        reprovision: parsed.data.reprovision,
+      });
+    } catch (err) {
+      log.error({ err }, "could not start the adb enrollment");
+      return reply.status(500).send({ error: err instanceof Error ? err.message : String(err) });
+    }
+  });
+
+  /**
+   * Every adb public key the fleet uses, as an `adb_keys` file.
+   *
+   * Preseeded into a golden image, this is what turns enrollment from "tap
+   * Allow on every TV" into something unattended.
+   */
+  app.get("/internal/boxes/adb-keys", async (_request, reply) => {
+    try {
+      return { keys: await adbKeysFile() };
+    } catch (err) {
+      log.error({ err }, "could not read the adb keys");
       return reply.status(500).send({ error: err instanceof Error ? err.message : String(err) });
     }
   });

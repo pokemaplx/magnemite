@@ -6,6 +6,7 @@
     "redroid",
     "redroid-hosts",
     "enrollment",
+    "box-enrollment",
     "rollouts",
     "update",
     "manual",

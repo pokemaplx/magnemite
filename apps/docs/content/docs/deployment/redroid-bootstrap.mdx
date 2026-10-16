@@ -183,14 +183,22 @@ the OOM killer sooner, and the dashboard shows `0 B` as a real zero.
 <Step>
 ### image
 
-The Redroid image, **built** here rather than pulled, because there is nothing
-to pull from: the tag is local and this project publishes no registry. Skipped
-when the tag is already there.
+The Redroid image, **pulled** from
+`ghcr.io/pokemaplx/magnemite/redroid:<redroid=>` and retagged as the local tag
+the compose file names, then **built** on this machine if that pull could not
+happen — no network to GHCR, or a `redroid=` CI has not published yet. Skipped
+entirely when the tag is already there.
+
+The retag is what keeps the fleet still: the rendered compose names a local
+tag, docker compares that line as a string, and a registry reference in it
+would recreate every container on every machine already running to deliver an
+identical image.
 
 A failure here is a warning, not a refusal — the machine is otherwise ready and
 will enroll. The converge is what fails, and it says why on the machine page,
 which is a better place to find out than halfway through a 780 MB build nobody
-is watching.
+is watching. `/tmp/magnemite-pull.log` and `/tmp/magnemite-build.log` on the
+machine hold whichever one was tried.
 
 </Step>
 

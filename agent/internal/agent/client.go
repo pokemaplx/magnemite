@@ -76,6 +76,13 @@ type Bootstrapper interface {
 	Run(ctx context.Context, req proto.HostBootstrap) proto.HostBootstrapResult
 }
 
+// BoxEnroller runs adb against the boxes on this machine's LAN. Its own
+// interface for the reason Bootstrapper is one, and nil on a box -- which is
+// what makes a misdirected request a log line rather than a shell.
+type BoxEnroller interface {
+	Run(ctx context.Context, req proto.BoxAdb, deviceToken string) proto.BoxAdbResult
+}
+
 type HostReporter interface {
 	// Report is what this machine is and what containers it is holding. It is
 	// allowed to be slow -- it shells out -- and it is called once per beat.
@@ -94,6 +101,9 @@ type Agent struct {
 	// Runs the bootstrap again on command. Nil on a box, which is what makes
 	// a misdirected request a log line rather than a shell.
 	Bootstrapper Bootstrapper
+	// Runs adb against boxes on this machine's LAN. Nil on a box, and what
+	// decides whether this agent advertises box_adb at all.
+	BoxEnroller BoxEnroller
 	// Set only in host mode, and nil on every box.
 	//
 	// This is the whole of what -host changes about the client: the loop below
@@ -438,8 +448,12 @@ func (a *Agent) sendHello(sessionID string) error {
 		Device:          info,
 		Metrics:         metrics,
 		CurrentJobID:    a.currentJob(),
-		Capabilities:    proto.AgentCapabilities(),
-		Host:            a.hostReport(ctx),
+		// Claimed only by a machine that can actually act on it: the hub
+		// checks this before offering a relay, and the switch below has no
+		// default branch -- so a box advertising it would be asked for work
+		// it would never answer.
+		Capabilities: proto.AgentCapabilities(a.BoxEnroller != nil),
+		Host:         a.hostReport(ctx),
 	})
 }
 
@@ -738,6 +752,35 @@ func (a *Agent) handle(ctx context.Context, data []byte) {
 			}
 			if err := a.send(result); err != nil {
 				log.Printf("could not report the bootstrap: %v", err)
+			}
+		}()
+
+	case "box_adb":
+		// Only a machine relays adb. A box ignoring this is the protocol's
+		// rule working; saying so is what stops a misdirected one being
+		// silent.
+		if a.BoxEnroller == nil {
+			log.Printf("ignoring box_adb: this agent is not running in -host mode")
+			return
+		}
+		var req proto.BoxAdb
+		if json.Unmarshal(data, &req) != nil {
+			return
+		}
+		// Its own goroutine, like the bootstrap: a sweep is minutes and a
+		// batch of installs is longer, and the read loop has to keep taking
+		// frames -- including the pings that stop the hub deciding this
+		// machine has gone while it is working.
+		go func() {
+			log.Printf("running adb %s (%d addresses, %d targets)", req.Mode, len(req.Addresses), len(req.Targets))
+			result := a.BoxEnroller.Run(ctx, req, a.Cfg.DeviceToken)
+			if result.Ok {
+				log.Printf("adb %s %s done: %d steps, %d facts", req.Mode, req.RequestID, len(result.Steps), len(result.Facts))
+			} else {
+				log.Printf("adb %s %s failed: %s", req.Mode, req.RequestID, result.Error)
+			}
+			if err := a.send(result); err != nil {
+				log.Printf("could not report the adb run: %v", err)
 			}
 		}()
 

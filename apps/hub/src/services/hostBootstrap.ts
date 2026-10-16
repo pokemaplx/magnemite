@@ -8,7 +8,14 @@ import { env } from "../env.js";
 import { log } from "../log.js";
 import { clampError } from "./redroid.js";
 import { getConnection, sendTo } from "../registry.js";
-import { REDROID_IMAGE } from "../version.js";
+import { type BootstrapStep, parseStep, stepWriter } from "./stepWriter.js";
+import { REDROID_IMAGE, REDROID_IMAGE_SOURCE } from "../version.js";
+
+// Re-exported from where they have always lived, so nothing that imports them
+// from here has to care that the machine bootstrap and the adb box enrollment
+// now share one copy.
+export { parseStep };
+export type { BootstrapStep };
 
 /**
  * Provisioning a machine over one outbound SSH connection.
@@ -92,64 +99,6 @@ export type SshAccess = {
   passphrase?: string;
 };
 
-export type BootstrapStep = { name: string; ok: boolean; detail: string };
-
-/**
- * Writes the step list to the row, one write at a time, latest wins.
- *
- * An earlier version fired an un-awaited `update` on every `::step` line, which
- * looked harmless and was not: the script prints arch, modules, binder and
- * pidmax within milliseconds of each other, so several updates overlapped on
- * one row and MariaDB rejected them with error 1020, "Record has changed since
- * last read". The progress stopped being written for the rest of the run.
- *
- * So: at most one write in flight, and a burst collapses into the newest state
- * rather than queueing a write per line. Nobody needs every intermediate list —
- * they need the latest one to arrive.
- *
- * The array is copied on the way in, because the caller keeps pushing to its
- * own and a reference would be serialised at whatever length it happened to
- * have when the query ran.
- */
-function stepWriter(id: string) {
-  let inFlight: Promise<void> | null = null;
-  let pending: BootstrapStep[] | null = null;
-
-  const write = async (steps: BootstrapStep[]): Promise<void> => {
-    try {
-      await prisma.redroidBootstrap.update({ where: { id }, data: { steps } });
-    } catch (err) {
-      // Progress is nice to have; the bootstrap is not. The same trade
-      // recordSample makes — losing a line of progress must never fail a
-      // provisioning that is otherwise working.
-      log.warn({ err, bootstrapId: id }, "could not write bootstrap progress");
-    }
-    if (pending) {
-      const next = pending;
-      pending = null;
-      await write(next);
-    }
-  };
-
-  const publish = (steps: BootstrapStep[]): void => {
-    const snapshot = [...steps];
-    if (inFlight) {
-      pending = snapshot;
-      return;
-    }
-    inFlight = write(snapshot).finally(() => {
-      inFlight = null;
-    });
-  };
-
-  /** Awaits whatever is still queued, so the final state is on the row. */
-  publish.flush = async (): Promise<void> => {
-    while (inFlight) await inFlight;
-  };
-
-  return publish;
-}
-
 /**
  * Starts a bootstrap and returns its row id immediately.
  *
@@ -202,10 +151,12 @@ async function run(id: string, serial: string, name: string, access: SshAccess):
       await upload(client, binary, `${REMOTE_DIR}/magnemite-agent`, 0o755);
       await upload(client, script, `${REMOTE_DIR}/bootstrap.sh`, 0o755);
 
-      // Everything that builds the Redroid image, because there is nothing to
-      // pull: the tag is local and this project publishes no registry. Without
-      // them a provisioned machine enrols, reports, and then fails its first
-      // converge on an image that was never going to exist.
+      // Everything that builds the Redroid image, which is the fallback now
+      // that CI publishes one: a machine that cannot reach ghcr.io, or an
+      // image bumped in a branch CI has not published yet, still has to end up
+      // with the tag its compose file names — otherwise it enrols, reports,
+      // and fails its first converge on an image that was never going to
+      // exist.
       //
       // This list and the Dockerfile's COPY lines have to agree. A file the
       // Dockerfile names and this does not makes `docker build` fail on a
@@ -242,6 +193,12 @@ async function run(id: string, serial: string, name: string, access: SshAccess):
           // The tag the compose file will name. One value from one place, so
           // the machine cannot build one image and be asked to run another.
           `export MAGNEMITE_IMAGE=${shellQuote(REDROID_IMAGE)}`,
+          // And where to get it: the bootstrap pulls this and retags it as the
+          // local tag above, falling back to building when it cannot. The two
+          // are separate on purpose — a registry reference in the rendered
+          // compose file would recreate every container on every machine
+          // already running.
+          `export MAGNEMITE_IMAGE_SOURCE=${shellQuote(REDROID_IMAGE_SOURCE)}`,
           // The port the firewall has to keep open, which is the one this
           // connection just came in on. Hardcoding 22 on a machine whose sshd
           // listens elsewhere would lock the operator out of their own VPS
@@ -258,7 +215,10 @@ async function run(id: string, serial: string, name: string, access: SshAccess):
         "sh ./bootstrap.sh",
       ].join(" && ");
 
-      const publish = stepWriter(id);
+      const publish = stepWriter(
+        (steps) => prisma.redroidBootstrap.update({ where: { id }, data: { steps } }),
+        { bootstrapId: id },
+      );
       await exec(client, command, (line) => {
         const step = parseStep(line);
         if (!step) return;
@@ -550,30 +510,6 @@ async function hostToken(name: string): Promise<string> {
     },
   });
   return token;
-}
-
-// ---------------------------------------------------------------------------
-// Parsing the script's own output
-// ---------------------------------------------------------------------------
-
-/**
- * `::step <name> <ok|warn|fail> [detail]`.
- *
- * The script prints these so a bootstrap that fails on the fourth stage can
- * say which, rather than just failing. Anything else on stdout is ignored —
- * apt and docker are noisy and none of it is structured.
- */
-export function parseStep(line: string): BootstrapStep | null {
-  const match = /^::step\s+(\S+)\s+(ok|warn|fail)(?:\s+(.*))?$/.exec(line.trim());
-  if (!match) return null;
-  return {
-    name: match[1]!,
-    // A warning is not a failure: swap that could not be created leaves a
-    // machine that runs, and calling it a failure would stop a provisioning
-    // that was going to work.
-    ok: match[2] !== "fail",
-    detail: (match[3] ?? "").trim(),
-  };
 }
 
 function shellQuote(value: string): string {

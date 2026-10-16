@@ -16,6 +16,7 @@ import { applyMetrics, markOffline, markOnline, trackedPackages } from "../servi
 import { ACTIVE_STATES, applyProgress, completeJob, logJobEvent } from "../services/jobs.js";
 import { specForDevice } from "../services/monitor.js";
 import { applyHostReport, recordConvergeResult } from "../services/redroid.js";
+import { resolveBoxAdb } from "../services/boxEnroll.js";
 import { recordBootstrapResult } from "../services/hostBootstrap.js";
 import { nudge } from "../services/scheduler.js";
 
@@ -292,6 +293,13 @@ async function handleMessage(ws: WebSocket, deviceId: string, ip: string | null,
 
     case "host_bootstrap_result":
       await recordBootstrapResult(deviceId, msg);
+      break;
+
+    // A machine reporting what adb found, or did, on the boxes around it.
+    // Nothing is stored here: the run that asked is still open and holding
+    // the rows, and this is only how the answer reaches it.
+    case "box_adb_result":
+      resolveBoxAdb(msg);
       break;
 
     case "heartbeat": {

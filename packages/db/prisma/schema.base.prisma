@@ -299,6 +299,11 @@ model Device {
   redroidInstance RedroidInstance?
   /// The provisioning run that produced this machine, if the hub did it.
   redroidBootstraps RedroidBootstrap[]
+  /// The adb run that enrolled this box, if the hub did it.
+  boxEnrolls        BoxEnroll[]        @relation("BoxEnrollDevice")
+  /// Boxes this machine ran adb against on the hub's behalf. Only ever set on
+  /// a HOST.
+  boxEnrollRelays   BoxEnroll[]        @relation("BoxEnrollRelay")
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -614,6 +619,8 @@ model DeviceGroup {
   redroidHosts      RedroidHost[]
   /// Machines still being provisioned that will enroll their containers here.
   redroidBootstraps RedroidBootstrap[]
+  /// Hardware boxes still being enrolled over adb that will land here.
+  boxEnrolls        BoxEnroll[]
   /// What a box gets installed the moment it joins this group.
   joinInstalls      GroupJoinInstall[]
 
@@ -793,6 +800,17 @@ model RedroidHost {
   /// name, and changing this never renames a box that already enrolled.
   nameTemplate String?
 
+  /// This machine's own adb public key, reported the first time it relays an
+  /// enrollment.
+  ///
+  /// Each machine keeps its own rather than sharing the hub's: a key a box has
+  /// trusted is, with `su`, a root shell on that box, and a relay can be a
+  /// machine in somebody's living room. The dashboard offers the hub's key and
+  /// every machine's as one `adb_keys` file, which is the format
+  /// /data/misc/adb/adb_keys wants -- so preseeding a golden image is still
+  /// one file, and revoking a machine is not a fleet-wide re-pairing.
+  adbPublicKey String? @db.Text
+
   instances RedroidInstance[]
 
   createdAt DateTime @default(now())
@@ -960,6 +978,135 @@ model RedroidBootstrap {
   /// Declared rather than left to the foreign key, for the reason
   /// `RedroidHost.defaultGroupId` says: Postgres does not index one on its own.
   @@index([desiredGroupId])
+}
+
+// ---------------------------------------------------------------------------
+// Enrolling hardware boxes over adb
+// ---------------------------------------------------------------------------
+
+/// The one adb identity the hub presents to a box.
+///
+/// A single row. It exists because the public half is what the "Always allow
+/// from this computer" dialog on the TV remembers: lose the key and every box
+/// in the fleet asks again, in a living room, where nobody is to tap it.
+///
+/// In the database rather than on disk, and that is not arbitrary. The obvious
+/// home is ARTIFACT_DIR, which is already a volume -- but that volume is
+/// *served*: `/files/*` rejects a path only when its basename starts with a
+/// dot, so `/files/adb/.android/adbkey` has basename `adbkey` and would be
+/// handed to any approved device token that asked. An adb key plus `su` is a
+/// root shell on every box that trusts it.
+///
+/// A relay machine never gets this key -- it generates and keeps its own, in
+/// `RedroidHost.adbPublicKey`. One compromised machine in somebody's living
+/// room must not be root on the whole fleet.
+model AdbIdentity {
+  id String @id @default("singleton")
+
+  privateKeyPem String @db.Text
+  publicKey     String @db.Text
+
+  createdAt DateTime @default(now())
+}
+
+/// How an adb enrollment went. The states mean what `RedroidBootstrapState`'s
+/// do, for the same reason: adb finishing proves the box was *provisioned*,
+/// not that it works. It still has to reboot and dial in, and WAITING is that
+/// gap.
+enum BoxEnrollState {
+  RUNNING
+  WAITING
+  DONE
+  FAILED
+}
+
+/// Where the serial in `BoxEnroll.serial` came from.
+///
+/// Worth recording rather than inferring, because the two have different
+/// failure modes months later: a REPORTED serial can turn out to be shared
+/// with another box off a reference firmware, and a MINTED one is only in the
+/// fleet because this row put it there.
+enum BoxSerialSource {
+  REPORTED
+  MINTED
+}
+
+/// A hardware box being enrolled over adb, before it is a Device.
+///
+/// The `RedroidBootstrap` of boxes, and the shape is deliberately the same.
+/// One row per box, not per batch -- the row is claimed by serial when the box
+/// dials in, so a batch of twelve is twelve rows that `batchId` groups for the
+/// page.
+///
+/// No credential is stored. adb needs none: the hub's key is the credential
+/// and it lives in `AdbIdentity`.
+model BoxEnroll {
+  id String @id @default(cuid())
+
+  /// One per submit, so the fleet page can show "eight boxes being enrolled"
+  /// rather than eight unrelated rows.
+  batchId String?
+
+  /// `ip:port`, for the operator to recognise the row by. Not reachable again
+  /// after the run and not used as an identity -- a box behind DHCP will have
+  /// moved by the time anybody reads this.
+  address String
+
+  /// The serial the box will enrol under.
+  ///
+  /// Deliberately **not** unique, unlike `RedroidBootstrap.serial`. That one
+  /// can be, because the host flow mints a fresh random serial every run. This
+  /// one is usually `ro.serialno`, which is the *same value* on a retry -- so
+  /// a unique constraint would turn a second attempt into a row that cannot be
+  /// created, surfacing as "could not start" with nothing to explain it. The
+  /// claim reads the newest live row instead.
+  serial       String
+  serialSource BoxSerialSource @default(REPORTED)
+
+  /// What to call it, applied at creation the way a Redroid name template is.
+  ///
+  /// Carried here rather than written into the box's config.json, which would
+  /// look equivalent and is not: enrolment does `name: body.name ?? existing.name`,
+  /// so a name baked into the box would silently undo every later rename, on
+  /// every re-enrolment.
+  desiredName String?
+
+  /// The site it enrols into. Same reasoning as `RedroidBootstrap.desiredGroupId`:
+  /// set afterwards, the box is already in `default` and already holding that
+  /// group's MITM config.
+  desiredGroupId String?
+  desiredGroup   DeviceGroup? @relation(fields: [desiredGroupId], references: [id], onDelete: SetNull)
+
+  /// The machine that ran adb for this box, when the hub could not reach it
+  /// itself. Null means the hub dialled directly.
+  relayDeviceId String?
+  relay         Device? @relation("BoxEnrollRelay", fields: [relayDeviceId], references: [id], onDelete: SetNull)
+
+  state BoxEnrollState @default(RUNNING)
+
+  /// One entry per `::step` line, as on a bootstrap and for the same reason.
+  steps Json?
+
+  /// Why it failed, capped by the caller well under MariaDB's 64 KB TEXT.
+  error String? @db.Text
+
+  /// Set when the box finally enrols, which is what closes this out.
+  deviceId String?
+  device   Device? @relation("BoxEnrollDevice", fields: [deviceId], references: [id], onDelete: SetNull)
+
+  startedAt  DateTime  @default(now())
+  finishedAt DateTime?
+
+  @@index([state])
+  /// How the claim finds its row on enrolment, which happens once per box and
+  /// always by serial.
+  @@index([serial])
+  @@index([batchId])
+  @@index([deviceId])
+  /// Declared rather than left to the foreign key, for the reason
+  /// `RedroidHost.defaultGroupId` says.
+  @@index([desiredGroupId])
+  @@index([relayDeviceId])
 }
 
 // ---------------------------------------------------------------------------

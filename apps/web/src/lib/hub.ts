@@ -10,16 +10,18 @@ const SECRET = process.env.HUB_INTERNAL_SECRET ?? "";
 
 export class HubError extends Error {}
 
-async function call<T>(path: string, body?: unknown): Promise<T> {
+async function call<T>(path: string, body?: unknown, method: "POST" | "GET" = "POST"): Promise<T> {
   let res: Response;
   try {
     res = await fetch(`${HUB_URL}${path}`, {
-      method: "POST",
+      method,
       headers: {
         "Content-Type": "application/json",
         "x-magnemite-secret": SECRET,
       },
-      body: JSON.stringify(body ?? {}),
+      // A GET with a body is legal and widely mishandled, so there simply is
+      // not one. Everything a GET here needs is already in the path.
+      body: method === "GET" ? undefined : JSON.stringify(body ?? {}),
       cache: "no-store",
     });
   } catch (err) {
@@ -330,6 +332,65 @@ export const hub = {
    */
   queueJoinInstalls: (id: string) =>
     call<{ queued: number }>(`/internal/devices/${id}/join-installs`, {}),
+
+  /**
+   * Sweep a LAN for boxes with network adb on.
+   *
+   * Returns an id, not a result: a /22 is minutes, and `call` sets no
+   * timeout, so waiting here would be a hung server action rather than an
+   * error anybody could see.
+   */
+  scanForBoxes: (input: { addresses: string; relayDeviceId: string | null }) =>
+    call<{ id: string; total: number }>("/internal/boxes/scan", input),
+  getBoxScan: (id: string) => call<BoxScan>(`/internal/boxes/scan/${id}`, undefined, "GET"),
+  /** Put the agent on the boxes that were picked. */
+  enrollBoxes: (input: {
+    targets: {
+      address: string;
+      serial: string;
+      serialSource: "REPORTED" | "MINTED";
+      expectedSerial: string;
+      name: string | null;
+    }[];
+    desiredGroupId: string | null;
+    relayDeviceId: string | null;
+    reboot: boolean;
+    reprovision: boolean;
+  }) => call<{ batchId: string; rows: number }>("/internal/boxes/enroll", input),
+  /** Every adb public key the fleet uses, for preseeding a golden image. */
+  adbKeys: () => call<{ keys: string }>("/internal/boxes/adb-keys", undefined, "GET"),
+};
+
+/** What a sweep found, as the dialog polls it. */
+export type BoxScan = {
+  id: string;
+  startedAt: string;
+  done: boolean;
+  error: string | null;
+  total: number;
+  probed: number;
+  found: BoxCandidate[];
+};
+
+export type BoxCandidate = {
+  address: string;
+  state: string;
+  reportedSerial: string;
+  model: string;
+  manufacturer: string;
+  abi: string;
+  sdk: string;
+  root: string;
+  enrolled: string;
+  knownDeviceId: string | null;
+  knownName: string | null;
+  serial: string;
+  /** What it will enrol under: the override when there is one, else its own. */
+  expectedSerial: string;
+  serialSource: "REPORTED" | "MINTED";
+  serialReason: string;
+  eligible: boolean;
+  blockedBy: string | null;
 };
 
 export const HUB_BASE_URL = HUB_URL;

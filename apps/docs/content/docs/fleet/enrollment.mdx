@@ -36,6 +36,12 @@ a fresh database.
 | **Auto-approve** | Off, boxes sit _pending_ until approved and receive nothing meanwhile.      |
 | **Revoke**       | Stops further enrollments. Boxes already enrolled are unaffected.           |
 
+<Callout type="info" title="Box tokens are for the manual path too, now">
+  [Fleet → Add boxes](/docs/fleet/box-enrollment) mints one token per box, writes it over adb and
+  nobody ever sees it — so minting a box token here is for flashing a batch from an image, or for a
+  box no network can reach. Those are single use and expire in a week.
+</Callout>
+
 <Callout type="info" title="Machine tokens are for the manual path only">
   **Machines → Add machine** mints its own, writes it into that machine's config over SSH and nobody
   ever sees it — so **Enrols: A machine** is needed only when [provisioning a machine by

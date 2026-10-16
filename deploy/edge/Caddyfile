@@ -60,6 +60,16 @@
 		reverse_proxy hub:{$HUB_PORT}
 	}
 
+	# --- Liveness -----------------------------------------------------------
+	# The hub's own. It needs a block of its own rather than falling through to
+	# the catch-all: Settings -> Status probes MAGNEMITE_PUBLIC_URL/healthz from
+	# inside the hub, to check the address every box is handed actually answers,
+	# and the dashboard replies to that path with its 404 -- which reads as the
+	# whole edge being down while enrolment and downloads are working fine.
+	handle /healthz {
+		reverse_proxy hub:{$HUB_PORT}
+	}
+
 	# --- Live job/device updates for the dashboard --------------------------
 	# The *dashboard*, not the hub. /api/events is a Next route that checks the
 	# session cookie and then proxies the hub's /internal/events with the

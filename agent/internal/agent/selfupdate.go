@@ -2,17 +2,13 @@ package agent
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"fmt"
-	"io"
 	"log"
-	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
-	"time"
 
+	"magnemite/agent/internal/fetch"
 	"magnemite/agent/internal/proto"
 )
 
@@ -105,42 +101,6 @@ func (a *Agent) selfUpdate(msg proto.AgentUpdate) {
 }
 
 func (a *Agent) downloadBinary(msg proto.AgentUpdate, dest string) error {
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
-	defer cancel()
-
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, msg.URL, nil)
-	if err != nil {
-		return err
-	}
-	req.Header.Set("Authorization", "Bearer "+a.Cfg.DeviceToken)
-
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		return err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("HTTP %d", resp.StatusCode)
-	}
-
-	out, err := os.OpenFile(dest, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o755)
-	if err != nil {
-		return err
-	}
-	h := sha256.New()
-	if _, err := io.Copy(io.MultiWriter(out, h), resp.Body); err != nil {
-		out.Close()
-		return err
-	}
-	if err := out.Sync(); err != nil {
-		out.Close()
-		return err
-	}
-	out.Close()
-
-	sum := hex.EncodeToString(h.Sum(nil))
-	if sum != msg.SHA256 {
-		return fmt.Errorf("checksum mismatch: expected %s, got %s", msg.SHA256, sum)
-	}
-	return nil
+	// 0755 because what lands here is the binary this process will exec.
+	return fetch.Verified(context.Background(), msg.URL, a.Cfg.DeviceToken, msg.SHA256, dest, 0o755)
 }
