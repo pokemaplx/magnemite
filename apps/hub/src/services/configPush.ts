@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { CAPABILITY_PUSH_CONFIG, hasCapability } from "@magnemite/protocol";
-import { prisma } from "@magnemite/db";
+import { getRedroidSettings, prisma, resolveWorkers } from "@magnemite/db";
+import { bus } from "../bus.js";
 import { log } from "../log.js";
 import { getConnection, sendTo } from "../registry.js";
 import { agentUpdateInFlight } from "./agentRelease.js";
@@ -101,7 +102,7 @@ export async function previewConfig(deviceId: string): Promise<ConfigPreview> {
   const device = await loadDevice(deviceId);
   if (!device) throw new Error("device not found");
 
-  const rendered = device.kind === "BOX" ? renderConfig(device) : null;
+  const rendered = device.kind === "BOX" ? renderConfig(device, await getRedroidSettings()) : null;
   if (!rendered || !device.group) return { state: "none" };
 
   const { stop, start } = hooksFor(device.group);
@@ -134,9 +135,16 @@ export async function pushConfig(deviceId: string, content: string | null): Prom
     throw new Error("this box's group has no config to write -- set one in its MITM data");
   }
 
-  const rendered = renderConfig(device, content?.trim() ? content : null);
+  const defaults = await getRedroidSettings();
+  const rendered = renderConfig(device, defaults, content?.trim() ? content : null);
   if (!rendered) throw new Error("this box's group has no config to write");
   if (!rendered.ok) throw new Error(rendered.reason);
+  // What this write says about workers, on a Redroid box: the number the
+  // render just substituted. Recorded once the box confirms the file, and the
+  // automatic rewrite in `workersConfig.ts` compares against it.
+  const workers = device.redroidInstance
+    ? resolveWorkers(device.redroidInstance.workers, device.redroidInstance.host.workers, defaults)
+    : null;
 
   if (!hasCapability(device.capabilities, CAPABILITY_PUSH_CONFIG)) {
     throw new Error(
@@ -155,6 +163,13 @@ export async function pushConfig(deviceId: string, content: string | null): Prom
     conn.currentJobId !== null ||
     (await prisma.job.count({ where: { deviceId, state: { in: ACTIVE_STATES } } })) > 0;
   if (busy) throw new Error("an install is running on this box; try again once it has finished");
+  // Asked again with nothing awaited between this and the flag going up. The
+  // count above yields, and an install dispatched in that moment -- or a
+  // second push, now that the hub starts them by itself -- would otherwise
+  // land between this one's stop and its start.
+  if (conn.currentJobId !== null || conn.pushingConfig) {
+    throw new Error("this box just became busy; try again in a moment");
+  }
 
   const { stop, start } = hooksFor(device.group);
   const requestId = randomUUID();
@@ -197,6 +212,14 @@ export async function pushConfig(deviceId: string, content: string | null): Prom
       { deviceId, path, ok: outcome.ok, sha256: outcome.sha256, hookError: outcome.hookError },
       "config push answered",
     );
+    // `ok` is the write, read back off the box -- a hook that failed after it
+    // still leaves the file in place -- so it is what the record follows.
+    if (outcome.ok && workers !== null) {
+      await prisma.redroidInstance
+        .updateMany({ where: { deviceId }, data: { configWorkers: workers } })
+        .catch((err) => log.warn({ err, deviceId }, "could not record the config's workers"));
+      bus.publish({ kind: "device", deviceId });
+    }
     return { ...outcome, path };
   } finally {
     conn.pushingConfig = false;

@@ -102,6 +102,14 @@ export async function completeJob(jobId: string, outcome: JobOutcome) {
     await logJobEvent(jobId, `installed ${outcome.installedVersion ?? job.toVersion}`, {
       phase: "SUCCESS",
     });
+    // The config this install carried has landed -- the agent fails a job
+    // whose config did not -- so the box's config now says what it said.
+    if (job.configWorkers !== null) {
+      await prisma.redroidInstance.updateMany({
+        where: { deviceId: job.deviceId },
+        data: { configWorkers: job.configWorkers },
+      });
+    }
     publishJob(updated);
   } else {
     const canRetry = job.attempt < job.rollout.maxAttempts;

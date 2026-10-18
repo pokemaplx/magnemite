@@ -2,7 +2,7 @@ import type { ReactNode } from "react";
 import Link from "next/link";
 import { notFound } from "next/navigation";
 import { ArrowLeft } from "lucide-react";
-import { getRedroidSettings, planCapacity, prisma } from "@magnemite/db";
+import { getRedroidSettings, planCapacity, prisma, resolveWorkers } from "@magnemite/db";
 import { requireUser } from "@/lib/session";
 import { HostScaleForm } from "@/components/host-scale-form";
 import { HostInstancesTable } from "@/components/host-instances-table";
@@ -15,6 +15,7 @@ import { OnlineDot } from "@/components/status";
 import { RelativeTime } from "@/components/relative-time";
 import { formatBytes } from "@/lib/format";
 import { instanceSetup, setupJobsSelect } from "@/lib/instance-setup-query";
+import { configBehind } from "@/lib/instance-workers";
 import { loadRecentTrend } from "@/lib/metrics";
 
 export const dynamic = "force-dynamic";
@@ -98,8 +99,14 @@ export default async function HostPage({ params }: { params: Promise<{ id: strin
   // settings`); the capacity figure used to skip the middle term, so a tuned
   // machine was planned against a number none of its containers would get.
   const effectiveMemLimit = Number(machine?.memLimitBytes ?? redroid.memLimitBytes);
+  // Workers follow the same chain, and are resolved here on every render
+  // rather than read off a copy -- so a changed setting shows on every machine
+  // that never chose its own number, the moment it is saved.
+  const machineWorkers = machine?.workers ?? null;
+  const workersOf = (own: number | null) => resolveWorkers(own, machineWorkers, redroid);
+  const inheritedWorkers = workersOf(null);
   const capacity = planCapacity(
-    { ...redroid, memLimitBytes: effectiveMemLimit },
+    { ...redroid, memLimitBytes: effectiveMemLimit, workersPerInstance: inheritedWorkers },
     host.cpuCount,
     host.memTotalBytes,
   );
@@ -108,7 +115,7 @@ export default async function HostPage({ params }: { params: Promise<{ id: strin
   // deletes all of their Device rows, and a removed instance still has one.
   const enrolledBoxes = machine?.instances.filter((i) => i.deviceId).length ?? 0;
   const running = wanted.filter((i) => i.containerState === "running").length;
-  const workers = wanted.reduce((sum, i) => sum + (i.workers ?? 0), 0);
+  const workers = wanted.reduce((sum, i) => sum + workersOf(i.workers), 0);
 
   const facts: { label: string; value: string; node?: ReactNode }[] = [
     { label: "Architecture", value: machine?.arch ?? "—" },
@@ -255,16 +262,18 @@ export default async function HostPage({ params }: { params: Promise<{ id: strin
         adopted={machine?.adoptedAt !== null && machine !== null}
         converging={machine?.convergingSince !== null && machine !== undefined}
         instances={wanted.length}
-        workers={wanted[0]?.workers ?? null}
+        workers={machineWorkers}
+        customWorkers={wanted.filter((i) => i.workers !== null).length}
         memLimitBytes={machine?.memLimitBytes === null ? null : Number(machine?.memLimitBytes)}
         capacity={{
           byMemory: capacity.byMemory,
           byCpu: capacity.byCpu,
           suggested: capacity.suggested,
+          // The fleet's, which is what an empty Workers each follows.
           workersPerInstance: redroid.workersPerInstance,
           // The CPU half's inputs, so the form can redo that division for the
-          // workers actually typed into it — the server only ever knows the
-          // number in Settings.
+          // workers actually typed into it — the server only knows the number
+          // this machine has stored.
           cpuCount: host.cpuCount,
           workersPerVCpu: redroid.workersPerVCpu,
           // Named in the sentence that explains a suggestion of zero, which is
@@ -345,6 +354,8 @@ export default async function HostPage({ params }: { params: Promise<{ id: strin
         <CardContent className="px-0 pb-0">
           <HostInstancesTable
             hostId={host.id}
+            adopted={machine?.adoptedAt != null}
+            inheritedWorkers={inheritedWorkers}
             groups={groups}
             nameTemplate={machine?.nameTemplate ?? null}
             hostName={host.name}
@@ -354,7 +365,9 @@ export default async function HostPage({ params }: { params: Promise<{ id: strin
               id: instance.id,
               index: instance.index,
               serial: instance.serial,
-              workers: instance.workers,
+              workers: workersOf(instance.workers),
+              ownWorkers: instance.workers,
+              configBehind: configBehind(instance, workersOf(instance.workers)),
               containerState: instance.containerState,
               restartCount: instance.restartCount,
               // Serialised here: a Date cannot cross into a client component,

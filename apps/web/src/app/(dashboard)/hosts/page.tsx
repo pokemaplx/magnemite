@@ -1,10 +1,11 @@
-import { getRedroidSettings, prisma } from "@magnemite/db";
+import { getRedroidSettings, prisma, resolveWorkers } from "@magnemite/db";
 import { requireUser } from "@/lib/session";
 import { AddHostDialog } from "@/components/add-host-dialog";
 import { BootstrapRuns, type BootstrapRun } from "@/components/bootstrap-runs";
 import { HostsTable, type HostRow } from "@/components/hosts-table";
 import { formatBytes } from "@/lib/format";
 import { instanceSetup, setupJobsSelect } from "@/lib/instance-setup-query";
+import { configBehind } from "@/lib/instance-workers";
 
 export const dynamic = "force-dynamic";
 
@@ -48,6 +49,8 @@ export default async function HostsPage() {
               present: true,
               containerState: true,
               workers: true,
+              configWorkers: true,
+              deviceId: true,
               requestedAt: true,
               device: {
                 select: {
@@ -107,6 +110,10 @@ export default async function HostsPage() {
     // its row so re-adding the index brings the same box back, and counting it
     // would make a drained machine look broken.
     const wanted = host.redroidHost?.instances.filter((i) => i.present) ?? [];
+    // Resolved per row, never read off a copy: own, else the machine's, else
+    // Settings -- what each box's {{device.workers}} renders.
+    const machineWorkers = host.redroidHost?.workers ?? null;
+    const workersOf = (own: number | null) => resolveWorkers(own, machineWorkers, redroid);
     return {
       id: host.id,
       name: host.name,
@@ -115,7 +122,7 @@ export default async function HostsPage() {
       adopted: (host.redroidHost?.adoptedAt ?? null) !== null,
       desired: wanted.length,
       running: wanted.filter((i) => i.containerState === "running").length,
-      workers: wanted.reduce((sum, i) => sum + (i.workers ?? 0), 0),
+      workers: wanted.reduce((sum, i) => sum + workersOf(i.workers), 0),
       cpuPercent: host.cpuPercent,
       memory: ofTotal(host.memAvailableBytes, host.memTotalBytes),
       swap: ofTotal(host.swapFreeBytes, host.swapTotalBytes),
@@ -125,7 +132,9 @@ export default async function HostsPage() {
         id: instance.id,
         index: instance.index,
         serial: instance.serial,
-        workers: instance.workers,
+        workers: workersOf(instance.workers),
+        ownWorkers: instance.workers,
+        configBehind: configBehind(instance, workersOf(instance.workers)),
         containerState: instance.containerState,
         online: instance.device?.status === "ONLINE",
         device: instance.device

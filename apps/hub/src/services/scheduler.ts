@@ -1,6 +1,11 @@
 import path from "node:path";
 import type { InstallJob } from "@magnemite/protocol";
-import { prisma } from "@magnemite/db";
+import {
+  getRedroidSettings,
+  prisma,
+  resolveWorkers,
+  type RedroidSettingsValues,
+} from "@magnemite/db";
 import { getHubSettings } from "./hubSettings.js";
 import { env } from "../env.js";
 import { log } from "../log.js";
@@ -11,6 +16,7 @@ import { ACTIVE_STATES, logJobEvent, recomputeRollout, requeueStalled } from "./
 import { sweepExpiredMaintenance, notInMaintenance } from "./maintenance.js";
 import { pruneMetrics } from "./metrics.js";
 import { evaluate } from "./monitor.js";
+import { syncWorkersConfigs } from "./workersConfig.js";
 
 const TICK_MS = 5_000;
 
@@ -65,6 +71,10 @@ async function tick() {
     // monitoring is off, which is how every fleet starts.
     await evaluate();
     await dispatchQueued(settings.maxConcurrentJobs);
+    // After the dispatch, so a box that was just handed an install is seen as
+    // busy and left to it -- the install carries a config of its own. Starts
+    // its rewrites and returns without waiting for them.
+    await syncWorkersConfigs(settings.configRewriteConcurrency);
   } catch (err) {
     log.error({ err }, "scheduler tick failed");
   } finally {
@@ -134,12 +144,17 @@ async function dispatchQueued(maxConcurrentJobs: number) {
       OR: [{ nextAttemptAt: null }, { nextAttemptAt: { lte: new Date() } }],
     },
     include: {
-      // `redroidInstance` because the config renderer substitutes
-      // {{device.workers}} off it. Selected here rather than fetched inside
-      // the loop: the candidate query already walks these rows, so it costs no
-      // extra round trip, and a missing include would have been a placeholder
-      // that silently refused on every container.
-      device: { include: { group: true, redroidInstance: { select: { workers: true } } } },
+      // `redroidInstance` and its machine because the config renderer
+      // resolves {{device.workers}} off them. Selected here rather than
+      // fetched inside the loop: the candidate query already walks these rows,
+      // so it costs no extra round trip, and a missing include would have been
+      // a placeholder that silently refused on every container.
+      device: {
+        include: {
+          group: true,
+          redroidInstance: { select: { workers: true, host: { select: { workers: true } } } },
+        },
+      },
       rollout: { include: { appVersion: { include: { appTarget: true } } } },
     },
     // Canaries first, then oldest rollout first, so one rollout drains before
@@ -168,6 +183,9 @@ async function dispatchQueued(maxConcurrentJobs: number) {
   }
 
   const rolloutActive = new Map<string, number>();
+  // The fleet's end of {{device.workers}}. Read at most once a pass, and only
+  // when a config is actually rendered: most passes write none.
+  let redroidDefaults: Promise<RedroidSettingsValues> | null = null;
 
   for (const job of candidates) {
     if (capacity <= 0) break;
@@ -253,10 +271,18 @@ async function dispatchQueued(maxConcurrentJobs: number) {
     //
     // The candidate query already includes the device and its group, so this
     // costs no extra round trip inside the dispatch loop.
+    //
+    // `configWorkers` is what that config says about workers, on a container.
+    // It rides the job and reaches the instance only when the install
+    // succeeds, which is the agent's word that the file landed -- written
+    // here, a failed install would claim a config the box never got.
+    let configWorkers: number | null = null;
     if (rollout.writeConfig && job.device.group?.mitmPackageName === target.packageName) {
       // The rollout's own config when it carries one, the group's otherwise --
       // null here means "fall back", exactly as it does for the hooks above.
-      const config = renderConfig(job.device, rollout.mitmConfig);
+      redroidDefaults ??= getRedroidSettings();
+      const defaults = await redroidDefaults;
+      const config = renderConfig(job.device, defaults, rollout.mitmConfig);
       if (config?.ok) {
         message.config = config.file;
       } else if (config) {
@@ -271,6 +297,10 @@ async function dispatchQueued(maxConcurrentJobs: number) {
           { level: "WARN" },
         );
         message.config = null;
+      }
+      const instance = job.device.redroidInstance;
+      if (message.config && instance) {
+        configWorkers = resolveWorkers(instance.workers, instance.host.workers, defaults);
       }
     }
 
@@ -292,6 +322,9 @@ async function dispatchQueued(maxConcurrentJobs: number) {
         dispatchedAt: new Date(),
         heartbeatAt: new Date(),
         progress: 0,
+        // Every attempt says its own, null included: a retry rendered without
+        // a config must not inherit the number an earlier attempt carried.
+        configWorkers,
       },
     });
     if (claimed.count === 0) continue;

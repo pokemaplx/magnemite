@@ -51,7 +51,11 @@ export function AddHostDialog({
   function submit(formData: FormData) {
     setError(null);
     const instances = Number(formData.get("instances") ?? 0);
-    const workers = Number(formData.get("workers") ?? defaultWorkers);
+    // Empty follows Settings, and is sent as null so it keeps following it.
+    // Pre-filling the fleet's number here is what used to make every new
+    // machine a copy of the setting as it stood the day it was added.
+    const workersTyped = String(formData.get("workers") ?? "").trim();
+    const workers = workersTyped === "" ? null : Number(workersTyped);
 
     start(async () => {
       const result = await bootstrapHost({
@@ -64,7 +68,8 @@ export function AddHostDialog({
         passphrase:
           auth === "key" ? String(formData.get("passphrase") ?? "") || undefined : undefined,
         desiredInstances: Number.isInteger(instances) ? instances : 0,
-        desiredWorkers: Number.isInteger(workers) && workers > 0 ? workers : null,
+        desiredWorkers:
+          workers !== null && Number.isInteger(workers) && workers > 0 ? workers : null,
         desiredGroupId: groupId || null,
         desiredNameTemplate: String(formData.get("nameTemplate") ?? "").trim() || null,
       });
@@ -168,7 +173,9 @@ export function AddHostDialog({
                   <Input
                     id="workers"
                     name="workers"
-                    defaultValue={String(defaultWorkers)}
+                    // What an empty field follows, rather than a value that
+                    // would be saved as this machine's own.
+                    placeholder={`${defaultWorkers}, from Settings`}
                     inputMode="numeric"
                   />
                 </div>

@@ -243,6 +243,18 @@ export type HubSettingsValues = {
    */
   agentUpdateConcurrency: number;
   /**
+   * How many boxes may have their MITM config rewritten at once, because the
+   * workers they are configured for changed.
+   *
+   * The third of the "boxes at once" knobs, for the third thing the whole
+   * fleet can be asked to do together: one save of the worker count in the
+   * Redroid settings moves every container that follows it. Each rewrite
+   * restarts that box's scanner, so this is how much of the fleet stops
+   * scanning at the same moment -- low, and the cost of keeping it low is only
+   * how long the change takes to reach everyone.
+   */
+  configRewriteConcurrency: number;
+  /**
    * Seconds without a heartbeat before a box is marked offline. Boxes beat
    * every 20 seconds, so this is really "how many missed beats" — the default
    * is three of them plus a margin.
@@ -268,6 +280,7 @@ const HUB_SETTINGS_DEFAULTS: HubSettingsValues = {
   rotomRetentionDays: 7,
   heartbeatSeconds: 20,
   agentUpdateConcurrency: 5,
+  configRewriteConcurrency: 4,
   deviceOfflineTimeoutSeconds: 70,
   connectionRetentionDays: 30,
 };
@@ -497,6 +510,22 @@ export function planCapacity(
   // neither, which is a host that has not heartbeated yet rather than a
   // machine with no room.
   return { byMemory, byCpu, suggested: both.length === 0 ? null : Math.min(...both) };
+}
+
+/**
+ * The workers one container is configured for: its own number, else its
+ * machine's, else the fleet's.
+ *
+ * Resolved at the moment it is read and never copied down, which is the whole
+ * point. A copy written onto each row at scale time is how changing the
+ * setting used to move nothing at all.
+ */
+export function resolveWorkers(
+  instance: number | null | undefined,
+  host: number | null | undefined,
+  settings: Pick<RedroidSettingsValues, "workersPerInstance">,
+): number {
+  return instance ?? host ?? settings.workersPerInstance;
 }
 
 // ---------------------------------------------------------------------------

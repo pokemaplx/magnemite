@@ -14,6 +14,7 @@ export type HubSettingsRow = {
   joinInstallDelaySeconds: number;
   heartbeatSeconds: number;
   agentUpdateConcurrency: number;
+  configRewriteConcurrency: number;
   deviceOfflineTimeoutSeconds: number;
 };
 
@@ -97,6 +98,15 @@ export function HubSettingsForm({
               unit="boxes"
               disabled={disabled}
               hint="How many boxes may swap their agent binary at once. The whole fleet reconnecting after a hub deploy is when this matters."
+            />
+            <NumberField
+              name="configRewriteConcurrency"
+              label="Concurrent config rewrites"
+              value={settings.configRewriteConcurrency}
+              min={1}
+              unit="boxes"
+              disabled={disabled}
+              hint="How many boxes may have their MITM config rewritten at once when their workers change. Each one restarts that box's scanner, so this is how much of the fleet stops scanning together."
             />
             <NumberField
               name="jobStallTimeoutSeconds"

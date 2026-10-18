@@ -1,6 +1,6 @@
 "use client";
 
-import { type ReactNode, useMemo, useState, useTransition } from "react";
+import { type ReactNode, useEffect, useMemo, useState, useTransition } from "react";
 import { MoreHorizontal, RefreshCw, Wrench } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -70,8 +70,9 @@ function WhyZero({
         Zero on cores: {capacity.cpuCount} core{capacity.cpuCount === 1 ? "" : "s"} ×{" "}
         {capacity.workersPerVCpu} workers each is <span className="font-medium">{fits}</span>, and
         one container here is asking for {perWorker}. It would fit at{" "}
-        <span className="font-medium">{fits}</span> workers or fewer. Both numbers are fleet-wide,
-        in <strong>Settings → Tuning</strong>.
+        <span className="font-medium">{fits}</span> workers or fewer. Workers each is the field
+        above, on this machine; workers per vCPU is fleet-wide, in{" "}
+        <strong>Settings → Tuning</strong>.
       </p>
     );
   }
@@ -110,6 +111,10 @@ export type Capacity = {
    */
   byCpu: number | null;
   suggested: number | null;
+  /**
+   * The fleet-wide number from Settings, named as what an empty Workers each
+   * falls back to -- the same job `fleetMemLimitBytes` does for memory.
+   */
   workersPerInstance: number;
   /** The two inputs of the CPU half, so it can be redone as the field changes. */
   cpuCount: number | null;
@@ -144,6 +149,7 @@ export function HostScaleForm({
   converging,
   instances,
   workers,
+  customWorkers,
   memLimitBytes,
   capacity,
   canOperate,
@@ -152,14 +158,29 @@ export function HostScaleForm({
   adopted: boolean;
   converging: boolean;
   instances: number;
+  /** This machine's own worker count, or null when it follows Settings. */
   workers: number | null;
+  /** How many of its containers have a number of their own, which this leaves alone. */
+  customWorkers: number;
   /** This machine's own ceiling, or null when it inherits the fleet's. */
   memLimitBytes: number | null;
   capacity: Capacity;
   canOperate: boolean;
 }) {
   const [count, setCount] = useState(String(instances));
-  const [workerCount, setWorkerCount] = useState(String(workers ?? capacity.workersPerInstance));
+  /**
+   * Empty for the same reason Memory each is: empty is a value, it means
+   * follow Settings. Pre-filling the fleet's number is what used to turn it
+   * into a copy -- the first Save wrote it onto the machine, and changing the
+   * setting afterwards moved nothing.
+   */
+  const [workerCount, setWorkerCount] = useState(workers === null ? "" : String(workers));
+
+  // Followed rather than kept: an instance added or removed in the table below
+  // changes the count, and a Save still holding the old number would quietly
+  // undo it.
+  useEffect(() => setCount(String(instances)), [instances]);
+  useEffect(() => setWorkerCount(workers === null ? "" : String(workers)), [workers]);
   /**
    * In GB, because that is the unit the rest of this card is written in, and
    * empty because empty is a value here rather than a missing one: it means
@@ -188,7 +209,16 @@ export function HostScaleForm({
   const [pending, start] = useTransition();
 
   const parsedCount = Number(count);
-  const parsedWorkers = Number(workerCount);
+
+  // Empty follows Settings, so it parses to the fleet's number for the
+  // arithmetic and to null for the Save.
+  const workersTyped = workerCount.trim();
+  const parsedWorkers = workersTyped === "" ? null : Number(workersTyped);
+  const workersValid =
+    parsedWorkers === null ||
+    (Number.isInteger(parsedWorkers) && parsedWorkers >= 1 && parsedWorkers <= 50);
+  const effectiveWorkers =
+    parsedWorkers !== null && workersValid ? parsedWorkers : capacity.workersPerInstance;
 
   // Empty is a value: it means inherit. So it parses to the fleet-wide number
   // rather than to nothing, because the arithmetic below has to be able to
@@ -207,25 +237,25 @@ export function HostScaleForm({
     Number.isInteger(parsedCount) &&
     parsedCount >= 0 &&
     parsedCount <= 64 &&
-    Number.isInteger(parsedWorkers) &&
-    parsedWorkers >= 1 &&
-    parsedWorkers <= 50 &&
+    workersValid &&
     memValid;
 
   /**
-   * The CPU half, for the workers actually typed.
+   * The CPU half, for the workers actually typed — or, with the field empty,
+   * for the fleet's number it then follows.
    *
-   * The server computes it from the workers-per-instance in Settings, which is
-   * the only number it has — so typing 25 into the field left the suggestion
-   * still assuming 50, and the same sentence said "0 by cores … at 25 workers
-   * each". This is the CPU half of `planCapacity`, which is one division, and
-   * it belongs here because the value it divides by lives in this form.
+   * The server computes it from the number this machine has stored, and the
+   * point of the field is to see what a different one would fit before saving
+   * it. This is the CPU half of `planCapacity`, which is one division, and it
+   * belongs here because the value it divides by lives in this form.
    */
   const byCpu = useMemo(() => {
     if (capacity.cpuCount === null) return capacity.byCpu;
-    if (!Number.isInteger(parsedWorkers) || parsedWorkers < 1) return capacity.byCpu;
-    return Math.max(0, Math.floor((capacity.cpuCount * capacity.workersPerVCpu) / parsedWorkers));
-  }, [capacity, parsedWorkers]);
+    return Math.max(
+      0,
+      Math.floor((capacity.cpuCount * capacity.workersPerVCpu) / effectiveWorkers),
+    );
+  }, [capacity, effectiveWorkers]);
 
   /**
    * The memory half, for the ceiling actually typed.
@@ -324,6 +354,9 @@ export function HostScaleForm({
               className="w-24 tabular-nums"
               value={workerCount}
               inputMode="numeric"
+              // The fleet's number, so an empty field says what it follows
+              // rather than looking unset.
+              placeholder={String(capacity.workersPerInstance)}
               onChange={(event) => setWorkerCount(event.target.value)}
               disabled={!canOperate || pending}
             />
@@ -348,10 +381,10 @@ export function HostScaleForm({
                   scaleHost(
                     hostId,
                     parsedCount,
+                    // Null clears either override. Both are sent on every Save
+                    // rather than only when they changed, so emptying a field
+                    // is a thing that can be saved at all.
                     parsedWorkers,
-                    // Null clears the override. Sent on every Save rather than
-                    // only when it changed, so emptying the field is a thing
-                    // that can be saved at all.
                     parsedMemGb === null ? null : Math.round(parsedMemGb * 1024 ** 3),
                   ),
                 )
@@ -415,17 +448,39 @@ export function HostScaleForm({
             <p>
               Room for about <span className="font-medium">{suggested}</span>{" "}
               {suggested === 1 ? "container" : "containers"} — {byMemory} by memory, {byCpu} by
-              cores. At {parsedWorkers || capacity.workersPerInstance} workers each that is{" "}
-              {suggested * (parsedWorkers || capacity.workersPerInstance)} workers.
+              cores. At {effectiveWorkers} workers each that is {suggested * effectiveWorkers}{" "}
+              workers.
             </p>
           )}
+          {/* Where the number comes from, said every time: the field looks the
+              same holding an override as following Settings, and the
+              containers with their own number are the ones a Save here does
+              not move. */}
+          <p>
+            {parsedWorkers === null ? (
+              <>
+                Workers each follows <strong>Settings → Tuning</strong>, now{" "}
+                {capacity.workersPerInstance}, and moves when it does.
+              </>
+            ) : (
+              <>
+                Workers each is this machine&apos;s own; empty it to follow{" "}
+                <strong>Settings → Tuning</strong> ({capacity.workersPerInstance}).
+              </>
+            )}{" "}
+            {customWorkers > 0
+              ? `${customWorkers} ${customWorkers === 1 ? "container has its" : "containers have their"} own number in Instances below, and ${customWorkers === 1 ? "keeps it" : "keep them"}.`
+              : "A container can have its own number in Instances below."}{" "}
+            Every box whose number changes has its MITM config rewritten to match, a few at a time —
+            which restarts its scanner.
+          </p>
           {suggested === 0 ? (
             <WhyZero
               capacity={capacity}
               byMemory={byMemory}
               byCpu={byCpu}
               memLimitBytes={effectiveMemBytes}
-              workers={parsedWorkers}
+              workers={effectiveWorkers}
             />
           ) : null}
           {overMemory ? (
@@ -441,8 +496,9 @@ export function HostScaleForm({
           ) : null}
           {!valid ? (
             <p className="text-destructive">
-              Instances must be 0–64, workers 1–50, and memory each between 0.5 and 64 GB — or empty
-              to inherit the fleet&apos;s. Zero instances is how a machine is drained.
+              Instances must be 0–64, workers each 1–50, and memory each between 0.5 and 64 GB — the
+              last two may be empty to inherit the fleet&apos;s. Zero instances is how a machine is
+              drained.
             </p>
           ) : null}
         </div>

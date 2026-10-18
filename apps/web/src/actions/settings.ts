@@ -69,6 +69,7 @@ export async function updateHubSettings(
   const joinInstallDelaySeconds = int("joinInstallDelaySeconds", 0);
   const heartbeatSeconds = int("heartbeatSeconds", 5);
   const agentUpdateConcurrency = int("agentUpdateConcurrency", 1);
+  const configRewriteConcurrency = int("configRewriteConcurrency", 1);
   // Three missed 20-second heartbeats is the floor that stops a box flapping
   // offline on one dropped beat.
   const deviceOfflineTimeoutSeconds = int("deviceOfflineTimeoutSeconds", 30);
@@ -78,6 +79,7 @@ export async function updateHubSettings(
     jobStallTimeoutSeconds === null ||
     joinInstallDelaySeconds === null ||
     agentUpdateConcurrency === null ||
+    configRewriteConcurrency === null ||
     deviceOfflineTimeoutSeconds === null ||
     heartbeatSeconds === null
   ) {
@@ -102,6 +104,7 @@ export async function updateHubSettings(
     joinInstallDelaySeconds,
     heartbeatSeconds,
     agentUpdateConcurrency,
+    configRewriteConcurrency,
     deviceOfflineTimeoutSeconds,
   };
   await updateHubSettingsInDb(patch);

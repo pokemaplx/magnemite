@@ -77,7 +77,7 @@ nothing anywhere to say why.
 | ------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
 | **Machine**   | Name, online dot, and its serial — or `not adopted yet` until its containers have been imported                                                                    |
 | **Instances** | `running/desired`, so a machine mid-converge reads as one number instead of two that disagree                                                                      |
-| **Workers**   | The configured workers summed over its instances — the machine's capacity, addable up                                                                              |
+| **Workers**   | The configured workers summed over its instances, each [resolved](#workers) — the machine's capacity, addable up                                                   |
 | **CPU**       | Share of a **single core**: 250 is two and a half cores spent                                                                                                      |
 | **Memory**    | Available of total                                                                                                                                                 |
 | **Swap**      | Free of total. `0 B / 0 B` is a real answer, not a missing one — a machine with no swap is one the OOM killer reaches sooner                                       |
@@ -131,9 +131,9 @@ a list of checkboxes: hardware boxes, and each machine's containers, in any mix.
   </Callout>
 
 - **Instances** — one row per container: index, the box it enrolled as, container
-  state, **CPU and memory**, workers, restarts, and when the machine last
-  reported. A climbing restart count is what separates a crash-looping instance
-  from an idle one.
+  state, **CPU and memory**, [workers](#workers), restarts, and when the machine
+  last reported. A climbing restart count is what separates a crash-looping
+  instance from an idle one.
 
   The CPU and memory are the box's **own**, measured inside its own cgroup and
   reported by its own agent — not the machine's total divided up, and not
@@ -141,6 +141,71 @@ a list of checkboxes: hardware boxes, and each machine's containers, in any mix.
   "where is this machine's CPU going": the column is per container, and the box
   page behind each name breaks that container down per app. The machine's own
   Load card above is the other end of the same question.
+
+## Workers
+
+How many workers a container is configured for is what its scanner is given as
+[`{{device.workers}}`](/docs/fleet/configs#placeholders). It is resolved every
+time it is read, from the first of these that has a number:
+
+| Where         | Set on                                        | Empty means       |
+| ------------- | --------------------------------------------- | ----------------- |
+| The container | **Instances**, the Workers field on its row   | Its machine's     |
+| The machine   | **Containers → Workers each**                 | The fleet's       |
+| The fleet     | **Settings → Tuning → Workers per container** | — (50 by default) |
+
+So changing the setting moves every machine that never chose a number of its
+own, and changing **Workers each** moves every container on that machine that
+never chose one. A field that inherits shows the number it inherits as a muted
+placeholder. A typed number is kept as typed, even one equal to what it would
+inherit: that is how a container is pinned while its machine moves.
+
+**Save on the Containers card leaves the containers' own numbers alone.** A
+scale-up adds containers that inherit. To add some that do not, use **Add _N_
+with _M_ workers each** above the Instances table — with the workers left
+empty it inherits, so it is also "one more like the others". A removed index
+brought back keeps the number it had.
+
+### The config follows by itself
+
+Workers live in the MITM config, not in the compose file, so changing one
+recreates no container. The hub instead keeps, for every box, the number its
+config was last written with — by an install that carried it, or a rewrite —
+and on every scheduler tick rewrites the config of any box whose resolved
+number has moved away from it. The rewrite is the one **Execute → Rewrite
+config** does: the group's config rendered for that box, between the group's
+stop and start hooks. **So it restarts that box's scanner**, which is the
+point — a running scanner does not re-read its file.
+
+What it leaves alone, on purpose:
+
+- **A box whose config does not say `{{device.workers}}`.** The file would be
+  the same either way, so it is marked in step instead of rewritten.
+- **A box Magnemite has not written a config to yet.** The install that brings
+  its MITM writes the first one, and pushing ahead of it would run the hooks
+  against a scanner that is not there. Its MITM has to show as installed.
+- **A box that is offline, installing, parked in maintenance, unapproved, or on
+  an agent without `push_config`.** It is still behind when that stops being
+  true, and it is rewritten then — nothing is lost by being away.
+
+It goes a few boxes at a time, fleet-wide — **Tuning → Concurrent config
+rewrites**, four by default — so a change in Settings does not restart every
+scanner in the same second. A rewrite that fails waits ten
+minutes before the next try, so a box with a broken hook is not stopped and
+started on every tick. While a box is behind, its row shows ↻ and the number
+its config still says; hover it for the reasons. One that stays is the one to
+look at — the hub's log says why.
+
+Upgrading takes every box already enrolled to be in step with the number it
+resolves to at that moment, so it rewrites nothing on its own. The first change
+afterwards is what sets a rewrite going.
+
+This used to be a copy: every Save wrote the form's number — pre-filled from
+Settings — onto every container, so changing the setting afterwards moved
+nothing, and a container could not keep a number of its own past the next Save.
+The upgrade turns those copies into the chain above without changing what any
+box renders: a machine whose copy matched Settings now follows it, and one that
+had been given another number keeps it as its own.
 
 ## A new instance, setting up
 

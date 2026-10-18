@@ -1,7 +1,8 @@
 "use client";
 
-import { useState, useTransition } from "react";
+import { useEffect, useState, useTransition } from "react";
 import Link from "next/link";
+import { RefreshCw } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { ConfirmDialog } from "@/components/ui/confirm-dialog";
@@ -18,7 +19,13 @@ import {
 } from "@/components/ui/table";
 import { RelativeTime } from "@/components/relative-time";
 import { InstanceSetup } from "@/components/instance-setup";
-import { removeInstance, setHostGroup, setHostNameTemplate } from "@/actions/hosts";
+import {
+  addInstances,
+  removeInstance,
+  setHostGroup,
+  setHostNameTemplate,
+  setInstanceWorkers,
+} from "@/actions/hosts";
 import { formatBytes } from "@/lib/format";
 import { FORGET_INSTANCE_DESCRIPTION, REMOVE_INSTANCE_DESCRIPTION } from "@/lib/instance-removal";
 import type { SetupView } from "@/lib/instance-setup";
@@ -27,7 +34,18 @@ export type InstanceRow = {
   id: string;
   index: number;
   serial: string;
-  workers: number | null;
+  /**
+   * What this box is configured for, resolved: its own number, else its
+   * machine's, else Settings. What `{{device.workers}}` renders.
+   */
+  workers: number;
+  /** Its own number, or null when it inherits — which is what an edit changes. */
+  ownWorkers: number | null;
+  /**
+   * The number its MITM config still says, while that is behind `workers`;
+   * null when it is in step or nothing has been written yet.
+   */
+  configBehind: number | null;
   containerState: string | null;
   restartCount: number | null;
   reportedAt: string | null;
@@ -81,9 +99,95 @@ export function stateOf(containerState: string | null, deviceId: string | null) 
   return { label: "running", tone: "success" as const };
 }
 
+/**
+ * The number a box's MITM config still says, while it is behind the one the
+ * box is configured for.
+ *
+ * The hub rewrites it by itself, so most of the time this is "on it" for a few
+ * seconds. One that stays is the reason to look: the box is offline, busy
+ * installing, parked, or its rewrite failed and is waiting to be tried again.
+ */
+export function ConfigBehind({ was }: { was: number }) {
+  return (
+    <span
+      className="inline-flex items-center gap-0.5 text-xs text-warning"
+      title={`Its MITM config still says ${was}. The hub rewrites it by itself once the box is online and not installing anything.`}
+    >
+      <RefreshCw className="h-3 w-3" aria-hidden />
+      <span className="sr-only">config still says</span>
+      {was}
+    </span>
+  );
+}
+
+/**
+ * One container's workers, edited where they are read.
+ *
+ * Empty is a value, the same as on the Containers card: it means inherit, and
+ * the placeholder says what from. So a container on its machine's number reads
+ * muted and one with its own reads like any typed value — which is the whole
+ * difference an operator needs to see down the column. A number typed is
+ * kept as typed, even one equal to what it inherits: that is how a container
+ * is pinned to fifty while its machine moves.
+ *
+ * Saved on blur, like the name template, and only when it changed.
+ */
+function InstanceWorkers({
+  row,
+  inherited,
+  disabled,
+  onSave,
+  onInvalid,
+}: {
+  row: InstanceRow;
+  inherited: number;
+  disabled: boolean;
+  onSave: (workers: number | null) => void;
+  onInvalid: () => void;
+}) {
+  const own = row.ownWorkers === null ? "" : String(row.ownWorkers);
+  const [value, setValue] = useState(own);
+  // Back to what is stored after a save lands, or after somebody else's does.
+  useEffect(() => setValue(own), [own]);
+
+  function commit() {
+    const typed = value.trim();
+    if (typed === own) return;
+    const next = typed === "" ? null : Number(typed);
+    if (next !== null && (!Number.isInteger(next) || next < 1 || next > 50)) {
+      setValue(own);
+      onInvalid();
+      return;
+    }
+    onSave(next);
+  }
+
+  return (
+    <Input
+      aria-label={`Workers for instance ${row.index}`}
+      className="ml-auto h-8 w-16 text-right tabular-nums"
+      inputMode="numeric"
+      placeholder={String(inherited)}
+      value={value}
+      disabled={disabled}
+      onChange={(event) => setValue(event.target.value)}
+      onBlur={commit}
+      onKeyDown={(event) => {
+        if (event.key === "Enter") event.currentTarget.blur();
+        // Reverted without blurring. A blur from inside this handler runs the
+        // commit with this render's value -- the one typed -- and so would
+        // save exactly what Escape was pressed to throw away.
+        if (event.key === "Escape") setValue(own);
+      }}
+    />
+  );
+}
+
 export function HostInstancesTable({
   hostId,
+  adopted,
   instances,
+  inheritedWorkers,
   groups,
   defaultGroupId,
   nameTemplate,
@@ -91,7 +195,11 @@ export function HostInstancesTable({
   canOperate,
 }: {
   hostId: string;
+  /** Nothing is added before adoption; see `HostScaleForm`. */
+  adopted: boolean;
   instances: InstanceRow[];
+  /** What a container without its own number gets: its machine's, else Settings. */
+  inheritedWorkers: number;
   groups: { id: string; name: string }[];
   defaultGroupId: string | null;
   /** Null means a box names itself from what Android reports. */
@@ -104,6 +212,11 @@ export function HostInstancesTable({
   // Saved on blur rather than on every keystroke: this is one short string and
   // a write per character would be a write per character.
   const [template, setTemplate] = useState(nameTemplate ?? "");
+  // How many to add, and what each is configured for. Workers empty inherits,
+  // so "one more like the others" is the button with nothing typed.
+  const [addCount, setAddCount] = useState("1");
+  const [addWorkers, setAddWorkers] = useState("");
+  const [message, setMessage] = useState<string | null>(null);
 
   // The index the next container would take, for the preview to be this
   // machine's next name rather than a generic example. The allocator fills the
@@ -114,13 +227,29 @@ export function HostInstancesTable({
   const [error, setError] = useState<string | null>(null);
   const [doomed, setDoomed] = useState<{ row: InstanceRow; forget: boolean } | null>(null);
 
-  function run(action: () => Promise<{ error?: string }>) {
+  function run(action: () => Promise<{ error?: string; reason?: string }>, onOk?: () => void) {
     setError(null);
+    setMessage(null);
     start(async () => {
       const result = await action();
       if (result.error) setError(result.error);
+      else {
+        // Offline, say, which is not a failure but is worth being told.
+        if (result.reason) setMessage(result.reason);
+        onOk?.();
+      }
     });
   }
+
+  const parsedAddCount = Number(addCount);
+  const addWorkersTyped = addWorkers.trim();
+  const parsedAddWorkers = addWorkersTyped === "" ? null : Number(addWorkersTyped);
+  const addValid =
+    Number.isInteger(parsedAddCount) &&
+    parsedAddCount >= 1 &&
+    instances.length + parsedAddCount <= 64 &&
+    (parsedAddWorkers === null ||
+      (Number.isInteger(parsedAddWorkers) && parsedAddWorkers >= 1 && parsedAddWorkers <= 50));
 
   return (
     <div className="space-y-3">
@@ -186,6 +315,54 @@ export function HostInstancesTable({
         </span>
       </div>
 
+      {canOperate && adopted ? (
+        <div className="flex flex-wrap items-center gap-2 px-6 text-sm">
+          <span className="text-muted-foreground">Add</span>
+          <Input
+            aria-label="How many containers to add"
+            className="h-8 w-14 tabular-nums"
+            inputMode="numeric"
+            value={addCount}
+            disabled={pending}
+            onChange={(event) => setAddCount(event.target.value)}
+          />
+          <span className="text-muted-foreground">with</span>
+          <Input
+            aria-label="Workers each new container is configured for"
+            className="h-8 w-16 tabular-nums"
+            inputMode="numeric"
+            // What it inherits when left empty, so the field reads as a
+            // choice already made rather than one missing.
+            placeholder={String(inheritedWorkers)}
+            value={addWorkers}
+            disabled={pending}
+            onChange={(event) => setAddWorkers(event.target.value)}
+          />
+          <span className="text-muted-foreground">workers each</span>
+          <Button
+            size="sm"
+            variant="outline"
+            disabled={pending || !addValid}
+            onClick={() =>
+              run(
+                () => addInstances(hostId, parsedAddCount, parsedAddWorkers),
+                () => {
+                  setAddCount("1");
+                  setAddWorkers("");
+                },
+              )
+            }
+          >
+            {pending ? "Adding…" : "Add"}
+          </Button>
+          <span className="text-xs text-muted-foreground">
+            {addWorkersTyped === ""
+              ? `Empty follows this machine's number, now ${inheritedWorkers}.`
+              : "Their own number, kept when the machine's changes."}
+          </span>
+        </div>
+      ) : null}
+
       {instances.length === 0 ? (
         <p className="px-6 pb-6 text-sm text-muted-foreground">
           Nothing configured to run here yet.
@@ -242,7 +419,24 @@ export function HostInstancesTable({
                     {memoryUsed(row.device)}
                   </TableCell>
                   <TableCell align="right" className="tabular-nums">
-                    {row.workers ?? "—"}
+                    <div className="flex items-center justify-end gap-2">
+                      {row.configBehind !== null ? <ConfigBehind was={row.configBehind} /> : null}
+                      {canOperate ? (
+                        <InstanceWorkers
+                          row={row}
+                          inherited={inheritedWorkers}
+                          disabled={pending}
+                          onSave={(workers) => run(() => setInstanceWorkers(row.id, workers))}
+                          onInvalid={() => setError("Workers must be between 1 and 50.")}
+                        />
+                      ) : (
+                        // Muted when inherited, the way the editable field's
+                        // placeholder is, so both views say the same thing.
+                        <span className={row.ownWorkers === null ? "text-muted-foreground" : ""}>
+                          {row.workers}
+                        </span>
+                      )}
+                    </div>
                   </TableCell>
                   <TableCell align="right" className="tabular-nums">
                     {/* A climbing count is what separates crash-looping from
@@ -282,6 +476,7 @@ export function HostInstancesTable({
       )}
 
       {error ? <p className="px-6 pb-4 text-sm text-destructive">{error}</p> : null}
+      {message ? <p className="px-6 pb-4 text-sm text-muted-foreground">{message}</p> : null}
 
       <ConfirmDialog
         open={doomed !== null}

@@ -780,6 +780,13 @@ model RedroidHost {
   cpuset        String?
   /// androidboot.redroid_gpu_mode. "guest" is software rendering.
   gpuMode       String?
+  /// Workers each container here is configured for, unless it has its own.
+  ///
+  /// The middle of `instance ?? host ?? settings`, the same chain the memory
+  /// ceiling follows. Null follows `redroid.workersPerInstance`, so changing
+  /// that setting moves every machine that never chose a number of its own --
+  /// which a copy written onto each row at scale time never did.
+  workers       Int?
   /// Overrides the image tag every instance runs. Pinned to the Redroid base
   /// version, never to the agent's: `make redroid` tags from the agent line,
   /// so tying the rendered file to that would move the tag on every agent
@@ -869,11 +876,26 @@ model RedroidInstance {
   /// re-adding the index brings the same box back; "forget" is what deletes.
   present Boolean @default(true)
 
-  /// Workers this instance is configured for, substituted into the group's
-  /// MITM config as {{device.workers}}. Magnemite owning this number is what
-  /// makes a machine's capacity addable-up, and 50 is the per-container
-  /// ceiling the scanners impose.
+  /// This one container's own worker count, when it differs from its
+  /// machine's. Null inherits `RedroidHost.workers`, then Settings.
+  ///
+  /// The resolved number is what reaches the group's MITM config as
+  /// {{device.workers}}. Magnemite owning it is what makes a machine's
+  /// capacity addable-up, and 50 is the per-container ceiling the scanners
+  /// impose.
   workers Int?
+
+  /// The workers this box's MITM config was last written with -- by an
+  /// install that carried it, or a rewrite. When the resolved number moves
+  /// away from it, the hub rewrites the config by itself
+  /// (`services/workersConfig.ts`); the difference is the whole signal.
+  ///
+  /// Null is "nothing Magnemite wrote is on the box", and is left alone: a
+  /// box that has not had its config yet gets it from the install that brings
+  /// its MITM, and pushing one ahead of that would run the group's hooks
+  /// against a scanner that is not there. Reset by an enrolment, because a
+  /// box only enrols again when its /data -- the config with it -- is gone.
+  configWorkers Int?
 
   /// Per-instance overrides of the host's defaults. Null inherits.
   memLimitBytes BigInt?
@@ -1392,6 +1414,13 @@ model Job {
   /// True when the install had to fall back to uninstall, or forceClean was
   /// set. Surfaced in the UI because it means the box lost its app data.
   dataWiped   Boolean      @default(false)
+
+  /// The workers the MITM config sent with this attempt said, for a Redroid
+  /// box. Copied onto its instance's `configWorkers` only when the job
+  /// succeeds -- the agent fails a job whose config did not land -- so a
+  /// failed install never claims a config the box does not have. Null when no
+  /// config went with it.
+  configWorkers Int?
 
   fromVersion String?
   toVersion   String

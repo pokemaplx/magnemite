@@ -32,7 +32,7 @@ one integration per provider and a stored credential with spending power.
 | **Port**           | 22 by default. Whatever is put here is also the port the firewall keeps open              |
 | **Password / key** | Used once, for this run, and never stored                                                 |
 | **Instances**      | How many containers it should end up running. `0` provisions the machine and runs nothing |
-| **Workers**        | Workers per instance, which is what reaches a scanner through `{{device.workers}}`        |
+| **Workers**        | The machine's [workers](/docs/fleet/redroid-hosts#workers). Empty follows Settings        |
 
 Press **Create** and the hub opens one outbound SSH connection, pushes the agent
 binary, the bootstrap script and the four files that build the Redroid image,

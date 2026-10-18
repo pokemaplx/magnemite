@@ -299,18 +299,6 @@ export function mintSerial(hostId: string, index: number): string {
 }
 
 /**
- * Brings a machine to `count` instances.
- *
- * Adds at the lowest free index and removes from the tail, and never
- * renumbers: removing index 3 of ten leaves a gap that the next scale-up
- * refills. Closing the gap would rewrite serials, and a changed serial is a new
- * box with a new row and no history.
- *
- * Removal marks `present: false` rather than deleting, so re-adding that index
- * brings the same box back with everything it had. Deleting is what "forget"
- * does, and it is a different button.
- */
-/**
  * The memory ceiling every container on one machine is given.
  *
  * Per machine rather than fleet-wide because that is where the hardware is.
@@ -333,18 +321,51 @@ export async function setHostMemLimit(hostId: string, bytes: bigint | null): Pro
   });
 }
 
+/**
+ * The workers every container on one machine is configured for, unless it has
+ * a number of its own.
+ *
+ * Null clears it and goes back to following Settings, which is the state worth
+ * being in: a machine on the fleet's number moves when that number does.
+ *
+ * Nothing is rendered from it -- workers reach a box through its MITM config,
+ * not the compose file -- so it recreates no container. The configs of the
+ * boxes it moves are rewritten by `workersConfig.ts`, a few at a time.
+ */
+export async function setHostWorkers(hostId: string, workers: number | null): Promise<void> {
+  await prisma.redroidHost.update({
+    where: { deviceId: hostId },
+    data: { workers },
+  });
+}
+
+/**
+ * Brings a machine to `count` instances.
+ *
+ * Adds at the lowest free index and removes from the tail, and never
+ * renumbers: removing index 3 of ten leaves a gap that the next scale-up
+ * refills. Closing the gap would rewrite serials, and a changed serial is a new
+ * box with a new row and no history.
+ *
+ * Removal marks `present: false` rather than deleting, so re-adding that index
+ * brings the same box back with everything it had. Deleting is what "forget"
+ * does, and it is a different button.
+ *
+ * Touches no worker count. It used to write the form's number onto every
+ * present row, which is what made a container with a number of its own
+ * impossible -- the next Save flattened it -- and what left a whole machine on
+ * a stale copy of the setting. New rows inherit, and so follow the machine.
+ */
 export async function setInstanceCount(
   hostId: string,
   count: number,
-  workers: number | null,
 ): Promise<{ added: number; removed: number }> {
-  const rows = await prisma.redroidInstance.findMany({
-    where: { hostId },
+  const present = await prisma.redroidInstance.findMany({
+    where: { hostId, present: true },
     orderBy: { index: "asc" },
-    select: { id: true, index: true, present: true },
+    select: { id: true },
   });
 
-  const present = rows.filter((row) => row.present);
   let added = 0;
   let removed = 0;
 
@@ -359,55 +380,87 @@ export async function setInstanceCount(
     });
     removed = result.count;
   } else if (count > present.length) {
-    const taken = new Set(rows.map((row) => row.index));
-    for (let index = 1; added < count - present.length; index += 1) {
-      if (taken.has(index)) {
-        // An index that exists but was removed comes back as itself, with the
-        // serial it always had -- which is what makes a removal recoverable.
-        const existing = rows.find((row) => row.index === index && !row.present);
-        if (!existing) continue;
-        await prisma.redroidInstance.update({
-          where: { id: existing.id },
-          data: {
-            present: true,
-            ...(workers === null ? {} : { workers }),
-            requestedAt: new Date(),
-            // What it said before it was removed is about a container that
-            // has since been destroyed. Unknown until the machine reports the
-            // new one, rather than a stale `running` that was never this one.
-            containerState: null,
-            restartCount: null,
-            reportedAt: null,
-          },
-        });
-        added += 1;
-        continue;
-      }
+    added = await placeInstances(hostId, count - present.length, undefined);
+  }
+
+  if (added > 0 || removed > 0) bus.publish({ kind: "device", deviceId: hostId });
+  return { added, removed };
+}
+
+/**
+ * Adds `howMany` containers, each configured for `workers`.
+ *
+ * The other door to a scale-up, for containers that are not meant to be like
+ * their neighbours: two at thirty on a machine of fifties are added here in
+ * one step, rather than by scaling up and then editing two rows -- in between
+ * which the new boxes would already be enrolling on the wrong number.
+ *
+ * Null inherits the machine's number, exactly as a scale-up would.
+ */
+export async function addInstances(
+  hostId: string,
+  howMany: number,
+  workers: number | null,
+): Promise<{ added: number }> {
+  const added = await placeInstances(hostId, howMany, workers);
+  if (added > 0) bus.publish({ kind: "device", deviceId: hostId });
+  return { added };
+}
+
+/**
+ * The allocator both doors share: the lowest free index first, and an index
+ * that was removed comes back as itself.
+ *
+ * `workers` undefined leaves a revived row's own number where it was -- a
+ * scale-up brings back the same box with everything it had -- while null or a
+ * number is an answer somebody just gave, and is written.
+ */
+async function placeInstances(
+  hostId: string,
+  howMany: number,
+  workers: number | null | undefined,
+): Promise<number> {
+  const rows = await prisma.redroidInstance.findMany({
+    where: { hostId },
+    select: { id: true, index: true, present: true },
+  });
+  const byIndex = new Map(rows.map((row) => [row.index, row]));
+
+  let added = 0;
+  for (let index = 1; added < howMany; index += 1) {
+    const existing = byIndex.get(index);
+    if (existing?.present) continue;
+    if (existing) {
+      // Removed, so it comes back with the serial it always had -- which is
+      // what makes a removal recoverable.
+      await prisma.redroidInstance.update({
+        where: { id: existing.id },
+        data: {
+          present: true,
+          ...(workers === undefined ? {} : { workers }),
+          requestedAt: new Date(),
+          // What it said before it was removed is about a container that
+          // has since been destroyed. Unknown until the machine reports the
+          // new one, rather than a stale `running` that was never this one.
+          containerState: null,
+          restartCount: null,
+          reportedAt: null,
+        },
+      });
+    } else {
       await prisma.redroidInstance.create({
         data: {
           hostId,
           index,
           serial: mintSerial(hostId, index),
-          workers,
+          workers: workers ?? null,
           requestedAt: new Date(),
         },
       });
-      taken.add(index);
-      added += 1;
     }
+    added += 1;
   }
-
-  if (workers !== null) {
-    // Applied to the whole machine, because the form sets it per machine. It
-    // reaches the scanner as {{device.workers}} in the group's MITM config.
-    await prisma.redroidInstance.updateMany({
-      where: { hostId, present: true },
-      data: { workers },
-    });
-  }
-
-  if (added > 0 || removed > 0) bus.publish({ kind: "device", deviceId: hostId });
-  return { added, removed };
+  return added;
 }
 
 /**

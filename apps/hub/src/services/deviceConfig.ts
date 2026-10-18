@@ -4,6 +4,7 @@ import {
   type ConfigPlaceholder,
   type DeviceConfigFile,
 } from "@magnemite/protocol";
+import { type RedroidSettingsValues, resolveWorkers } from "@magnemite/db";
 
 /**
  * The MITM's own settings file, written onto a box when its MITM is installed.
@@ -25,7 +26,10 @@ import {
  * there and forgetting to read it here is a type error rather than a config
  * that saves and then refuses to push.
  */
-const PLACEHOLDERS: Record<ConfigPlaceholder, (d: DeviceForConfig) => string | null> = {
+const PLACEHOLDERS: Record<
+  ConfigPlaceholder,
+  (d: DeviceForConfig, defaults: ConfigDefaults) => string | null
+> = {
   "device.id": (d: DeviceForConfig) => d.id,
   "device.name": (d: DeviceForConfig) => d.name,
   "device.serial": (d: DeviceForConfig) => d.serial,
@@ -37,7 +41,10 @@ const PLACEHOLDERS: Record<ConfigPlaceholder, (d: DeviceForConfig) => string | n
   "device.publicIp": (d: DeviceForConfig) => d.publicIp,
   "device.rotomOrigin": (d: DeviceForConfig) => d.rotomOrigin,
   "device.rotomDeviceId": (d: DeviceForConfig) => d.rotomDeviceId,
-  // How many workers this box is configured for, off its Redroid instance row.
+  // How many workers this box is configured for: its instance's own number,
+  // else its machine's, else Settings. Resolved here, at the render, so a
+  // changed setting reaches the next config written rather than waiting for
+  // somebody to Save every machine again.
   //
   // The whole point of Magnemite owning that number: a machine's capacity is
   // containers times workers, and without this the figure the scale form
@@ -50,8 +57,10 @@ const PLACEHOLDERS: Record<ConfigPlaceholder, (d: DeviceForConfig) => string | n
   // against `"workers": ""` is worse off than one never configured, and a
   // group mixing containers with real hardware finds out at the deploy that
   // names the box, instead of silently.
-  "device.workers": (d: DeviceForConfig) =>
-    d.redroidInstance?.workers == null ? null : String(d.redroidInstance.workers),
+  "device.workers": (d: DeviceForConfig, defaults: ConfigDefaults) =>
+    d.redroidInstance
+      ? String(resolveWorkers(d.redroidInstance.workers, d.redroidInstance.host.workers, defaults))
+      : null,
   "group.name": (d: DeviceForConfig) => d.group?.name ?? null,
 };
 
@@ -79,7 +88,7 @@ export type DeviceForConfig = {
   publicIp: string | null;
   rotomOrigin: string | null;
   rotomDeviceId: string | null;
-  redroidInstance: { workers: number | null } | null;
+  redroidInstance: { workers: number | null; host: { workers: number | null } } | null;
   group: {
     name: string;
     mitmPackageName: string | null;
@@ -101,7 +110,7 @@ export const deviceForConfigSelect = {
   publicIp: true,
   rotomOrigin: true,
   rotomDeviceId: true,
-  redroidInstance: { select: { workers: true } },
+  redroidInstance: { select: { workers: true, host: { select: { workers: true } } } },
   group: {
     select: {
       name: true,
@@ -111,6 +120,12 @@ export const deviceForConfigSelect = {
     },
   },
 } as const;
+
+/**
+ * What a render needs that is on no row of the device's own: the fleet-wide
+ * end of an inheritance. `getRedroidSettings()` satisfies it as it is.
+ */
+export type ConfigDefaults = Pick<RedroidSettingsValues, "workersPerInstance">;
 
 export type RenderedConfig = DeviceConfigFile;
 export type RenderOutcome =
@@ -143,6 +158,7 @@ export type RenderOutcome =
 export function renderTemplate(
   template: string,
   device: DeviceForConfig,
+  defaults: ConfigDefaults,
 ): { ok: true; text: string } | { ok: false; reason: string } {
   const unknown: string[] = [];
   const empty: string[] = [];
@@ -156,7 +172,7 @@ export function renderTemplate(
       unknown.push(name);
       return whole;
     }
-    const value = PLACEHOLDERS[name as ConfigPlaceholder](device);
+    const value = PLACEHOLDERS[name as ConfigPlaceholder](device, defaults);
     if (value === null || value === "") {
       empty.push(name);
       return whole;
@@ -182,6 +198,21 @@ export function renderTemplate(
 }
 
 /**
+ * Whether a template substitutes `name` anywhere.
+ *
+ * Read the way the renderer reads it -- any braces, the name trimmed -- so
+ * `{{ device.workers }}` counts, exactly as it renders. What decides whether a
+ * changed worker count is worth restarting a scanner for: a config that does
+ * not say workers is the same file either way.
+ */
+export function usesPlaceholder(template: string, name: ConfigPlaceholder): boolean {
+  for (const match of template.matchAll(TOKEN)) {
+    if (match[1]?.trim() === name) return true;
+  }
+  return false;
+}
+
+/**
  * The body of a JSON string literal, without the quotes around it.
  *
  * `JSON.stringify` is what knows the whole rule — the quote, the backslash, the
@@ -200,12 +231,16 @@ function escapeForJsonString(value: string): string {
  * still the group's, because that is where the scanner reads it, and a box
  * whose group has no path therefore takes no config either way.
  */
-export function renderConfig(device: DeviceForConfig, override?: string | null): RenderOutcome {
+export function renderConfig(
+  device: DeviceForConfig,
+  defaults: ConfigDefaults,
+  override?: string | null,
+): RenderOutcome {
   const group = device.group;
   const template = override ?? group?.mitmConfig;
   if (!group?.mitmConfigPath || !template) return null;
 
-  const rendered = renderTemplate(template, device);
+  const rendered = renderTemplate(template, device, defaults);
   if (!rendered.ok) return rendered;
 
   // The template was checked at save and the values are escaped above, so this

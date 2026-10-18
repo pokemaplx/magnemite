@@ -209,7 +209,10 @@ export async function enrollRoutes(app: FastifyInstance) {
     if (instance) {
       await prisma.redroidInstance.update({
         where: { id: instance.id },
-        data: { deviceId: device.id },
+        // And forget what its config said. A box only enrols when it has no
+        // token of its own, which on a container means its /data is new --
+        // and the MITM config was in it. Its join installs write the next one.
+        data: { deviceId: device.id, configWorkers: null },
       });
     }
 

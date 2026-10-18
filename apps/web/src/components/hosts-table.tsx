@@ -12,7 +12,12 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
-import { memoryUsed, stateOf, type InstanceRow } from "@/components/host-instances-table";
+import {
+  ConfigBehind,
+  memoryUsed,
+  stateOf,
+  type InstanceRow,
+} from "@/components/host-instances-table";
 import { InstanceSetup } from "@/components/instance-setup";
 import { OnlineDot } from "@/components/status";
 import { RelativeTime } from "@/components/relative-time";
@@ -21,7 +26,15 @@ import { cn } from "@/lib/utils";
 /** One container, as much of it as fits in a glance from the machine list. */
 export type HostInstance = Pick<
   InstanceRow,
-  "id" | "index" | "serial" | "workers" | "containerState" | "device" | "setup"
+  | "id"
+  | "index"
+  | "serial"
+  | "workers"
+  | "ownWorkers"
+  | "configBehind"
+  | "containerState"
+  | "device"
+  | "setup"
 > & {
   /** Whether the box inside it has its socket up, when it has enrolled. */
   online: boolean;
@@ -207,7 +220,14 @@ function InstancesGlance({ instances }: { instances: HostInstance[] }) {
                 {memoryUsed(row.device)}
               </TableCell>
               <TableCell align="right" className="tabular-nums">
-                {row.workers ?? "—"}
+                <div className="flex items-center justify-end gap-2">
+                  {row.configBehind !== null ? <ConfigBehind was={row.configBehind} /> : null}
+                  {/* Muted when inherited, as on the machine's own page, so
+                      the containers with a number of their own stand out. */}
+                  <span className={row.ownWorkers === null ? "text-muted-foreground" : ""}>
+                    {row.workers}
+                  </span>
+                </div>
               </TableCell>
             </TableRow>
           );

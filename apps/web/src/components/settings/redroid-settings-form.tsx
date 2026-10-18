@@ -127,7 +127,7 @@ export function RedroidSettingsForm({
               max={50}
               unit="workers"
               disabled={disabled}
-              hint="What a new machine is given. 50 is where the scanners stop being happy, and on some licences the contractual ceiling."
+              hint="What every container follows unless its machine, or the container itself, has a number of its own — so changing it moves all of those, and rewrites their MITM configs to match, a few boxes at a time. 50 is where the scanners stop being happy, and on some licences the contractual ceiling."
             />
             <NumberField
               name="workersPerVCpu"

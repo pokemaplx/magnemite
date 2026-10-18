@@ -121,8 +121,9 @@ Available: `device.id`, `device.name`, `device.serial`, `device.model`,
 `device.publicIp`, `device.rotomOrigin`, `device.rotomDeviceId`,
 `device.workers`, `group.name`.
 
-`device.workers` is how many workers a Redroid container is configured for, set
-per machine on its [Machines](/docs/fleet/redroid-hosts) page. It is what makes
+`device.workers` is how many workers a Redroid container is configured for: its
+own number, else its machine's, else **Settings → Tuning**, as set on the
+[Machines](/docs/fleet/redroid-hosts#workers) page. It is what makes
 a machine's capacity a number the dashboard owns — containers times workers —
 rather than one hard-coded into the group's config, where it would be the same
 for every machine in the group.
@@ -171,6 +172,12 @@ from the box's group:
 The restart is the point of the second one, because a running MITM does not
 re-read a file it has already read. It needs an agent that knows `push_config`
 (1.0.5 or later); an older one says so instead of offering the button.
+
+**When a container's workers change.** A Redroid box whose
+[worker count](/docs/fleet/redroid-hosts#workers) moves — its own, its
+machine's, or the one in Settings — has its config rewritten by the hub, the way
+**Rewrite config** does it, a few boxes at a time. Only a config that says
+`{{device.workers}}` is rewritten; any other is the same file either way.
 
 Saving a group writes to the database and nothing else. An edited config reaches
 the fleet on the next deploy of that group's MITM (if toggled on), or a box at a

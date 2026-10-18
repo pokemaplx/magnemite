@@ -26,14 +26,15 @@ is the one that does not live on the server — it rides the `welcome`, so a sav
 that changes it pushes a fresh `welcome` to every connected box, and a box that
 was offline adopts it when it comes back.
 
-| Setting                      | Default | Min  | What it does                                                                                       |
-| ---------------------------- | ------- | ---- | -------------------------------------------------------------------------------------------------- |
-| **Heartbeat**                | `20s`   | `5`  | How often a box reports in. Lives on the boxes; an agent too old to read it keeps beating at 20s.  |
-| **Offline after**            | `70s`   | `30` | Silence before a box is marked offline. Three missed beats plus a margin.                          |
-| **Concurrent installs**      | `10`    | `1`  | Fleet-wide cap on boxes downloading or installing at once. A group can lower it for its own boxes. |
-| **Concurrent agent updates** | `5`     | `1`  | How many boxes may swap their agent binary at once — the fleet reconnecting after a hub deploy.    |
-| **Job stalls after**         | `900s`  | `1`  | Silence from a box mid-job before that job is re-queued to it.                                     |
-| **New boxes settle for**     | `120s`  | `0`  | Wait after a box boots before its group's join installs start. `0` installs on enrolment.          |
+| Setting                        | Default | Min  | What it does                                                                                                                                                                       |
+| ------------------------------ | ------- | ---- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Heartbeat**                  | `20s`   | `5`  | How often a box reports in. Lives on the boxes; an agent too old to read it keeps beating at 20s.                                                                                  |
+| **Offline after**              | `70s`   | `30` | Silence before a box is marked offline. Three missed beats plus a margin.                                                                                                          |
+| **Concurrent installs**        | `10`    | `1`  | Fleet-wide cap on boxes downloading or installing at once. A group can lower it for its own boxes.                                                                                 |
+| **Concurrent agent updates**   | `5`     | `1`  | How many boxes may swap their agent binary at once — the fleet reconnecting after a hub deploy.                                                                                    |
+| **Concurrent config rewrites** | `4`     | `1`  | How many boxes may have their MITM config [rewritten](/docs/fleet/redroid-hosts#the-config-follows-by-itself) at once when their workers change. Each restarts that box's scanner. |
+| **Job stalls after**           | `900s`  | `1`  | Silence from a box mid-job before that job is re-queued to it.                                                                                                                     |
+| **New boxes settle for**       | `120s`  | `0`  | Wait after a box boots before its group's join installs start. `0` installs on enrolment.                                                                                          |
 
 ### Metric history
 

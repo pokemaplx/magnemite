@@ -307,6 +307,9 @@ export async function claimBootstrap(deviceId: string, serial: string): Promise<
       adoptedAt: new Date(),
       ...(row.desiredGroupId ? { defaultGroupId: row.desiredGroupId } : {}),
       ...(row.desiredNameTemplate ? { nameTemplate: row.desiredNameTemplate } : {}),
+      // The machine's own number, which its containers inherit. Left unset
+      // when none was typed, so the machine follows Settings from the start.
+      ...(row.desiredWorkers ? { workers: row.desiredWorkers } : {}),
     },
   });
 
@@ -319,7 +322,7 @@ export async function claimBootstrap(deviceId: string, serial: string): Promise<
     // Imported here rather than at the top: redroid.ts imports this module for
     // clampError, and a static cycle would leave one of them half-initialised.
     const { setInstanceCount, convergeHost } = await import("./redroid.js");
-    await setInstanceCount(deviceId, row.desiredInstances, row.desiredWorkers);
+    await setInstanceCount(deviceId, row.desiredInstances);
     await convergeHost(deviceId);
   }
 }

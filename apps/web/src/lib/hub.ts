@@ -312,14 +312,28 @@ export const hub = {
    * normal experience.
    */
   /**
-   * `memLimitBytes` undefined leaves the machine's override alone; null clears
-   * it back to the fleet-wide setting.
+   * `workers` and `memLimitBytes` are the machine's own numbers, and the same
+   * pair: undefined leaves the override alone, null clears it back to the
+   * fleet-wide setting.
    */
-  scaleHost: (id: string, count: number, workers: number | null, memLimitBytes?: number | null) =>
+  scaleHost: (id: string, count: number, workers?: number | null, memLimitBytes?: number | null) =>
     call<{ added: number; removed: number; sent: boolean; reason?: string }>(
       `/internal/hosts/${id}/scale`,
-      { count, workers, ...(memLimitBytes === undefined ? {} : { memLimitBytes }) },
+      {
+        count,
+        ...(workers === undefined ? {} : { workers }),
+        ...(memLimitBytes === undefined ? {} : { memLimitBytes }),
+      },
     ),
+  /**
+   * Add `count` containers configured for `workers` each, and converge. Null
+   * inherits the machine's number.
+   */
+  addInstances: (id: string, count: number, workers: number | null) =>
+    call<{ added: number; sent: boolean; reason?: string }>(`/internal/hosts/${id}/instances`, {
+      count,
+      workers,
+    }),
   /**
    * Import the containers a machine already has.
    *

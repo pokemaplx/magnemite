@@ -66,6 +66,10 @@ export const SETTINGS_CATEGORIES: SettingsCategory[] = [
       "hub restart grace",
       "rotom sync interval",
       "rotom stale",
+      // The rewrite that follows a worker count change is set here, while the
+      // count itself is on the Redroid card -- so both words lead to Tuning.
+      "config rewrites",
+      "workers config",
     ],
   },
   {

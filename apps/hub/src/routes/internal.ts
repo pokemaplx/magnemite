@@ -38,7 +38,14 @@ import {
   syncDevices,
 } from "../services/rotom.js";
 import { rerunBootstrap, startBootstrap } from "../services/hostBootstrap.js";
-import { adoptHost, convergeHost, setHostMemLimit, setInstanceCount } from "../services/redroid.js";
+import {
+  addInstances,
+  adoptHost,
+  convergeHost,
+  setHostMemLimit,
+  setHostWorkers,
+  setInstanceCount,
+} from "../services/redroid.js";
 import { nudge } from "../services/scheduler.js";
 import { probeRemote, storeFromUrl, storeUpload } from "../services/uploads.js";
 import { pollAllSources } from "../services/sources/poller.js";
@@ -691,6 +698,9 @@ export async function internalRoutes(app: FastifyInstance) {
         // refuse. The upper bound is a sanity rail, not a capacity limit;
         // capacity is advice the form gives, and the operator may know better.
         count: z.number().int().min(0).max(64),
+        // The machine's own worker count, which every container on it without
+        // one of its own inherits. Undefined leaves it alone and null goes back
+        // to following Settings -- the same pair `memLimitBytes` below is.
         workers: z.number().int().min(1).max(50).nullable().optional(),
         // The per-machine memory ceiling. **Undefined leaves it alone and null
         // clears it**, and the difference matters: a caller that does not know
@@ -722,11 +732,62 @@ export async function internalRoutes(app: FastifyInstance) {
           parsed.data.memLimitBytes === null ? null : BigInt(parsed.data.memLimitBytes),
         );
       }
-      const changed = await setInstanceCount(id, parsed.data.count, parsed.data.workers ?? null);
+      if (parsed.data.workers !== undefined) {
+        await setHostWorkers(id, parsed.data.workers);
+      }
+      const changed = await setInstanceCount(id, parsed.data.count);
       const converge = await convergeHost(id);
       return { ...changed, ...converge };
     } catch (err) {
       log.error({ err, hostId: id }, "scale failed");
+      return reply.status(500).send({ error: err instanceof Error ? err.message : String(err) });
+    }
+  });
+
+  /**
+   * Add containers configured for their own number of workers, and converge.
+   *
+   * Beside the scale rather than folded into it, because the two say different
+   * things: the scale is "this machine runs N like this", and this is "and two
+   * more that are not". Null workers inherits, so it is also a plain "one more".
+   */
+  app.post("/internal/hosts/:id/instances", async (request, reply) => {
+    const { id } = request.params as { id: string };
+    const parsed = z
+      .object({
+        count: z.number().int().min(1).max(64),
+        workers: z.number().int().min(1).max(50).nullable(),
+      })
+      .safeParse(request.body);
+    if (!parsed.success) {
+      return reply.status(400).send({ error: "invalid body", issues: parsed.error.issues });
+    }
+
+    const host = await prisma.redroidHost.findUnique({
+      where: { deviceId: id },
+      select: { adoptedAt: true, _count: { select: { instances: { where: { present: true } } } } },
+    });
+    if (!host) return reply.status(404).send({ error: "that machine has not enrolled yet" });
+    // Refused before any row is written, unlike a converge that would refuse
+    // after: an instance row on an unadopted machine claims an index that
+    // adoption may need for a container already running there.
+    if (!host.adoptedAt) {
+      return reply.status(400).send({ error: "adopt this machine first" });
+    }
+    // The scale's own ceiling, counted the same way, so the two doors cannot
+    // be combined to get past it.
+    if (host._count.instances + parsed.data.count > 64) {
+      return reply
+        .status(400)
+        .send({ error: "64 containers on one machine is past anything sensible." });
+    }
+
+    try {
+      const changed = await addInstances(id, parsed.data.count, parsed.data.workers);
+      const converge = await convergeHost(id);
+      return { ...changed, ...converge };
+    } catch (err) {
+      log.error({ err, hostId: id }, "adding instances failed");
       return reply.status(500).send({ error: err instanceof Error ? err.message : String(err) });
     }
   });

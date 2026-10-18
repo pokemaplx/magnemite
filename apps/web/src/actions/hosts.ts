@@ -22,29 +22,42 @@ function revalidateHost(id: string) {
 }
 
 /**
+ * A worker count that is either absent or one the scanners will take.
+ *
+ * 50 is where the scanners stop being happy, and on some licences it is also
+ * the contractual ceiling. It is the whole reason a machine needs several
+ * containers rather than one big one.
+ */
+function badWorkers(workers: number | null | undefined): boolean {
+  return (
+    workers !== undefined &&
+    workers !== null &&
+    (!Number.isInteger(workers) || workers < 1 || workers > 50)
+  );
+}
+
+/**
  * Set how many containers a machine runs.
  *
  * Zero is valid and is how a machine is drained, so it is deliberately not
  * refused. Capacity is advice rather than a limit: the form says what fits and
  * warns past it, and an operator who knows their own hardware better than the
  * coefficients do is allowed to say so.
+ *
+ * `workers` is the machine's own number, which every container on it without
+ * one of its own inherits. Null goes back to following Settings.
  */
 export async function scaleHost(
   hostId: string,
   count: number,
-  workers: number | null,
+  workers?: number | null,
   memLimitBytes?: number | null,
 ): Promise<ActionState & { reason?: string }> {
   const user = await requireOperator();
 
   if (!Number.isInteger(count) || count < 0) return { error: "Instances must be 0 or more." };
   if (count > 64) return { error: "64 containers on one machine is past anything sensible." };
-  if (workers !== null && (!Number.isInteger(workers) || workers < 1 || workers > 50)) {
-    // 50 is where the scanners stop being happy, and on some licences it is
-    // also the contractual ceiling. It is the whole reason a machine needs
-    // several containers rather than one big one.
-    return { error: "Workers must be between 1 and 50." };
-  }
+  if (badWorkers(workers)) return { error: "Workers must be between 1 and 50." };
   // Undefined is "do not touch", null is "go back to the fleet-wide number".
   // Only a real value is range-checked, and the floor is where Android stops
   // booting rather than where it gets slow.
@@ -76,6 +89,82 @@ export async function scaleHost(
     return { ok: true, reason: result.sent ? undefined : result.reason };
   } catch (err) {
     return { error: err instanceof HubError ? err.message : "Could not scale that machine." };
+  }
+}
+
+/**
+ * Add containers that are configured for their own number of workers.
+ *
+ * Through the hub, like the scale, because the point of adding one is that it
+ * comes up. Null inherits the machine's number, so this is also "one more".
+ */
+export async function addInstances(
+  hostId: string,
+  count: number,
+  workers: number | null,
+): Promise<ActionState & { reason?: string }> {
+  const user = await requireOperator();
+
+  if (!Number.isInteger(count) || count < 1) return { error: "Add at least one." };
+  if (count > 64) return { error: "64 containers on one machine is past anything sensible." };
+  if (badWorkers(workers)) return { error: "Workers must be between 1 and 50." };
+
+  try {
+    const result = await hub.addInstances(hostId, count, workers);
+    await prisma.auditLog.create({
+      data: {
+        userId: user.id,
+        userEmail: user.email,
+        action: "redroidHost.addInstances",
+        targetType: "RedroidHost",
+        targetId: hostId,
+        meta: { count, workers, added: result.added },
+      },
+    });
+    revalidateHost(hostId);
+    return { ok: true, reason: result.sent ? undefined : result.reason };
+  } catch (err) {
+    return { error: err instanceof HubError ? err.message : "Could not add to that machine." };
+  }
+}
+
+/**
+ * Give one container its own number of workers, or put it back on its
+ * machine's.
+ *
+ * Straight to the database and not through the hub, like the name template:
+ * workers reach a box through its MITM config rather than the compose file, so
+ * nothing is recreated and there is nothing for the machine to do. The hub
+ * sees the box's config fall behind the number on its next tick and rewrites
+ * it (`services/workersConfig.ts`), so nothing here has to tell it.
+ */
+export async function setInstanceWorkers(
+  instanceId: string,
+  workers: number | null,
+): Promise<ActionState> {
+  const user = await requireOperator();
+  if (badWorkers(workers)) return { error: "Workers must be between 1 and 50." };
+
+  try {
+    const instance = await prisma.redroidInstance.update({
+      where: { id: instanceId },
+      data: { workers },
+      select: { hostId: true, index: true },
+    });
+    await prisma.auditLog.create({
+      data: {
+        userId: user.id,
+        userEmail: user.email,
+        action: "redroidInstance.setWorkers",
+        targetType: "RedroidInstance",
+        targetId: instanceId,
+        meta: { hostId: instance.hostId, index: instance.index, workers },
+      },
+    });
+    revalidateHost(instance.hostId);
+    return { ok: true };
+  } catch {
+    return { error: "Could not set the workers for that instance." };
   }
 }
 
@@ -357,6 +446,7 @@ export async function bootstrapHost(input: {
   if (input.desiredInstances < 0 || input.desiredInstances > 64) {
     return { error: "Instances must be between 0 and 64." };
   }
+  if (badWorkers(input.desiredWorkers)) return { error: "Workers must be between 1 and 50." };
 
   // Refused here rather than discovered at the end of a twenty-minute run: the
   // hub keys a machine on its name, and two machines sharing one would be one
