@@ -47,19 +47,21 @@ export type HostRow = {
 };
 
 /**
- * The machine list, each row able to open onto its containers.
+ * The machine list, each machine with its containers listed under it.
  *
  * The question this page is asked most is "what is this machine running", and
- * it used to cost a page per machine to answer. The arrow answers it in place;
- * the machine's own page stays where its instances are managed.
+ * it used to cost a page per machine to answer. Now the answer is open under
+ * every machine from the start, and the arrow folds away the ones nobody is
+ * looking at; the machine's own page stays where its instances are managed.
  */
 export function HostsTable({ rows }: { rows: HostRow[] }) {
-  // Not remembered across visits: the page is a list of machines first, and a
-  // machine's containers are a glance rather than a view.
-  const [open, setOpen] = useState<Set<string>>(new Set());
+  // What has been folded away, rather than what is open, so everything starts
+  // open -- a machine added while the page is up included. Not remembered
+  // across visits: folding is tidying the page for now.
+  const [collapsed, setCollapsed] = useState<Set<string>>(new Set());
 
   function toggle(id: string) {
-    setOpen((current) => {
+    setCollapsed((current) => {
       const next = new Set(current);
       if (next.has(id)) next.delete(id);
       else next.add(id);
@@ -84,7 +86,7 @@ export function HostsTable({ rows }: { rows: HostRow[] }) {
         </TableHeader>
         <TableBody>
           {rows.map((host) => {
-            const expanded = open.has(host.id);
+            const expanded = host.instances.length > 0 && !collapsed.has(host.id);
             return (
               <Fragment key={host.id}>
                 <TableRow>

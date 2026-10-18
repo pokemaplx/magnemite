@@ -176,6 +176,7 @@ export function DeviceExec({
             deviceId={deviceId}
             name={name}
             mitm={mitm}
+            configPath={configPath}
             onBack={() => setView("command")}
           />
         ) : (
@@ -271,11 +272,13 @@ function ConfigRewrite({
   deviceId,
   name,
   mitm,
+  configPath,
   onBack,
 }: {
   deviceId: string;
   name: string;
   mitm: ExecMitm;
+  configPath: string;
   onBack: () => void;
 }) {
   const [preview, setPreview] = useState<DeviceConfigPreview | null>(null);
@@ -315,65 +318,73 @@ function ConfigRewrite({
     });
   }
 
+  // Drawn the same before the config arrives as after it: the path is known
+  // from the group already, and the editor stands at its full height, empty,
+  // until the hub answers. A line of "reading…" in its place shrank the dialog
+  // to that line and grew it back a moment later -- a flicker on every open.
+  const loading = preview === null && loadError === null;
+
   return (
     <>
-      {!preview && !loadError ? (
-        <p className="text-sm text-muted-foreground">Reading the group&apos;s config…</p>
-      ) : null}
-      {loadError ? <p className="text-sm text-destructive">{loadError}</p> : null}
-      {preview?.state === "none" ? (
-        <p className="text-sm text-muted-foreground">
-          This box&apos;s group declares no config to write.
+      <div className="flex flex-col gap-3">
+        <p className="text-xs text-muted-foreground">
+          Written to <span className="font-mono text-foreground">{configPath}</span>, rendered for{" "}
+          {name} from its group&apos;s template. Change it here to write something else to this box
+          alone — the group keeps its own.
         </p>
-      ) : null}
 
-      {ready ? (
-        <div className="flex flex-col gap-3">
-          <p className="text-xs text-muted-foreground">
-            Written to <span className="font-mono text-foreground">{preview.path}</span>, rendered
-            for {name} from its group&apos;s template. Change it here to write something else to
-            this box alone — the group keeps its own.
+        {preview?.state === "refused" ? (
+          <p className="rounded-md border border-warning/40 bg-warning/10 px-3 py-2 text-xs">
+            The group&apos;s template does not render on this box: {preview.reason}. Fix it below to
+            write it anyway.
           </p>
+        ) : null}
 
-          {preview.state === "refused" ? (
-            <p className="rounded-md border border-warning/40 bg-warning/10 px-3 py-2 text-xs">
-              The group&apos;s template does not render on this box: {preview.reason}. Fix it below
-              to write it anyway.
-            </p>
-          ) : null}
+        <Textarea
+          aria-label={`${mitm.label} config`}
+          value={draft}
+          onChange={(e) => setDraft(e.target.value)}
+          disabled={!ready}
+          placeholder={
+            loading
+              ? "Reading the group's config…"
+              : preview?.state === "none"
+                ? "This box's group declares no config to write."
+                : undefined
+          }
+          rows={12}
+          spellCheck={false}
+          className="font-mono text-xs"
+        />
 
-          <Textarea
-            aria-label={`${mitm.label} config`}
-            value={draft}
-            onChange={(e) => setDraft(e.target.value)}
-            rows={12}
-            spellCheck={false}
-            className="font-mono text-xs"
-          />
-
-          <div className="flex flex-col gap-1 text-xs text-muted-foreground">
-            <span>
-              Stops it first with{" "}
-              <code className="font-mono text-foreground">{preview.stop ?? "nothing"}</code>
-            </span>
-            <span>
-              Starts it again with{" "}
-              <code className="font-mono text-foreground">{preview.start ?? "nothing"}</code>
-            </span>
-            <span>Those are the group&apos;s own install hooks, when it has them.</span>
-          </div>
-
-          {!preview.capable ? (
-            <p className="rounded-md border border-warning/40 bg-warning/10 px-3 py-2 text-xs">
-              This box&apos;s agent is too old to rewrite a config on its own. It updates itself to
-              one that can; until then the config goes on with the next install of {mitm.label}.
-            </p>
-          ) : null}
-
-          {outcome?.error ? <p className="text-xs text-destructive">{outcome.error}</p> : null}
-          {outcome?.push ? <PushResult push={outcome.push} label={mitm.label} /> : null}
+        <div className="flex flex-col gap-1 text-xs text-muted-foreground">
+          <span>
+            Stops it first with{" "}
+            <code className="font-mono text-foreground">
+              {ready ? (preview.stop ?? "nothing") : "…"}
+            </code>
+          </span>
+          <span>
+            Starts it again with{" "}
+            <code className="font-mono text-foreground">
+              {ready ? (preview.start ?? "nothing") : "…"}
+            </code>
+          </span>
+          <span>Those are the group&apos;s own install hooks, when it has them.</span>
         </div>
-      ) : null}
+
+        {loadError ? <p className="text-xs text-destructive">{loadError}</p> : null}
+
+        {ready && !preview.capable ? (
+          <p className="rounded-md border border-warning/40 bg-warning/10 px-3 py-2 text-xs">
+            This box&apos;s agent is too old to rewrite a config on its own. It updates itself to
+            one that can; until then the config goes on with the next install of {mitm.label}.
+          </p>
+        ) : null}
+
+        {outcome?.error ? <p className="text-xs text-destructive">{outcome.error}</p> : null}
+        {outcome?.push ? <PushResult push={outcome.push} label={mitm.label} /> : null}
+      </div>
 
       <DialogFooter>
         <Button variant="ghost" disabled={pending} onClick={onBack}>

@@ -6,10 +6,11 @@ import { useRouter } from "next/navigation";
 /**
  * Keeps a server-rendered page in step with the fleet.
  *
- * The hub pushes an event whenever a device, job, rollout or version changes;
- * this listens and asks Next to re-render the current route. Refreshes are
- * coalesced because a fleet-wide rollout emits events far faster than anyone
- * needs to see them — one repaint per second is plenty.
+ * The hub pushes an event whenever a device, job, rollout or version changes,
+ * or a machine being provisioned moves on; this listens and asks Next to
+ * re-render the current route. Refreshes are coalesced because a fleet-wide
+ * rollout emits events far faster than anyone needs to see them — one repaint
+ * per second is plenty.
  */
 export function LiveRefresh({ throttleMs = 1000 }: { throttleMs?: number }) {
   const router = useRouter();
@@ -26,7 +27,7 @@ export function LiveRefresh({ throttleMs = 1000 }: { throttleMs?: number }) {
       }, throttleMs);
     };
 
-    for (const kind of ["device", "job", "rollout", "version"]) {
+    for (const kind of ["device", "job", "rollout", "version", "bootstrap"]) {
       source.addEventListener(kind, schedule);
     }
     // EventSource reconnects on its own; nothing to do but stop the noise.

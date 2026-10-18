@@ -4,6 +4,7 @@ import path from "node:path";
 import { Client, type ConnectConfig } from "ssh2";
 import type { HostBootstrapResult } from "@magnemite/protocol";
 import { generateToken, hashToken, prisma } from "@magnemite/db";
+import { bus } from "../bus.js";
 import { env } from "../env.js";
 import { log } from "../log.js";
 import { clampError } from "./redroid.js";
@@ -128,6 +129,7 @@ export async function startBootstrap(input: {
       state: "RUNNING",
     },
   });
+  bus.publish({ kind: "bootstrap", bootstrapId: row.id });
 
   // Deliberately not awaited. The credential stays in this closure and goes
   // out of scope when the run ends.
@@ -216,7 +218,12 @@ async function run(id: string, serial: string, name: string, access: SshAccess):
       ].join(" && ");
 
       const publish = stepWriter(
-        (steps) => prisma.redroidBootstrap.update({ where: { id }, data: { steps } }),
+        // Announced as each one lands, so the Machines page moves with the
+        // script instead of sitting on its first frame until a reload.
+        (steps) =>
+          prisma.redroidBootstrap
+            .update({ where: { id }, data: { steps } })
+            .then(() => bus.publish({ kind: "bootstrap", bootstrapId: id })),
         { bootstrapId: id },
       );
       await exec(client, command, (line) => {
@@ -239,6 +246,7 @@ async function run(id: string, serial: string, name: string, access: SshAccess):
       where: { id },
       data: { state: "WAITING", steps },
     });
+    bus.publish({ kind: "bootstrap", bootstrapId: id });
     log.info({ bootstrapId: id, serial }, "bootstrap ran; waiting for the machine to dial in");
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
@@ -252,6 +260,7 @@ async function run(id: string, serial: string, name: string, access: SshAccess):
           finishedAt: new Date(),
         },
       })
+      .then(() => bus.publish({ kind: "bootstrap", bootstrapId: id }))
       .catch(() => undefined);
     log.warn({ bootstrapId: id, err: message }, "bootstrap failed");
   }
@@ -284,6 +293,7 @@ export async function claimBootstrap(deviceId: string, serial: string): Promise<
     where: { id: row.id },
     data: { state: "DONE", deviceId, finishedAt: new Date() },
   });
+  bus.publish({ kind: "bootstrap", bootstrapId: row.id });
 
   // Known-empty, so adopting is a fact rather than an assumption.
   //

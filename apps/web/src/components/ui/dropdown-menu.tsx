@@ -2,6 +2,7 @@
 
 import * as React from "react";
 import * as DropdownMenuPrimitive from "@radix-ui/react-dropdown-menu";
+import { Check, Minus } from "lucide-react";
 import { cn } from "@/lib/utils";
 
 const DropdownMenu = DropdownMenuPrimitive.Root;
@@ -42,6 +43,48 @@ const DropdownMenuItem = React.forwardRef<
 ));
 DropdownMenuItem.displayName = "DropdownMenuItem";
 
+/**
+ * An item that is a checkbox, drawn as the tables' own checkbox whether ticked
+ * or not -- rather than a bare tick that appears only once checked -- so a list
+ * of them reads as a list of switches. `checked` may be "indeterminate", for an
+ * item standing for some of the ones under it.
+ *
+ * Picking one keeps the menu open: the point of a list of checkboxes is
+ * ticking several of them.
+ */
+const DropdownMenuCheckboxItem = React.forwardRef<
+  React.ElementRef<typeof DropdownMenuPrimitive.CheckboxItem>,
+  React.ComponentPropsWithoutRef<typeof DropdownMenuPrimitive.CheckboxItem>
+>(({ className, children, checked, ...props }, ref) => (
+  <DropdownMenuPrimitive.CheckboxItem
+    ref={ref}
+    checked={checked}
+    onSelect={(event) => event.preventDefault()}
+    className={cn(
+      "relative flex cursor-pointer select-none items-center gap-2 rounded-md px-2 py-1.5 text-sm leading-5 outline-none",
+      "text-foreground focus:bg-subtle data-[disabled]:pointer-events-none data-[disabled]:opacity-40",
+      className,
+    )}
+    {...props}
+  >
+    <span
+      aria-hidden
+      className={cn(
+        "flex h-4 w-4 shrink-0 items-center justify-center rounded-[5px] border transition-colors",
+        checked ? "border-primary bg-primary text-primary-foreground" : "border-input bg-card",
+      )}
+    >
+      {checked === "indeterminate" ? (
+        <Minus className="h-3 w-3" />
+      ) : checked ? (
+        <Check className="h-3 w-3" />
+      ) : null}
+    </span>
+    {children}
+  </DropdownMenuPrimitive.CheckboxItem>
+));
+DropdownMenuCheckboxItem.displayName = "DropdownMenuCheckboxItem";
+
 const DropdownMenuSeparator = React.forwardRef<
   React.ElementRef<typeof DropdownMenuPrimitive.Separator>,
   React.ComponentPropsWithoutRef<typeof DropdownMenuPrimitive.Separator>
@@ -71,6 +114,7 @@ export {
   DropdownMenuTrigger,
   DropdownMenuContent,
   DropdownMenuItem,
+  DropdownMenuCheckboxItem,
   DropdownMenuSeparator,
   DropdownMenuLabel,
 };

@@ -6,6 +6,7 @@ import { useFormStatus } from "react-dom";
 import {
   AlertTriangle,
   CheckCircle2,
+  ChevronDown,
   FolderInput,
   MoreHorizontal,
   Pencil,
@@ -36,13 +37,15 @@ import {
 } from "@/components/ui/dialog";
 import {
   DropdownMenu,
+  DropdownMenuCheckboxItem,
   DropdownMenuContent,
   DropdownMenuItem,
+  DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { Input } from "@/components/ui/input";
 import { SearchInput } from "@/components/ui/search-input";
-import { Select } from "@/components/ui/select";
+import { SELECT_FIELD, Select } from "@/components/ui/select";
 import { Label } from "@/components/ui/label";
 import { Progress } from "@/components/ui/progress";
 import {
@@ -143,10 +146,10 @@ export type VersionOption = {
 type Filter = "all" | "online" | "offline" | "outdated" | "pending";
 
 /**
- * Where a box runs: "" for everywhere, "boxes" for hardware, "hosts" for any
- * Redroid container, or `host:<id>` for the containers on one machine.
+ * The key hardware boxes go under in the "where it runs" filter. Every other
+ * key is a machine's Device id, which is a cuid and never this.
  */
-type Where = string;
+const HARDWARE = ":boxes";
 
 function scannerCell(rotom: DeviceRow["rotom"]) {
   const state = scannerState(rotom);
@@ -204,7 +207,10 @@ export function FleetTable({
   const [query, setQuery] = useState("");
   const [filter, setFilter] = useState<Filter>("all");
   const [group, setGroup] = useState("");
-  const [where, setWhere] = useState<Where>("");
+  // What the "where it runs" filter hides, rather than what it shows, so a
+  // machine added while the page is open shows up instead of being filtered
+  // out by a list that predates it. Empty shows everything.
+  const [hidden, setHidden] = useState<Set<string>>(new Set());
   const [selected, setSelected] = useState<Set<string>>(new Set());
 
   const accessors = useMemo(() => {
@@ -244,9 +250,7 @@ export function FleetTable({
     const q = query.trim().toLowerCase();
     const filtered = rows.filter((row) => {
       if (group && row.groupName !== group) return false;
-      if (where === "boxes" && row.hostId !== null) return false;
-      if (where === "hosts" && row.hostId === null) return false;
-      if (where.startsWith("host:") && row.hostId !== where.slice("host:".length)) return false;
+      if (hidden.has(row.hostId ?? HARDWARE)) return false;
       if (filter === "online" && !row.online) return false;
       if (filter === "offline" && row.online) return false;
       if (filter === "pending" && row.approved) return false;
@@ -265,10 +269,10 @@ export function FleetTable({
       );
     });
     return sortRows(filtered);
-  }, [rows, query, filter, group, where, latestVersion, sortRows]);
+  }, [rows, query, filter, group, hidden, latestVersion, sortRows]);
 
   const pagination = useTablePagination(matching, {
-    resetKey: `${query}|${filter}|${group}|${where}|${sort.key}|${sort.direction}`,
+    resetKey: `${query}|${filter}|${group}|${[...hidden].sort().join(",")}|${sort.key}|${sort.direction}`,
   });
   const visible = pagination.rows;
 
@@ -382,18 +386,7 @@ export function FleetTable({
         {/* Only once there is a machine: before that every box is hardware,
             and a filter with one answer is clutter. */}
         {hosts.length > 0 ? (
-          <Select
-            aria-label="Filter by where the box runs"
-            value={where}
-            onValueChange={setWhere}
-            className="w-48"
-            options={[
-              { value: "", label: "Boxes and hosts" },
-              { value: "boxes", label: "Boxes only" },
-              { value: "hosts", label: "Hosts only" },
-              ...hosts.map((host) => ({ value: `host:${host.id}`, label: `Host: ${host.name}` })),
-            ]}
-          />
+          <WhereFilter hosts={hosts} hidden={hidden} onHiddenChange={setHidden} />
         ) : null}
       </div>
 
@@ -893,5 +886,94 @@ function RolloutDialog({
         )}
       </DialogContent>
     </Dialog>
+  );
+}
+
+/**
+ * Which boxes to show by where they run: hardware, and each machine's
+ * containers -- any mix of them, ticked in one menu rather than picked one at a
+ * time. "All hosts" ticks or clears every machine at once, and reads as half
+ * ticked when only some are.
+ */
+function WhereFilter({
+  hosts,
+  hidden,
+  onHiddenChange,
+}: {
+  hosts: { id: string; name: string }[];
+  hidden: Set<string>;
+  onHiddenChange: (hidden: Set<string>) => void;
+}) {
+  const hardware = !hidden.has(HARDWARE);
+  const shown = hosts.filter((host) => !hidden.has(host.id));
+  const allHosts = shown.length === hosts.length;
+
+  function set(keys: string[], show: boolean) {
+    const next = new Set(hidden);
+    for (const key of keys) {
+      if (show) next.delete(key);
+      else next.add(key);
+    }
+    onHiddenChange(next);
+  }
+
+  // What is ticked, said as briefly as it can be: a machine by name when it is
+  // the only one, a count when it is several.
+  const parts: string[] = [];
+  if (hardware) parts.push("Boxes");
+  if (allHosts) parts.push("All hosts");
+  else if (shown.length === 1) parts.push(shown[0]!.name);
+  else if (shown.length > 1) parts.push(`${shown.length} hosts`);
+  const label =
+    hardware && allHosts ? "Boxes and hosts" : parts.length > 0 ? parts.join(" + ") : "Nothing";
+
+  return (
+    <DropdownMenu>
+      <DropdownMenuTrigger
+        aria-label="Filter by where the box runs"
+        className={cn(SELECT_FIELD, "w-48")}
+      >
+        <span className="truncate">{label}</span>
+        <ChevronDown className="h-4 w-4 shrink-0 text-muted-foreground" />
+      </DropdownMenuTrigger>
+      <DropdownMenuContent align="start" className="max-h-80 w-56 overflow-y-auto">
+        <DropdownMenuCheckboxItem
+          checked={hardware}
+          onCheckedChange={(show) => set([HARDWARE], show)}
+        >
+          Boxes
+        </DropdownMenuCheckboxItem>
+        <DropdownMenuSeparator />
+        <DropdownMenuCheckboxItem
+          checked={allHosts ? true : shown.length > 0 ? "indeterminate" : false}
+          onCheckedChange={(show) =>
+            set(
+              hosts.map((host) => host.id),
+              show,
+            )
+          }
+        >
+          All hosts
+        </DropdownMenuCheckboxItem>
+        {hosts.map((host) => (
+          <DropdownMenuCheckboxItem
+            key={host.id}
+            className="pl-6"
+            checked={!hidden.has(host.id)}
+            onCheckedChange={(show) => set([host.id], show)}
+          >
+            <span className="truncate">{host.name}</span>
+          </DropdownMenuCheckboxItem>
+        ))}
+        {hidden.size > 0 ? (
+          <>
+            <DropdownMenuSeparator />
+            <DropdownMenuItem onSelect={() => onHiddenChange(new Set())}>
+              Show everything
+            </DropdownMenuItem>
+          </>
+        ) : null}
+      </DropdownMenuContent>
+    </DropdownMenu>
   );
 }

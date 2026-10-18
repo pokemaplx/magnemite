@@ -39,6 +39,11 @@ binary, the bootstrap script and the four files that build the Redroid image,
 runs the script, and follows its progress step by step. Then the machine enrolls
 itself, is adopted, and brings its instances up.
 
+The run shows on **Machines** under **Being provisioned** while it goes: a bar of
+the stages done out of all of them, a line saying what the machine is busy with
+now, and one chip per stage — hover a finished one for what it reported. It moves
+as each stage lands, with no reload, and turns red on the stage that failed.
+
 <Callout type="warn" title="The SSH credential is never stored">
   It is held in memory for the length of the run and dropped when it ends — it is not in the
   database, not in the step log and not in the audit entry, which records the machine, the address
