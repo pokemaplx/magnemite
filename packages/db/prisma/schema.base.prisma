@@ -734,6 +734,16 @@ model RedroidHost {
   /// than looking idle while the machine works, and a value left behind by a
   /// hub restart is how a converge that never reported is spotted.
   convergingSince DateTime?
+  /// Set when a converge was asked for while the machine was offline, and
+  /// cleared once one is sent. What "it will converge when it reconnects" is
+  /// kept to: the next hello sends it.
+  ///
+  /// A flag rather than "the rows changed", deliberately. A hub deploy that
+  /// changes the rendered compose file -- a new image, a template edit -- must
+  /// not have every machine recreate its containers on reconnect, which is
+  /// what converging whenever the file differs would do. Only a converge
+  /// somebody asked for is owed.
+  convergeOwedAt  DateTime?
 
   /// Whether this machine's existing containers have been imported as
   /// instance rows. Nothing is converged before that: a machine already
@@ -883,6 +893,12 @@ model RedroidInstance {
   /// the machine reporting the host's total RAM.
   appliedMemLimitBytes BigInt?
   reportedAt     DateTime?
+
+  /// When this instance was last asked for: created, or brought back after a
+  /// removal. What the dashboard times its setup from -- `createdAt` is the
+  /// row's, and a revived row keeps the one it had the first time. Null on
+  /// rows from before it existed, which read as long since set up.
+  requestedAt DateTime?
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt

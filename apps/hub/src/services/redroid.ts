@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import type { HostConvergeResult, HostInfo } from "@magnemite/protocol";
 import { generateToken, getRedroidSettings, hashToken, prisma } from "@magnemite/db";
+import { bus } from "../bus.js";
 import { env } from "../env.js";
 import { log } from "../log.js";
 import { getConnection, sendTo } from "../registry.js";
@@ -229,9 +230,14 @@ async function applyContainers(deviceId: string, host: HostInfo): Promise<void> 
   // that row saying `running` for as long as the machine stayed up.
   const rows = await prisma.redroidInstance.findMany({
     where: { hostId: deviceId, present: true },
-    select: { id: true, serial: true, containerState: true },
+    select: { id: true, serial: true, containerState: true, restartCount: true },
   });
 
+  // Whether anything a page shows moved, so the dashboard is told once, after
+  // the rows are written. The heartbeat's own event fires before this runs,
+  // and a page refreshed on it raced these writes -- a container that came up
+  // read as absent for another twenty seconds.
+  let changed = false;
   const now = new Date();
   for (const row of rows) {
     const container = bySerial.get(row.serial);
@@ -245,7 +251,14 @@ async function applyContainers(deviceId: string, host: HostInfo): Promise<void> 
         where: { id: row.id },
         data: { containerState: ABSENT, reportedAt: now },
       });
+      changed = true;
       continue;
+    }
+    if (
+      row.containerState !== container.state ||
+      (container.restartCount != null && row.restartCount !== container.restartCount)
+    ) {
+      changed = true;
     }
     await prisma.redroidInstance.update({
       where: { id: row.id },
@@ -260,6 +273,7 @@ async function applyContainers(deviceId: string, host: HostInfo): Promise<void> 
       },
     });
   }
+  if (changed) bus.publish({ kind: "device", deviceId });
 }
 
 // ---------------------------------------------------------------------------
@@ -354,13 +368,29 @@ export async function setInstanceCount(
         if (!existing) continue;
         await prisma.redroidInstance.update({
           where: { id: existing.id },
-          data: { present: true, ...(workers === null ? {} : { workers }) },
+          data: {
+            present: true,
+            ...(workers === null ? {} : { workers }),
+            requestedAt: new Date(),
+            // What it said before it was removed is about a container that
+            // has since been destroyed. Unknown until the machine reports the
+            // new one, rather than a stale `running` that was never this one.
+            containerState: null,
+            restartCount: null,
+            reportedAt: null,
+          },
         });
         added += 1;
         continue;
       }
       await prisma.redroidInstance.create({
-        data: { hostId, index, serial: mintSerial(hostId, index), workers },
+        data: {
+          hostId,
+          index,
+          serial: mintSerial(hostId, index),
+          workers,
+          requestedAt: new Date(),
+        },
       });
       taken.add(index);
       added += 1;
@@ -376,6 +406,7 @@ export async function setInstanceCount(
     });
   }
 
+  if (added > 0 || removed > 0) bus.publish({ kind: "device", deviceId: hostId });
   return { added, removed };
 }
 
@@ -497,7 +528,13 @@ export async function convergeHost(
   }
   if (!getConnection(deviceId)) {
     // Not an error: the rows are the desired state, and the machine converges
-    // when it comes back. Said out loud so nobody is left wondering.
+    // when it comes back. Said out loud so nobody is left wondering -- and
+    // written down, because the hello that brings it back is what keeps that
+    // promise, and it only sends what is owed.
+    await prisma.redroidHost.update({
+      where: { deviceId },
+      data: { convergeOwedAt: new Date() },
+    });
     return { sent: false, reason: "offline — it will converge when it reconnects" };
   }
 
@@ -523,6 +560,10 @@ export async function convergeHost(
   // recreate nothing, but the operator would still watch a converge run for no
   // reason.
   if (!options.force && host.appliedSha256 === sha256) {
+    // Nothing is owed to a machine that already has it.
+    if (host.convergeOwedAt) {
+      await prisma.redroidHost.update({ where: { deviceId }, data: { convergeOwedAt: null } });
+    }
     return { sent: false, reason: "already up to date" };
   }
 
@@ -543,10 +584,46 @@ export async function convergeHost(
 
   await prisma.redroidHost.update({
     where: { deviceId },
-    data: { convergingSince: new Date(), lastError: null, lastErrorAt: null },
+    data: { convergingSince: new Date(), convergeOwedAt: null, lastError: null, lastErrorAt: null },
   });
+  bus.publish({ kind: "device", deviceId });
   log.info({ deviceId, requestId, services: host.instances.length }, "converge dispatched");
   return { sent: true };
+}
+
+/**
+ * How long a converge may be taken to still be running. The agent gives each
+ * wave of `docker compose up` half an hour; past that, a `convergingSince`
+ * still set is a result that was lost on the way back, not work in progress.
+ */
+export const CONVERGE_STALE_MS = 30 * 60 * 1000;
+
+/**
+ * Sends a machine that has just said hello the converge it is owed, if any.
+ *
+ * What `convergeHost` promises an offline machine -- "it will converge when it
+ * reconnects" -- and nothing used to do. It mattered most where nobody would
+ * think to look: a machine provisioned with instances is adopted the moment
+ * it enrols, over HTTP and before its socket exists, so the converge that was
+ * meant to bring its first containers up was always refused as offline.
+ *
+ * Only an owed one (`convergeOwedAt`), never "whatever differs": a hub deploy
+ * that changes the rendered compose file must not recreate every container on
+ * every machine as they reconnect. And never alongside one still running --
+ * the agent's survives a dropped socket, and a second would rewrite the
+ * compose file under the first.
+ */
+export async function convergeOnReconnect(deviceId: string): Promise<void> {
+  const host = await prisma.redroidHost.findUnique({
+    where: { deviceId },
+    select: { convergingSince: true, convergeOwedAt: true },
+  });
+  if (!host?.convergeOwedAt) return;
+  if (host.convergingSince && Date.now() - host.convergingSince.getTime() < CONVERGE_STALE_MS) {
+    return;
+  }
+  const result = await convergeHost(deviceId);
+  log.info({ deviceId, sent: result.sent, reason: result.reason }, "owed converge on reconnect");
 }
 
 /** Stores what a machine did about a converge. */
@@ -570,6 +647,7 @@ export async function recordConvergeResult(
       },
     })
     .catch((err) => log.warn({ err, deviceId }, "failed to store the converge result"));
+  bus.publish({ kind: "device", deviceId });
 
   log.info({ deviceId, requestId: result.requestId, ok: result.ok }, "converge reported");
 }

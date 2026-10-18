@@ -17,13 +17,45 @@ export type GroupMitm = {
   mitmLabel: string | null;
 };
 
+/** What a group calls its MITM: its own label, or the last dotted segment of the package. */
+function mitmLabel(packageName: string, label: string | null): string {
+  return label || (packageName.split(".").pop() ?? packageName);
+}
+
 /** One column per distinct package, ordered by the group that first names it. */
 export function mitmColumns(groups: GroupMitm[]): MitmColumn[] {
   const byPackage = new Map<string, string>();
   for (const group of [...groups].sort((a, b) => a.name.localeCompare(b.name))) {
     const packageName = group.mitmPackageName;
     if (!packageName || byPackage.has(packageName)) continue;
-    byPackage.set(packageName, group.mitmLabel || (packageName.split(".").pop() ?? packageName));
+    byPackage.set(packageName, mitmLabel(packageName, group.mitmLabel));
   }
   return [...byPackage].map(([packageName, label]) => ({ packageName, label }));
+}
+
+/** A box's group MITM, as far as the Execute dialog needs it. */
+export type ExecMitm = {
+  /** The group's column header, or the last dotted segment of the package. */
+  label: string;
+  packageName: string;
+  /** Where the group writes its config. Null when it declares none. */
+  configPath: string | null;
+};
+
+/**
+ * The Execute dialog's view of a group. Null when the group runs no MITM, or
+ * there is no group.
+ *
+ * Only ever handed to operators: the dialog's config view shows the config,
+ * which is the MITM's credentials.
+ */
+export function execMitm(
+  group: Pick<GroupMitm, "mitmPackageName" | "mitmLabel"> & { mitmConfigPath: string | null },
+): ExecMitm | null {
+  if (!group.mitmPackageName) return null;
+  return {
+    label: mitmLabel(group.mitmPackageName, group.mitmLabel),
+    packageName: group.mitmPackageName,
+    configPath: group.mitmConfigPath,
+  };
 }

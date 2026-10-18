@@ -14,6 +14,7 @@ import { DeviceLoadCard } from "@/components/device-load-card";
 import { OnlineDot } from "@/components/status";
 import { RelativeTime } from "@/components/relative-time";
 import { formatBytes } from "@/lib/format";
+import { instanceSetup, setupJobsSelect } from "@/lib/instance-setup-query";
 import { loadRecentTrend } from "@/lib/metrics";
 
 export const dynamic = "force-dynamic";
@@ -55,6 +56,8 @@ export default async function HostPage({ params }: { params: Promise<{ id: strin
                   cpuPercent: true,
                   memTotalBytes: true,
                   memAvailableBytes: true,
+                  // Its join installs, the last stage of a new one's setup.
+                  jobs: setupJobsSelect(),
                 },
               },
             },
@@ -366,6 +369,13 @@ export default async function HostPage({ params }: { params: Promise<{ id: strin
                     memAvailableBytes: num(instance.device.memAvailableBytes),
                   }
                 : null,
+              setup: instanceSetup(instance, {
+                name: host.name,
+                status: host.status,
+                convergingSince: machine?.convergingSince ?? null,
+                lastError: machine?.lastError ?? null,
+                lastErrorAt: machine?.lastErrorAt ?? null,
+              }),
             }))}
           />
         </CardContent>

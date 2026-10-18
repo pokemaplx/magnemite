@@ -1,4 +1,4 @@
-import { prisma } from "@magnemite/db";
+import { JOIN_ROLLOUT_NOTE, prisma } from "@magnemite/db";
 import { bus } from "../bus.js";
 import { log } from "../log.js";
 import { getHubSettings } from "./hubSettings.js";
@@ -192,7 +192,7 @@ export async function queueJoinInstalls(
         // and the note is what makes the rollout list legible later, where an
         // unexplained one-box rollout is otherwise a small mystery.
         createdById: null,
-        note: `joined its group`,
+        note: JOIN_ROLLOUT_NOTE,
         notBefore,
       });
       // Said on the job, because a join install that sits queued on a box

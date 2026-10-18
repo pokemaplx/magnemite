@@ -16,7 +16,7 @@ import { markTerminatedByHub, openEpisode } from "../services/connectivity.js";
 import { applyMetrics, markOffline, markOnline, trackedPackages } from "../services/devices.js";
 import { ACTIVE_STATES, applyProgress, completeJob, logJobEvent } from "../services/jobs.js";
 import { specForDevice } from "../services/monitor.js";
-import { applyHostReport, recordConvergeResult } from "../services/redroid.js";
+import { applyHostReport, convergeOnReconnect, recordConvergeResult } from "../services/redroid.js";
 import { resolveBoxAdb } from "../services/boxEnroll.js";
 import { recordBootstrapResult } from "../services/hostBootstrap.js";
 import { nudge } from "../services/scheduler.js";
@@ -321,6 +321,15 @@ async function handleMessage(ws: WebSocket, deviceId: string, ip: string | null,
         // The box may have been offline while a rollout was created for it,
         // and this is the first moment it can be handed one.
         nudge();
+
+        // A machine is converged when it comes back, which is what a scale
+        // made while it was away was promised. A no-op when its compose file
+        // is already the one its rows describe.
+        if (msg.host) {
+          void convergeOnReconnect(deviceId).catch((err) =>
+            log.error({ err, deviceId }, "reconnect converge failed"),
+          );
+        }
       }
       break;
     }

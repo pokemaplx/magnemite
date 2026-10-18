@@ -142,6 +142,33 @@ a list of checkboxes: hardware boxes, and each machine's containers, in any mix.
   page behind each name breaks that container down per app. The machine's own
   Load card above is the other end of the same question.
 
+## A new instance, setting up
+
+For half an hour after it is asked for — a scale-up, or a removed index brought
+back — an instance shows where it has got to instead of a badge: what it is
+doing, a bar, and a clock counting up from when it was asked for. Hover it for
+the longer version.
+
+| Stage                       | What is happening                                                                                          |
+| --------------------------- | ---------------------------------------------------------------------------------------------------------- |
+| **Waiting for the machine** | The machine is offline. The converge is owed to it, and goes out on its next hello.                        |
+| **Creating the container**  | `docker compose` is bringing it up, or the machine has not reported it yet — it reports every beat.        |
+| **Starting the container**  | Created, and being started.                                                                                |
+| **Booting Android**         | The container runs; the box dials in once Android has booted, usually a minute or two.                     |
+| **Settling, then …**        | The box is up, and its group's [join installs](/docs/fleet/configs#install-on-join) wait for it to settle. |
+| **Installing …**            | One of them is going in, with its own percentage: the game first, then the MITM.                           |
+
+A **converge that failed** turns it red with docker's first line, and so does a
+**join install that failed**. When the last install is in, the usual **running**
+badge takes over. So does everything below once the half hour is up, because an
+instance still not up by then is a fault rather than a stage, and the badges say
+which.
+
+A scale made while the machine is **offline** is kept: the converge is recorded
+as owed and sent when the machine says hello again. Only an owed one, though —
+a hub deploy that changes the rendered compose file does not recreate every
+container as the machines reconnect.
+
 ## The instance states
 
 This is the part you will actually use, and the second one is the whole reason

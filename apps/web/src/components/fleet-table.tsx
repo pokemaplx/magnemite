@@ -1,28 +1,35 @@
 "use client";
 
-import { useActionState, useMemo, useState, useTransition } from "react";
+import { useActionState, useEffect, useMemo, useRef, useState, useTransition } from "react";
 import Link from "next/link";
+import { useRouter } from "next/navigation";
 import { useFormStatus } from "react-dom";
 import {
   AlertTriangle,
+  Camera,
   CheckCircle2,
   ChevronDown,
   FolderInput,
   MoreHorizontal,
   Pencil,
   Power,
+  Radio,
   Rocket,
+  ScrollText,
   ShieldCheck,
+  Terminal,
+  Wrench,
   X,
 } from "lucide-react";
 import type { JobState, VersionSource } from "@magnemite/db";
-import type { MitmColumn } from "@/lib/mitm-columns";
+import type { ExecMitm, MitmColumn } from "@/lib/mitm-columns";
 import { startRollout, type ActionState } from "@/actions/rollouts";
-import { rebootDevice, setDeviceApproval } from "@/actions/devices";
-import { RenameDevicesDialog } from "@/components/rename-devices-dialog";
+import { setDeviceApproval } from "@/actions/devices";
+import { DeviceActionDialogs, useLogcat, type DeviceTarget } from "@/components/device-actions";
 import { ChangeGroupDialog } from "@/components/change-group-dialog";
 import { AddBoxDialog } from "@/components/add-box-dialog";
 import { EnrollingBanner, type EnrollingRow } from "@/components/enrolling-boxes";
+import { useHotkey } from "@/components/shortcuts/hotkeys";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
@@ -41,6 +48,7 @@ import {
   DropdownMenuContent,
   DropdownMenuItem,
   DropdownMenuSeparator,
+  DropdownMenuShortcut,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { Input } from "@/components/ui/input";
@@ -58,8 +66,11 @@ import {
   TableSortHead,
 } from "@/components/ui/table";
 import { TablePaginationBar } from "@/components/ui/table-pagination";
+import { useToast } from "@/components/ui/toast";
 import { ACTIVE_JOB_STATES, JobStateBadge, OnlineDot } from "@/components/status";
+import { commandBlocker, type DeviceAction, type DeviceCommand } from "@/lib/device-commands";
 import { formatBytes } from "@/lib/format";
+import { primaryKey } from "@/lib/shortcuts";
 import { RelativeTime } from "@/components/relative-time";
 import { useTablePagination } from "@/lib/table-pagination";
 import { useTableSort } from "@/lib/table-sort";
@@ -100,9 +111,12 @@ export type DeviceRow = {
   model: string | null;
   androidVersion: string | null;
   agentVersion: string | null;
+  groupId: string | null;
   groupName: string | null;
   /** The machine a Redroid container runs on, by its Device id. Null on hardware. */
   hostId: string | null;
+  /** Whether its agent knows `collect_screenshot`. */
+  canScreenshot: boolean;
   installedVersion: string | null;
   /** Installed version of each group's MITM, keyed by package name. */
   mitmVersions: Record<string, string | null>;
@@ -189,7 +203,12 @@ export function FleetTable({
   enrolling,
 }: {
   rows: DeviceRow[];
-  groups: { id: string; name: string }[];
+  /**
+   * `mitm` is the group's, for the Execute dialog's config buttons — on the
+   * group rather than on every row, which would resend it with each refresh.
+   * Null for a viewer, who never gets to open that dialog.
+   */
+  groups: { id: string; name: string; mitm: ExecMitm | null }[];
   versions: VersionOption[];
   latestVersion: string | null;
   packageName: string;
@@ -271,9 +290,8 @@ export function FleetTable({
     return sortRows(filtered);
   }, [rows, query, filter, group, hidden, latestVersion, sortRows]);
 
-  const pagination = useTablePagination(matching, {
-    resetKey: `${query}|${filter}|${group}|${[...hidden].sort().join(",")}|${sort.key}|${sort.direction}`,
-  });
+  const resetKey = `${query}|${filter}|${group}|${[...hidden].sort().join(",")}|${sort.key}|${sort.direction}`;
+  const pagination = useTablePagination(matching, { resetKey });
   const visible = pagination.rows;
 
   // Selection follows the page you are looking at: the header checkbox ticks
@@ -308,6 +326,160 @@ export function FleetTable({
   // random. `matching` rather than `visible` because selection spans pages.
   const selectedRows = matching.filter((r) => selected.has(r.id));
   const selectedInOrder = selectedRows.map((r) => r.id);
+
+  const router = useRouter();
+  const toast = useToast();
+  const logcat = useLogcat();
+
+  // The row the keys act on. An id rather than an index, so a refresh that
+  // reorders the table moves the cursor along with its box instead of onto
+  // whichever box took its place.
+  const [cursorId, setCursorId] = useState<string | null>(null);
+  // Only ever a row on screen: a refresh can sort the cursor's box onto
+  // another page or filter it out, and a key must not act on a row nobody can
+  // see.
+  const cursorRow = visible.find((row) => row.id === cursorId) ?? null;
+  const scrollToCursor = useRef(false);
+
+  // A new filter or sort is a new list; the cursor starts again with it.
+  useEffect(() => setCursorId(null), [resetKey]);
+
+  useEffect(() => {
+    if (!scrollToCursor.current || !cursorId) return;
+    scrollToCursor.current = false;
+    document
+      .querySelector(`[data-row-id="${CSS.escape(cursorId)}"]`)
+      ?.scrollIntoView({ block: "nearest" });
+  }, [cursorId, pagination.page]);
+
+  // What the dialogs below are open for. The ids outlive the dialog closing so
+  // reopening on the same box finds it as it was left, as on the device page.
+  const [action, setAction] = useState<{ action: DeviceAction | null; ids: string[] }>({
+    action: null,
+    ids: [],
+  });
+  const [rolloutOpen, setRolloutOpen] = useState(false);
+
+  // The bar the Update dialog hangs off goes when the selection does.
+  useEffect(() => {
+    if (selected.size === 0) setRolloutOpen(false);
+  }, [selected.size]);
+
+  const rowsById = useMemo(() => new Map(rows.map((row) => [row.id, row])), [rows]);
+  const mitmByGroup = useMemo(() => new Map(groups.map((g) => [g.id, g.mitm])), [groups]);
+  const targets: DeviceTarget[] = action.ids
+    .map((id) => rowsById.get(id))
+    .filter((row): row is DeviceRow => row !== undefined)
+    .map((row) => ({
+      id: row.id,
+      name: row.name,
+      online: row.online,
+      canScreenshot: row.canScreenshot,
+      maintenanceUntil: row.maintenanceUntil,
+      mitm: row.groupId ? (mitmByGroup.get(row.groupId) ?? null) : null,
+    }));
+
+  /** One box's action, from its row's menu or from a key on the cursor's row. */
+  function act(command: DeviceCommand, row: DeviceRow) {
+    const blocker = commandBlocker(row, command);
+    if (blocker) {
+      toast(blocker);
+      return;
+    }
+    if (command === "logcat") logcat.download(row.id);
+    else setAction({ action: command, ids: [row.id] });
+  }
+
+  function onCursorRow(command: DeviceCommand) {
+    if (cursorRow) act(command, cursorRow);
+    else toast("Move to a device first — j and k move the cursor.");
+  }
+
+  /** Rename and Reboot take the selection when there is one. */
+  function onPicked(command: "rename" | "reboot") {
+    if (selectedRows.length === 1) act(command, selectedRows[0]!);
+    else if (selectedRows.length > 1) setAction({ action: command, ids: selectedInOrder });
+    else onCursorRow(command);
+  }
+
+  const perPage =
+    pagination.pageSize === "all" ? Math.max(matching.length, 1) : pagination.pageSize;
+
+  /**
+   * j and k walk the whole filtered list, turning the page at either end of
+   * this one. The arrows only once a row has the cursor: until then they are
+   * the page's own, and scroll it.
+   */
+  function move(delta: 1 | -1, event: KeyboardEvent | null): boolean {
+    if (event?.key.startsWith("Arrow") && !cursorRow) return false;
+    if (matching.length === 0) return false;
+    const at = cursorRow ? matching.indexOf(cursorRow) : -1;
+    const next =
+      at === -1
+        ? delta === 1
+          ? pagination.from - 1
+          : pagination.to - 1
+        : Math.min(Math.max(at + delta, 0), matching.length - 1);
+    const row = matching[next];
+    if (!row) return false;
+    const page = Math.floor(next / perPage) + 1;
+    if (page !== pagination.page) pagination.setPage(page);
+    scrollToCursor.current = true;
+    setCursorId(row.id);
+    return true;
+  }
+
+  useHotkey("fleet.down", (event) => move(1, event));
+  useHotkey("fleet.up", (event) => move(-1, event));
+  useHotkey("fleet.open", () => {
+    if (!cursorRow) return false;
+    router.push(`/devices/${cursorRow.id}`);
+  });
+  useHotkey(
+    "fleet.select",
+    () => {
+      if (!cursorRow) return false;
+      if (!cursorRow.approved) {
+        toast(`${cursorRow.name} is waiting for approval, so it cannot be picked yet.`);
+        return;
+      }
+      toggleOne(cursorRow.id);
+    },
+    { enabled: canOperate },
+  );
+  useHotkey(
+    "fleet.selectPage",
+    () => {
+      if (selectableIds.length === 0) return false;
+      toggleAll();
+    },
+    { enabled: canOperate },
+  );
+  useHotkey(
+    "fleet.update",
+    () => {
+      if (selected.size === 0) {
+        toast("Pick the devices to update first — x picks the one under the cursor.");
+        return;
+      }
+      setRolloutOpen(true);
+    },
+    { enabled: canOperate },
+  );
+  // The cursor first, then the selection: one Escape too many should not throw
+  // away forty ticked boxes.
+  useHotkey("fleet.clear", () => {
+    if (cursorRow) setCursorId(null);
+    else if (selected.size > 0) setSelected(new Set());
+    else return false;
+  });
+  useHotkey("device.exec", () => onCursorRow("exec"), { enabled: canOperate });
+  useHotkey("device.logs", () => onCursorRow("logs"), { enabled: canOperate });
+  useHotkey("device.screenshot", () => onCursorRow("screenshot"), { enabled: canOperate });
+  useHotkey("device.logcat", () => onCursorRow("logcat"), { enabled: canOperate });
+  useHotkey("device.maintenance", () => onCursorRow("maintenance"), { enabled: canOperate });
+  useHotkey("device.rename", () => onPicked("rename"), { enabled: canOperate });
+  useHotkey("device.reboot", () => onPicked("reboot"), { enabled: canOperate });
 
   return (
     <div className="flex flex-col gap-5">
@@ -355,6 +527,7 @@ export function FleetTable({
           value={query}
           onChange={setQuery}
           placeholder="Search name, serial, model, version…"
+          shortcut
         />
 
         <Select
@@ -441,7 +614,13 @@ export function FleetTable({
                   row={row}
                   latestVersion={latestVersion}
                   selected={selected.has(row.id)}
+                  cursor={row.id === cursorRow?.id}
                   onToggle={() => toggleOne(row.id)}
+                  onPoint={() => setCursorId(row.id)}
+                  onAction={(command) => {
+                    setCursorId(row.id);
+                    act(command, row);
+                  }}
                   canOperate={canOperate}
                   showRotom={showRotom}
                   mitmColumns={mitmColumns}
@@ -471,17 +650,13 @@ export function FleetTable({
               label="Update"
               disabled={false}
               variant="default"
+              open={rolloutOpen}
+              onOpenChange={setRolloutOpen}
             />
-            <RenameDevicesDialog
-              source={{ deviceIds: selectedInOrder }}
-              orders={["table", "serial", "name", "created"]}
-              trigger={
-                <Button variant="outline">
-                  <Pencil />
-                  Rename
-                </Button>
-              }
-            />
+            <Button variant="outline" onClick={() => onPicked("rename")}>
+              <Pencil />
+              Rename
+            </Button>
             <ChangeGroupDialog
               devices={selectedRows.map((row) => ({ id: row.id, groupName: row.groupName }))}
               groups={groups}
@@ -492,6 +667,10 @@ export function FleetTable({
                 </Button>
               }
             />
+            <Button variant="outline" onClick={() => onPicked("reboot")}>
+              <Power />
+              Reboot
+            </Button>
             <Button
               variant="ghost"
               size="icon"
@@ -503,6 +682,12 @@ export function FleetTable({
           </div>
         </div>
       ) : null}
+
+      <DeviceActionDialogs
+        action={action.action}
+        targets={targets}
+        onClose={() => setAction((current) => ({ ...current, action: null }))}
+      />
     </div>
   );
 }
@@ -511,7 +696,10 @@ function DeviceRowView({
   row,
   latestVersion,
   selected,
+  cursor,
   onToggle,
+  onPoint,
+  onAction,
   canOperate,
   showRotom,
   mitmColumns,
@@ -519,7 +707,12 @@ function DeviceRowView({
   row: DeviceRow;
   latestVersion: string | null;
   selected: boolean;
+  /** The row the keys act on. */
+  cursor: boolean;
   onToggle: () => void;
+  /** A click on the row itself, which puts the cursor there. */
+  onPoint: () => void;
+  onAction: (command: DeviceCommand) => void;
   canOperate: boolean;
   mitmColumns: MitmColumn[];
   showRotom: boolean;
@@ -528,9 +721,27 @@ function DeviceRowView({
   const upToDate = latestVersion !== null && row.installedVersion === latestVersion;
   // Under ~450 MB a box cannot hold the bundle and its unpacked splits.
   const lowSpace = row.freeBytes !== null && row.freeBytes < 500 * 1024 * 1024;
+  const parked =
+    row.maintenanceUntil !== null && new Date(row.maintenanceUntil).getTime() > Date.now();
 
   return (
-    <TableRow data-state={selected ? "selected" : undefined}>
+    <TableRow
+      data-state={selected ? "selected" : undefined}
+      data-row-id={row.id}
+      data-cursor={cursor || undefined}
+      // A bar down the left edge rather than a fill: selected rows are already
+      // filled, and the cursor has to read on top of them. On the first cell,
+      // because a row's own box-shadow is not painted under border-collapse.
+      // The scroll margin keeps a row scrolled to from tucking under the
+      // sticky header.
+      className="scroll-mt-10 data-[cursor=true]:bg-subtle [&[data-cursor=true]>td:first-child]:shadow-[inset_2px_0_0_var(--color-primary)]"
+      onClick={(event) => {
+        if (!(event.target instanceof Element)) return;
+        if (event.target.closest('a,button,input,label,[role="checkbox"],[role="menuitem"]'))
+          return;
+        onPoint();
+      }}
+    >
       <TableCell>
         <Checkbox
           checked={selected}
@@ -646,7 +857,9 @@ function DeviceRowView({
                 <MoreHorizontal />
               </Button>
             </DropdownMenuTrigger>
-            <DropdownMenuContent align="end">
+            {/* The device page's menu, for the row — with the same keys, which
+                act on the row under the cursor. */}
+            <DropdownMenuContent align="end" className="min-w-52">
               <DropdownMenuItem asChild>
                 <Link href={`/devices/${row.id}`}>Open device</Link>
               </DropdownMenuItem>
@@ -658,12 +871,44 @@ function DeviceRowView({
                   Approve
                 </DropdownMenuItem>
               ) : null}
-              <DropdownMenuItem
-                disabled={!row.online}
-                onSelect={() => startTransition(() => void rebootDevice(row.id))}
-              >
+              <DropdownMenuSeparator />
+              <DropdownMenuItem disabled={!row.online} onSelect={() => onAction("exec")}>
+                <Terminal />
+                Execute
+                <DropdownMenuShortcut keys={primaryKey("device.exec")} />
+              </DropdownMenuItem>
+              <DropdownMenuItem disabled={!row.online} onSelect={() => onAction("logs")}>
+                <Radio />
+                Live logs
+                <DropdownMenuShortcut keys={primaryKey("device.logs")} />
+              </DropdownMenuItem>
+              {row.canScreenshot ? (
+                <DropdownMenuItem disabled={!row.online} onSelect={() => onAction("screenshot")}>
+                  <Camera />
+                  Screenshot
+                  <DropdownMenuShortcut keys={primaryKey("device.screenshot")} />
+                </DropdownMenuItem>
+              ) : null}
+              <DropdownMenuItem disabled={!row.online} onSelect={() => onAction("logcat")}>
+                <ScrollText />
+                Logcat (.zip)
+                <DropdownMenuShortcut keys={primaryKey("device.logcat")} />
+              </DropdownMenuItem>
+              <DropdownMenuItem onSelect={() => onAction("rename")}>
+                <Pencil />
+                Rename
+                <DropdownMenuShortcut keys={primaryKey("device.rename")} />
+              </DropdownMenuItem>
+              <DropdownMenuItem onSelect={() => onAction("maintenance")}>
+                <Wrench />
+                {parked ? "End maintenance" : "Maintenance…"}
+                <DropdownMenuShortcut keys={primaryKey("device.maintenance")} />
+              </DropdownMenuItem>
+              <DropdownMenuSeparator />
+              <DropdownMenuItem disabled={!row.online} onSelect={() => onAction("reboot")}>
                 <Power />
-                Reboot
+                Reboot…
+                <DropdownMenuShortcut keys={primaryKey("device.reboot")} />
               </DropdownMenuItem>
             </DropdownMenuContent>
           </DropdownMenu>
@@ -689,14 +934,21 @@ function RolloutDialog({
   label,
   disabled,
   variant,
+  open: openProp,
+  onOpenChange,
 }: {
   versions: VersionOption[];
   deviceIds: string[];
   label: string;
   disabled?: boolean;
   variant: "default" | "outline";
+  /** Controlled open, for the `u` key; the button works either way. */
+  open?: boolean;
+  onOpenChange?: (open: boolean) => void;
 }) {
-  const [open, setOpen] = useState(false);
+  const [uncontrolledOpen, setUncontrolledOpen] = useState(false);
+  const open = openProp ?? uncontrolledOpen;
+  const setOpen = onOpenChange ?? setUncontrolledOpen;
   const [state, formAction] = useActionState<ActionState, FormData>(startRollout, {});
   const [forceClean, setForceClean] = useState(false);
   const [skipUpToDate, setSkipUpToDate] = useState(true);

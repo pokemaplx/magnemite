@@ -12,11 +12,12 @@ export function Progress({
 }: {
   value: number;
   className?: string;
-  tone?: "primary" | "success" | "danger" | "muted";
+  tone?: "primary" | "success" | "warning" | "danger" | "muted";
 }) {
   const pct = Math.max(0, Math.min(100, Math.round(value)));
   const bar = {
     primary: "bg-primary",
+    warning: "bg-warning",
     success: "bg-success",
     danger: "bg-destructive",
     muted: "bg-muted-foreground",

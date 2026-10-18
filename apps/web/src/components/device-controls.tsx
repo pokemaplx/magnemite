@@ -1,7 +1,7 @@
 "use client";
 
-import { useState, useTransition } from "react";
-import { useRouter } from "next/navigation";
+import { useEffect, useRef, useState, useTransition } from "react";
+import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import {
   Camera,
   MoreHorizontal,
@@ -15,18 +15,9 @@ import {
   Trash2,
   Wrench,
 } from "lucide-react";
-import {
-  collectDeviceLogs,
-  deleteDevice,
-  rebootDevice,
-  setDeviceApproval,
-  setDeviceGroup,
-} from "@/actions/devices";
-import { DeviceExec, type ExecMitm } from "@/components/device-exec";
-import { DeviceLiveLogs } from "@/components/device-live-logs";
-import { DeviceMaintenance } from "@/components/device-maintenance";
-import { DeviceScreenshot } from "@/components/device-screenshot";
-import { RenameDevicesDialog } from "@/components/rename-devices-dialog";
+import { deleteDevice, setDeviceApproval, setDeviceGroup } from "@/actions/devices";
+import { DeviceActionDialogs, useLogcat, type DeviceTarget } from "@/components/device-actions";
+import { useHotkey } from "@/components/shortcuts/hotkeys";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -41,10 +32,19 @@ import {
   DropdownMenuContent,
   DropdownMenuItem,
   DropdownMenuSeparator,
+  DropdownMenuShortcut,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { Select } from "@/components/ui/select";
 import { useToast } from "@/components/ui/toast";
+import {
+  commandBlocker,
+  isDeviceCommand,
+  type DeviceAction,
+  type DeviceCommand,
+} from "@/lib/device-commands";
+import type { ExecMitm } from "@/lib/mitm-columns";
+import { primaryKey } from "@/lib/shortcuts";
 
 export function DeviceControls({
   deviceId,
@@ -80,33 +80,61 @@ export function DeviceControls({
   mitm: ExecMitm | null;
 }) {
   const router = useRouter();
+  const pathname = usePathname();
+  const searchParams = useSearchParams();
   const toast = useToast();
   const [pending, startTransition] = useTransition();
-  const [renaming, setRenaming] = useState(false);
+  const [action, setAction] = useState<DeviceAction | null>(null);
   const [confirmDelete, setConfirmDelete] = useState(false);
-  const [liveLogs, setLiveLogs] = useState(false);
-  const [executing, setExecuting] = useState(false);
-  const [screenshot, setScreenshot] = useState(false);
-  const [maintaining, setMaintaining] = useState(false);
+  const logcat = useLogcat();
 
   const parked = maintenanceUntil !== null && new Date(maintenanceUntil).getTime() > Date.now();
+  const target: DeviceTarget = {
+    id: deviceId,
+    name,
+    online,
+    canScreenshot,
+    maintenanceUntil,
+    mitm,
+  };
 
-  /**
-   * Collecting takes as long as the box takes to zip and upload, so the menu
-   * item says what it is doing rather than looking broken for ten seconds.
-   */
-  function downloadLogs() {
-    toast("Collecting logs from the box…");
-    startTransition(async () => {
-      const result = await collectDeviceLogs(deviceId);
-      if (result.error || !result.bundleId) {
-        toast(result.error ?? "The box sent nothing back.", "error");
-        return;
-      }
-      toast("Logs ready — downloading.");
-      window.location.href = `/api/devices/${deviceId}/logs/${result.bundleId}`;
-    });
+  function start(command: DeviceCommand) {
+    const blocker = commandBlocker(target, command);
+    if (blocker) {
+      toast(blocker);
+      return;
+    }
+    if (command === "logcat") logcat.download(deviceId);
+    else setAction(command);
   }
+
+  // The menu's items, on keys. Bound while this page is open; what the menu
+  // greys out, a key explains in a toast instead.
+  useHotkey("device.rename", () => start("rename"));
+  useHotkey("device.exec", () => start("exec"));
+  useHotkey("device.logs", () => start("logs"));
+  useHotkey("device.screenshot", () => start("screenshot"));
+  useHotkey("device.logcat", () => start("logcat"));
+  useHotkey("device.maintenance", () => start("maintenance"));
+  useHotkey("device.reboot", () => start("reboot"));
+
+  // `?action=exec` is how the palette opens one of these on a box from
+  // anywhere else. Run once, then taken back off the URL so that a reload or
+  // the back button does not open it a second time. The ref is for
+  // StrictMode, which runs this twice — twice would be two logcat downloads.
+  const requested = searchParams.get("action");
+  const handled = useRef<string | null>(null);
+  useEffect(() => {
+    if (!requested) {
+      handled.current = null;
+      return;
+    }
+    if (handled.current === requested) return;
+    handled.current = requested;
+    window.history.replaceState(null, "", pathname);
+    if (isDeviceCommand(requested)) start(requested);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [requested]);
 
   function run(fn: () => Promise<{ error?: string; message?: string }>, after?: () => void) {
     startTransition(async () => {
@@ -144,14 +172,19 @@ export function DeviceControls({
 
         <DropdownMenu>
           <DropdownMenuTrigger asChild>
-            <Button variant="outline" disabled={pending} aria-label="Device actions">
+            <Button
+              variant="outline"
+              disabled={pending || logcat.pending}
+              aria-label="Device actions"
+            >
               <MoreHorizontal />
             </Button>
           </DropdownMenuTrigger>
-          <DropdownMenuContent align="end" className="min-w-48">
-            <DropdownMenuItem onSelect={() => setRenaming(true)}>
+          <DropdownMenuContent align="end" className="min-w-52">
+            <DropdownMenuItem onSelect={() => start("rename")}>
               <Pencil />
               Rename
+              <DropdownMenuShortcut keys={primaryKey("device.rename")} />
             </DropdownMenuItem>
 
             {/* Nothing Rotom-shaped here. Those actions travel Rotom's socket
@@ -160,14 +193,16 @@ export function DeviceControls({
                 kinds of reboot read as duplicates. They live on the scanner
                 page, behind the button in the Agent card. */}
 
-            <DropdownMenuItem disabled={!online} onSelect={() => setExecuting(true)}>
+            <DropdownMenuItem disabled={!online} onSelect={() => start("exec")}>
               <Terminal />
               Execute
+              <DropdownMenuShortcut keys={primaryKey("device.exec")} />
             </DropdownMenuItem>
 
-            <DropdownMenuItem disabled={!online} onSelect={() => setLiveLogs(true)}>
+            <DropdownMenuItem disabled={!online} onSelect={() => start("logs")}>
               <Radio />
               Live logs
+              <DropdownMenuShortcut keys={primaryKey("device.logs")} />
             </DropdownMenuItem>
 
             {/* Left out entirely rather than disabled on an agent too old for
@@ -175,20 +210,23 @@ export function DeviceControls({
                 and the fix is an agent update rather than anything on this
                 menu. */}
             {canScreenshot ? (
-              <DropdownMenuItem disabled={!online} onSelect={() => setScreenshot(true)}>
+              <DropdownMenuItem disabled={!online} onSelect={() => start("screenshot")}>
                 <Camera />
                 Screenshot
+                <DropdownMenuShortcut keys={primaryKey("device.screenshot")} />
               </DropdownMenuItem>
             ) : null}
 
-            <DropdownMenuItem disabled={!online} onSelect={() => downloadLogs()}>
+            <DropdownMenuItem disabled={!online} onSelect={() => start("logcat")}>
               <ScrollText />
               Logcat (.zip)
+              <DropdownMenuShortcut keys={primaryKey("device.logcat")} />
             </DropdownMenuItem>
 
-            <DropdownMenuItem disabled={!online} onSelect={() => run(() => rebootDevice(deviceId))}>
+            <DropdownMenuItem disabled={!online} onSelect={() => start("reboot")}>
               <Power />
-              Reboot
+              Reboot…
+              <DropdownMenuShortcut keys={primaryKey("device.reboot")} />
             </DropdownMenuItem>
 
             <DropdownMenuSeparator />
@@ -197,9 +235,10 @@ export function DeviceControls({
                 answering is exactly what somebody about to go and unplug it
                 wants, and the hook simply does not run — which the dialog
                 says. */}
-            <DropdownMenuItem onSelect={() => setMaintaining(true)}>
+            <DropdownMenuItem onSelect={() => start("maintenance")}>
               <Wrench />
               {parked ? "End maintenance" : "Maintenance…"}
+              <DropdownMenuShortcut keys={primaryKey("device.maintenance")} />
             </DropdownMenuItem>
 
             <DropdownMenuSeparator />
@@ -219,43 +258,12 @@ export function DeviceControls({
         </DropdownMenu>
       </div>
 
-      <DeviceExec
-        deviceId={deviceId}
-        name={name}
-        open={executing}
-        onOpenChange={setExecuting}
-        mitm={mitm}
-      />
-
-      <DeviceLiveLogs deviceId={deviceId} name={name} open={liveLogs} onOpenChange={setLiveLogs} />
-
-      <DeviceScreenshot
-        deviceId={deviceId}
-        name={name}
-        open={screenshot}
-        onOpenChange={setScreenshot}
-      />
-
-      <DeviceMaintenance
-        deviceId={deviceId}
-        name={name}
-        maintenanceUntil={maintenanceUntil}
-        open={maintaining}
-        onOpenChange={setMaintaining}
-      />
-
-      {/* The same dialog the fleet table opens, with one box in it. It used to
-          be a bare name field here, which quietly cost this page everything
-          the other one had learned: the collision check against the rest of
-          the fleet, and reading the name the box's own MITM config already
-          uses. Controlled rather than triggered, because the menu item that
-          opens it is unmounted by Radix the moment it is selected. */}
-      <RenameDevicesDialog
-        source={{ deviceIds: [deviceId] }}
-        orders={["name"]}
-        open={renaming}
-        onOpenChange={setRenaming}
-      />
+      {/* Controlled rather than triggered, because the menu item that opens
+          each of them is unmounted by Radix the moment it is selected. Rename
+          is the same dialog the fleet table opens, with one box in it: the
+          collision check against the rest of the fleet, and the name the box's
+          own MITM config already uses. */}
+      <DeviceActionDialogs action={action} targets={[target]} onClose={() => setAction(null)} />
 
       <Dialog open={confirmDelete} onOpenChange={setConfirmDelete}>
         <DialogContent className="max-w-md">

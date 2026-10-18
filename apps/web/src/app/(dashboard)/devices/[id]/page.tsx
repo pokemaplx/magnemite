@@ -13,6 +13,7 @@ import { loadConnectivityTrend } from "@/lib/connectivity";
 import { actionPastLabel } from "@/lib/monitor-vocabulary";
 import { OnlineDot } from "@/components/status";
 import { DeviceControls } from "@/components/device-controls";
+import { DeviceShortcuts } from "@/components/device-shortcuts";
 import {
   DeviceHistory,
   type DeviceAgentUpdateRow,
@@ -23,6 +24,7 @@ import { DeviceHeartbeat, DeviceLastSeen } from "@/components/device-last-seen";
 import { DeviceLoadCard } from "@/components/device-load-card";
 import { RelativeTime } from "@/components/relative-time";
 import { loadRecentTrend } from "@/lib/metrics";
+import { execMitm } from "@/lib/mitm-columns";
 import { formatDuration, formatRelative } from "@/lib/format";
 
 export const dynamic = "force-dynamic";
@@ -172,21 +174,12 @@ export default async function DevicePage({ params }: { params: Promise<{ id: str
             groups={groups.map((g) => ({ id: g.id, name: g.name }))}
             maintenanceUntil={device.maintenanceUntil?.toISOString() ?? null}
             canScreenshot={hasCapability(device.capabilities, CAPABILITY_SCREENSHOT)}
-            mitm={
-              device.group?.mitmPackageName
-                ? {
-                    label:
-                      device.group.mitmLabel ||
-                      (device.group.mitmPackageName.split(".").pop() ??
-                        device.group.mitmPackageName),
-                    packageName: device.group.mitmPackageName,
-                    configPath: device.group.mitmConfigPath,
-                  }
-                : null
-            }
+            mitm={device.group ? execMitm(device.group) : null}
           />
         ) : null}
       </header>
+
+      <DeviceShortcuts deviceId={device.id} current="overview" hasRotom={!!device.rotomDeviceId} />
 
       <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-4">
         <Card>

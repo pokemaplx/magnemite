@@ -196,6 +196,7 @@ export function VersionsTable({
           onChange={setQuery}
           placeholder="Search version, app, build, source, arch…"
           className="max-w-md"
+          shortcut
         />
         {/* Shown whenever there is anything to filter, not only once a second
             app exists — a control that appears the day a target is added is a

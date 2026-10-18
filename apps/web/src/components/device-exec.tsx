@@ -15,6 +15,9 @@ import {
 import { Textarea } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import type { DeviceConfigPreview, DeviceConfigPush } from "@/lib/hub";
+import type { ExecMitm } from "@/lib/mitm-columns";
+
+export type { ExecMitm };
 
 /**
  * The commands this fleet actually needs, one click away.
@@ -66,15 +69,6 @@ const SUGGESTIONS: { label: string; command: string; hint: string }[] = [
     hint: "Redroid only. Magisk keys root on the uid, and a reinstall changes it.",
   },
 ];
-
-/** The box's group MITM, as far as this dialog needs it. */
-export type ExecMitm = {
-  /** The group's column header, or the last dotted segment of the package. */
-  label: string;
-  packageName: string;
-  /** Where the group writes its config. Null when it declares none. */
-  configPath: string | null;
-};
 
 type Result = { output: string; failed: boolean; message: string } | null;
 

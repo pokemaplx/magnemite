@@ -137,6 +137,7 @@ export function MonitorActivity({
           placeholder="Search by box, rule or detail"
           aria-label="Search activity"
           className="max-w-xs"
+          shortcut
         />
         <Select
           options={LEVEL_FILTER}

@@ -3,6 +3,7 @@
 import * as React from "react";
 import * as DropdownMenuPrimitive from "@radix-ui/react-dropdown-menu";
 import { Check, Minus } from "lucide-react";
+import { Kbd } from "@/components/ui/kbd";
 import { cn } from "@/lib/utils";
 
 const DropdownMenu = DropdownMenuPrimitive.Root;
@@ -109,6 +110,14 @@ const DropdownMenuLabel = React.forwardRef<
 ));
 DropdownMenuLabel.displayName = "DropdownMenuLabel";
 
+/**
+ * The key that does the same thing as the item, at its right edge. Left off
+ * phones, where there is no keyboard to press it on.
+ */
+function DropdownMenuShortcut({ keys, className }: { keys: string; className?: string }) {
+  return <Kbd keys={keys} className={cn("ml-auto pl-6 max-sm:hidden", className)} />;
+}
+
 export {
   DropdownMenu,
   DropdownMenuTrigger,
@@ -117,4 +126,5 @@ export {
   DropdownMenuCheckboxItem,
   DropdownMenuSeparator,
   DropdownMenuLabel,
+  DropdownMenuShortcut,
 };

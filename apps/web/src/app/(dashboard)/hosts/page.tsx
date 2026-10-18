@@ -4,6 +4,7 @@ import { AddHostDialog } from "@/components/add-host-dialog";
 import { BootstrapRuns, type BootstrapRun } from "@/components/bootstrap-runs";
 import { HostsTable, type HostRow } from "@/components/hosts-table";
 import { formatBytes } from "@/lib/format";
+import { instanceSetup, setupJobsSelect } from "@/lib/instance-setup-query";
 
 export const dynamic = "force-dynamic";
 
@@ -47,6 +48,7 @@ export default async function HostsPage() {
               present: true,
               containerState: true,
               workers: true,
+              requestedAt: true,
               device: {
                 select: {
                   id: true,
@@ -55,6 +57,8 @@ export default async function HostsPage() {
                   cpuPercent: true,
                   memTotalBytes: true,
                   memAvailableBytes: true,
+                  // Its join installs, the last stage of a new one's setup.
+                  jobs: setupJobsSelect(),
                 },
               },
             },
@@ -133,6 +137,13 @@ export default async function HostsPage() {
               memAvailableBytes: num(instance.device.memAvailableBytes),
             }
           : null,
+        setup: instanceSetup(instance, {
+          name: host.name,
+          status: host.status,
+          convergingSince: host.redroidHost?.convergingSince ?? null,
+          lastError: host.redroidHost?.lastError ?? null,
+          lastErrorAt: host.redroidHost?.lastErrorAt ?? null,
+        }),
       })),
     };
   });

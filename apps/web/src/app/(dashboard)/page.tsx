@@ -1,7 +1,8 @@
+import { CAPABILITY_SCREENSHOT, hasCapability } from "@magnemite/protocol";
 import { prisma } from "@magnemite/db";
 import { requireUser } from "@/lib/session";
 import { compareVersions } from "@/lib/format";
-import { mitmColumns } from "@/lib/mitm-columns";
+import { execMitm, mitmColumns } from "@/lib/mitm-columns";
 import { FleetTable, type DeviceRow, type VersionOption } from "@/components/fleet-table";
 import type { EnrollingRow } from "@/components/enrolling-boxes";
 
@@ -73,8 +74,10 @@ export default async function FleetPage() {
       model: [device.manufacturer, device.model].filter(Boolean).join(" ") || null,
       androidVersion: device.androidVersion,
       agentVersion: device.agentVersion,
+      groupId: device.group?.id ?? null,
       groupName: device.group?.name ?? null,
       hostId: device.redroidInstance?.hostId ?? null,
+      canScreenshot: hasCapability(device.capabilities, CAPABILITY_SCREENSHOT),
       installedVersion: installed.get(packageName)?.versionName ?? null,
       mitmVersions: Object.fromEntries(
         mitmNames.map((name) => {
@@ -180,7 +183,13 @@ export default async function FleetPage() {
       machines={machines}
       hosts={hosts}
       enrolling={enrolling}
-      groups={groups.map((g) => ({ id: g.id, name: g.name }))}
+      groups={groups.map((g) => ({
+        id: g.id,
+        name: g.name,
+        // The Execute dialog's config view shows the config, which is the
+        // MITM's credentials — the same rule the device page follows.
+        mitm: user.role !== "VIEWER" ? execMitm(g) : null,
+      }))}
       versions={versionOptions}
       latestVersion={latestVersion}
       packageName={packageName}

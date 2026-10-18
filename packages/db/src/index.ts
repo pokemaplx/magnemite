@@ -33,6 +33,15 @@ export const CREDENTIAL_PROVIDER_ID = "credential";
 /// Device and enrollment tokens are 32 random bytes, so a plain sha256 is
 /// enough to store them — there is nothing to brute-force. Passwords use
 /// bcrypt instead.
+/**
+ * The note on every rollout a box joining its group is given.
+ *
+ * Shared because two places read it back: the rollout list shows it, and the
+ * Machines pages find a new container's installs by it, to show them as the
+ * last stage of its setup.
+ */
+export const JOIN_ROLLOUT_NOTE = "joined its group";
+
 export function hashToken(token: string): string {
   return createHash("sha256").update(token, "utf8").digest("hex");
 }

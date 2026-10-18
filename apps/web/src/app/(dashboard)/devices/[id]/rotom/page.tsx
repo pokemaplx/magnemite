@@ -12,6 +12,7 @@ import { Sparkline } from "@/components/charts/sparkline";
 import { StateStrip } from "@/components/charts/state-strip";
 import { OnlineDot } from "@/components/status";
 import { DeviceRotomWorkers } from "@/components/device-rotom-workers";
+import { DeviceShortcuts } from "@/components/device-shortcuts";
 import { RelativeTime } from "@/components/relative-time";
 import { RotomControls } from "@/components/rotom-controls";
 import { RotomMetrics } from "@/components/rotom-metrics";
@@ -144,9 +145,11 @@ export default async function DeviceRotomPage({
             The rest are the actions that travel Rotom's socket — a viewer gets
             neither, the same rule the device page's menu follows. */}
         {user.role !== "VIEWER" && device.rotomDeviceId ? (
-          <RotomControls deviceId={device.id} enabled={device.rotomEnabled} />
+          <RotomControls deviceId={device.id} name={device.name} enabled={device.rotomEnabled} />
         ) : null}
       </header>
+
+      <DeviceShortcuts deviceId={device.id} current="rotom" hasRotom={!!device.rotomDeviceId} />
 
       {!device.rotomDeviceId ? (
         <Card>

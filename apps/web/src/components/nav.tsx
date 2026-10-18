@@ -3,53 +3,17 @@
 import { useEffect, useState } from "react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import {
-  Activity,
-  LayoutGrid,
-  Menu,
-  Package,
-  PanelLeft,
-  Rocket,
-  Server,
-  Settings,
-  Binoculars,
-  Upload,
-  X,
-} from "lucide-react";
+import { Keyboard, Menu, PanelLeft, Search, X } from "lucide-react";
+import { useHotkey, useShortcuts } from "@/components/shortcuts/hotkeys";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { Kbd, useIsMac } from "@/components/ui/kbd";
 import { Progress } from "@/components/ui/progress";
 import { Tooltip, TooltipProvider } from "@/components/ui/tooltip";
 import { ThemeToggle } from "@/components/theme-toggle";
+import { NAV_SECTIONS, isActiveLink } from "@/lib/nav";
+import { primaryKey } from "@/lib/shortcuts";
 import { cn } from "@/lib/utils";
-
-type NavLink = { href: string; label: string; icon: typeof LayoutGrid };
-
-/** Grouped the way the work is: look at the fleet, ship to it, then configure it. */
-const SECTIONS: { label?: string; links: NavLink[] }[] = [
-  {
-    links: [
-      { href: "/", label: "Fleet", icon: LayoutGrid },
-      { href: "/hosts", label: "Machines", icon: Server },
-    ],
-  },
-  {
-    label: "Deployment",
-    links: [
-      { href: "/rollouts", label: "Rollouts", icon: Rocket },
-      { href: "/versions", label: "Versions", icon: Package },
-      { href: "/manual", label: "Manual deploy", icon: Upload },
-    ],
-  },
-  {
-    label: "System",
-    links: [
-      { href: "/monitoring", label: "Monitoring", icon: Binoculars },
-      { href: "/status", label: "Status", icon: Activity },
-      { href: "/settings", label: "Settings", icon: Settings },
-    ],
-  },
-];
 
 const COLLAPSED_KEY = "magnemite:sidebar-collapsed";
 
@@ -63,6 +27,8 @@ export function Nav({
   activeRollouts: number;
 }) {
   const pathname = usePathname();
+  const { setPaletteOpen, setHelpOpen } = useShortcuts();
+  const mac = useIsMac();
 
   // A fleet with one box away is normal and must not sit there looking like an
   // alarm; a fleet with none is the thing worth colouring. Everything between
@@ -117,6 +83,8 @@ export function Nav({
     });
   }
 
+  useHotkey("sidebar", () => toggleCollapsed());
+
   return (
     <TooltipProvider delayDuration={150}>
       {/* Phones get a bar of their own; the sidebar itself is off-canvas there. */}
@@ -132,6 +100,16 @@ export function Nav({
         </Button>
         <img src="/magnemite.png" alt="" className="h-6 w-6 shrink-0 rounded-md" />
         <span className="font-display text-sm font-semibold tracking-tight">Magnemite</span>
+        {/* No keyboard to press Ctrl K on, so the palette gets a button here. */}
+        <Button
+          variant="ghost"
+          size="icon"
+          aria-label="Search"
+          className="ml-auto"
+          onClick={() => setPaletteOpen(true)}
+        >
+          <Search />
+        </Button>
       </header>
 
       {drawerOpen ? (
@@ -216,8 +194,31 @@ export function Nav({
           </Tooltip>
         </div>
 
+        {/* Where the palette is, for anyone who has not met Ctrl K yet — and
+            the way in on a phone, where there is no key to press. */}
+        <div className={cn("px-2 pt-1", collapsed && "lg:px-0")}>
+          <Tooltip label={`Search (${mac ? "⌘" : "Ctrl"} K)`} disabled={!collapsed}>
+            <button
+              type="button"
+              onClick={() => setPaletteOpen(true)}
+              className={cn(
+                "flex w-full items-center gap-2.5 rounded-lg border border-border bg-card px-3 py-1.5 text-sm",
+                "text-muted-foreground transition-colors hover:border-border-emphasis hover:text-foreground",
+                collapsed && "lg:mx-auto lg:h-9 lg:w-9 lg:justify-center lg:p-0",
+              )}
+            >
+              <Search className="h-4 w-4 shrink-0" />
+              <span className={cn("flex-1 text-left", collapsed && "lg:hidden")}>Search…</span>
+              <Kbd
+                keys={primaryKey("palette")}
+                className={cn("max-lg:hidden", collapsed && "lg:hidden")}
+              />
+            </button>
+          </Tooltip>
+        </div>
+
         <nav className="flex flex-1 flex-col gap-5 overflow-y-auto px-2 py-2">
-          {SECTIONS.map((section, i) => (
+          {NAV_SECTIONS.map((section, i) => (
             <div key={section.label ?? i} className="flex flex-col gap-0.5">
               {section.label ? (
                 <>
@@ -237,7 +238,7 @@ export function Nav({
               ) : null}
 
               {section.links.map(({ href, label, icon: Icon }) => {
-                const active = href === "/" ? pathname === "/" : pathname.startsWith(href);
+                const active = isActiveLink(href, pathname);
                 return (
                   <Tooltip key={href} label={label} disabled={!collapsed}>
                     <Link
@@ -324,6 +325,24 @@ export function Nav({
                 className="h-1"
               />
             </div>
+          </Tooltip>
+
+          {/* Desktop only: a phone has no keys to list. */}
+          <Tooltip label="Keyboard shortcuts (?)" disabled={!collapsed}>
+            <button
+              type="button"
+              onClick={() => setHelpOpen(true)}
+              className={cn(
+                "hidden items-center gap-2 rounded-lg px-1 py-0.5 text-xs text-muted-foreground transition-colors hover:text-foreground lg:flex",
+                collapsed && "lg:mx-auto lg:h-8 lg:w-8 lg:justify-center lg:px-0",
+              )}
+            >
+              <Keyboard className="h-3.5 w-3.5 shrink-0" />
+              <span className={cn("flex-1 text-left", collapsed && "lg:hidden")}>
+                Keyboard shortcuts
+              </span>
+              <Kbd keys={primaryKey("help")} className={cn(collapsed && "lg:hidden")} />
+            </button>
           </Tooltip>
 
           <ThemeToggle compact={collapsed} />

@@ -125,6 +125,7 @@ export function RolloutsTable({ rows }: { rows: RolloutRow[] }) {
           value={query}
           onChange={setQuery}
           placeholder="Search app, version, status, who started it…"
+          shortcut
         />
         <Select
           aria-label="Filter by status"

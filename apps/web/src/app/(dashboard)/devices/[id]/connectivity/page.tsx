@@ -5,6 +5,7 @@ import { prisma } from "@magnemite/db";
 import { requireUser } from "@/lib/session";
 import { CAUSE_DETAIL, CAUSE_LABELS, causeVariant, loadEpisodes } from "@/lib/connectivity";
 import { DeviceConnectivity, type EpisodeRow } from "@/components/device-connectivity";
+import { DeviceShortcuts } from "@/components/device-shortcuts";
 import { IncidentWindow } from "@/components/incident-window";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 
@@ -37,7 +38,7 @@ export default async function ConnectivityPage({
   const range = WINDOWS[query.range ?? "7d"] ? (query.range ?? "7d") : "7d";
   const device = await prisma.device.findUnique({
     where: { id },
-    select: { id: true, name: true, serial: true },
+    select: { id: true, name: true, serial: true, kind: true, rotomDeviceId: true },
   });
   if (!device) notFound();
 
@@ -103,6 +104,14 @@ export default async function ConnectivityPage({
           ))}
         </nav>
       </header>
+
+      {device.kind === "BOX" ? (
+        <DeviceShortcuts
+          deviceId={device.id}
+          current="connectivity"
+          hasRotom={!!device.rotomDeviceId}
+        />
+      ) : null}
 
       {at && !Number.isNaN(at.getTime()) ? <IncidentWindow deviceId={device.id} at={at} /> : null}
 

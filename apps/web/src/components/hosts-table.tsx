@@ -13,6 +13,7 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import { memoryUsed, stateOf, type InstanceRow } from "@/components/host-instances-table";
+import { InstanceSetup } from "@/components/instance-setup";
 import { OnlineDot } from "@/components/status";
 import { RelativeTime } from "@/components/relative-time";
 import { cn } from "@/lib/utils";
@@ -20,7 +21,7 @@ import { cn } from "@/lib/utils";
 /** One container, as much of it as fits in a glance from the machine list. */
 export type HostInstance = Pick<
   InstanceRow,
-  "id" | "index" | "serial" | "workers" | "containerState" | "device"
+  "id" | "index" | "serial" | "workers" | "containerState" | "device" | "setup"
 > & {
   /** Whether the box inside it has its socket up, when it has enrolled. */
   online: boolean;
@@ -191,7 +192,11 @@ function InstancesGlance({ instances }: { instances: HostInstance[] }) {
                 )}
               </TableCell>
               <TableCell>
-                <Badge variant={state.tone}>{state.label}</Badge>
+                {row.setup ? (
+                  <InstanceSetup view={row.setup} />
+                ) : (
+                  <Badge variant={state.tone}>{state.label}</Badge>
+                )}
               </TableCell>
               <TableCell align="right" className="tabular-nums">
                 {row.device == null || row.device.cpuPercent === null

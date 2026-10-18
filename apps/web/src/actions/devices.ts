@@ -208,6 +208,99 @@ export async function rebootDevice(deviceId: string): Promise<ActionState> {
   return { ok: true, message: "Reboot sent." };
 }
 
+/** How many reboots are in flight at the hub at once. */
+const REBOOT_CONCURRENCY = 8;
+
+/**
+ * Reboot a selection of boxes — the Fleet's bulk bar, and Shift+R on it.
+ *
+ * The hub only hands the message to a socket and answers, so each one is
+ * quick; the cap is there so that three hundred picked boxes are not three
+ * hundred requests landing on the hub in the same millisecond. A box with no
+ * socket is counted rather than failing the rest — the selection is allowed to
+ * hold boxes that went away while it was being made.
+ *
+ * Boxes only, and approved ones: the same boxes the selection can hold. A
+ * machine is a Device too, and rebooting the VPS under twenty containers is not
+ * something a list of TV boxes should be able to do by accident.
+ */
+export async function rebootDevices(deviceIds: string[]): Promise<ActionState & { sent?: number }> {
+  const user = await requireOperator();
+  if (deviceIds.length === 0) return { error: "No boxes picked." };
+
+  const devices = await prisma.device.findMany({
+    where: { id: { in: deviceIds }, kind: "BOX", approved: true },
+    select: { id: true, serial: true, name: true },
+  });
+  if (devices.length === 0)
+    return { error: "None of those boxes are here any more. Reload the page." };
+
+  const outcomes = new Map<string, string>();
+  let next = 0;
+  async function worker() {
+    while (next < devices.length) {
+      const device = devices[next++]!;
+      try {
+        await hub.rebootDevice(device.id);
+        outcomes.set(device.id, "sent");
+      } catch (err) {
+        const message = toMessage(err);
+        // The hub's 409 for a box with no socket, which is a box that is
+        // offline rather than a reboot that went wrong.
+        outcomes.set(device.id, message === "device is offline" ? "offline" : message);
+      }
+    }
+  }
+  await Promise.all(
+    Array.from({ length: Math.min(REBOOT_CONCURRENCY, devices.length) }, () => worker()),
+  );
+
+  const sent = devices.filter((device) => outcomes.get(device.id) === "sent");
+  const offline = devices.filter((device) => outcomes.get(device.id) === "offline").length;
+  const failed = devices.filter(
+    (device) => !["sent", "offline"].includes(outcomes.get(device.id) ?? ""),
+  );
+
+  if (sent.length > 0) {
+    await prisma.auditLog.create({
+      data: {
+        userId: user.id,
+        userEmail: user.email,
+        action: "device.reboot",
+        targetType: "Device",
+        // Same rule as a group move: one box keeps its id so its own audit view
+        // still finds the row, a batch has no single id to file it under.
+        targetId: devices.length === 1 ? (devices[0]?.id ?? null) : null,
+        meta: {
+          devices: devices.length,
+          results: devices.map((device) => ({
+            serial: device.serial,
+            name: device.name,
+            result: outcomes.get(device.id) ?? "skipped",
+          })),
+        },
+      },
+    });
+  }
+
+  const skipped = [
+    offline > 0 ? `${offline} offline` : null,
+    failed.length > 0 ? `${failed.length} failed (${outcomes.get(failed[0]!.id)})` : null,
+  ]
+    .filter(Boolean)
+    .join(", ");
+
+  if (sent.length === 0) return { error: `No box took the reboot — ${skipped}.` };
+  return {
+    ok: true,
+    sent: sent.length,
+    message:
+      sent.length === devices.length
+        ? `Reboot sent to ${sent.length} ${sent.length === 1 ? "box" : "boxes"}.`
+        : `Reboot sent to ${sent.length} of ${devices.length} — ${skipped}.`,
+  };
+}
+
 /**
  * Run a command on the box and return what it printed.
  *

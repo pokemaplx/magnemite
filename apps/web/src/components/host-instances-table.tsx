@@ -17,8 +17,10 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import { RelativeTime } from "@/components/relative-time";
+import { InstanceSetup } from "@/components/instance-setup";
 import { removeInstance, setHostGroup, setHostNameTemplate } from "@/actions/hosts";
 import { formatBytes } from "@/lib/format";
+import type { SetupView } from "@/lib/instance-setup";
 
 export type InstanceRow = {
   id: string;
@@ -36,6 +38,11 @@ export type InstanceRow = {
     memTotalBytes: number | null;
     memAvailableBytes: number | null;
   } | null;
+  /**
+   * Where it has got to while it is being set up -- shown in place of the
+   * state badge -- and null once it is up, or broken in a way the badge says.
+   */
+  setup: SetupView | null;
 };
 
 /**
@@ -215,7 +222,11 @@ export function HostInstancesTable({
                     )}
                   </TableCell>
                   <TableCell>
-                    <Badge variant={state.tone}>{state.label}</Badge>
+                    {row.setup ? (
+                      <InstanceSetup view={row.setup} />
+                    ) : (
+                      <Badge variant={state.tone}>{state.label}</Badge>
+                    )}
                   </TableCell>
                   {/* Measured by the box itself, from inside its own cgroup —
                       which is why these are per container rather than a slice

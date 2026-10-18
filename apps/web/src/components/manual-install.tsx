@@ -1205,7 +1205,12 @@ export function ManualInstall({
         </CardHeader>
         <CardContent className="flex flex-col gap-3">
           <div className="flex flex-wrap items-center gap-2">
-            <SearchInput value={query} onChange={setQuery} placeholder="Search name, serial…" />
+            <SearchInput
+              value={query}
+              onChange={setQuery}
+              placeholder="Search name, serial…"
+              shortcut
+            />
             <Select
               aria-label="Filter by group"
               placeholder="Select group…"
