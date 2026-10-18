@@ -1,6 +1,7 @@
 // MySQL and MariaDB speak the same wire protocol, so Prisma's "mysql"
 // connector covers both — there is no separate "mariadb" provider string.
+// The URL is not here: Prisma 7 reads it from prisma.config.ts for the CLI,
+// and the client gets it through its driver adapter.
 datasource db {
   provider = "mysql"
-  url      = env("DATABASE_URL")
 }

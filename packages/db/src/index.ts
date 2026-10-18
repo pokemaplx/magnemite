@@ -1,9 +1,34 @@
 import { createHash, randomBytes } from "node:crypto";
-import { PrismaClient } from "@prisma/client";
+import { PrismaMariaDb } from "@prisma/adapter-mariadb";
+import { PrismaPg } from "@prisma/adapter-pg";
 import bcrypt from "bcryptjs";
+import { PrismaClient } from "../generated/prisma/client";
 
-export * from "@prisma/client";
-export { PrismaClient };
+export * from "../generated/prisma/client";
+
+/**
+ * The connection, through the Node driver for whichever database this build
+ * was generated for. Prisma 7 has no engine of its own to open one, so the
+ * adapter has to match the provider the client was generated with — both are
+ * picked by DB_PROVIDER, and a mismatch fails on the first query.
+ *
+ * Built from the same DATABASE_URL as always. The MariaDB adapter takes a
+ * `mysql://` URL as it is (it covers MySQL too); Postgres' `?schema=` is a
+ * Prisma parameter the `pg` driver does not know, so it is passed on here,
+ * where Prisma 6 used to read it from the URL itself.
+ */
+function adapter() {
+  const url = process.env.DATABASE_URL ?? "";
+  if (process.env.DB_PROVIDER === "mysql") return new PrismaMariaDb(url);
+
+  const schema = URL.canParse(url) ? new URL(url).searchParams.get("schema") : null;
+  return new PrismaPg(
+    // Prisma 6 gave up on a connection after 5 s; `pg` on its own waits
+    // forever, which turns a database that is down into a hub that hangs.
+    { connectionString: url, connectionTimeoutMillis: 5_000 },
+    schema ? { schema } : undefined,
+  );
+}
 
 // A single client per process. Next.js dev reloads the module graph on every
 // edit, which would otherwise open a new pool each time until Postgres runs
@@ -13,6 +38,7 @@ const globalForPrisma = globalThis as unknown as { prisma?: PrismaClient };
 export const prisma: PrismaClient =
   globalForPrisma.prisma ??
   new PrismaClient({
+    adapter: adapter(),
     log: process.env.PRISMA_LOG === "1" ? ["query", "warn", "error"] : ["warn", "error"],
   });
 

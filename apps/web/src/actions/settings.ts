@@ -1,7 +1,6 @@
 "use server";
 
 import { revalidatePath } from "next/cache";
-import type { Prisma } from "@prisma/client";
 import { checkConfigTemplate, CONFIG_PLACEHOLDERS } from "@/lib/config-placeholders";
 import {
   generateToken,
@@ -9,6 +8,7 @@ import {
   getMonitorSettings as readMonitorSettings,
   hashToken,
   type HubSettingsValues,
+  type Prisma,
   prisma,
   type RedroidSettingsValues,
   tokenPrefix,

@@ -4,11 +4,14 @@
 // (generated, gitignored) before every Prisma command — edit this file, not
 // schema.prisma directly.
 
+// TypeScript source in packages/db/generated (gitignored), compiled by
+// whatever imports @magnemite/db — tsup for the hub, Next for the dashboard.
+// There is no query engine binary any more, so no per-platform targets: the
+// query compiler is WebAssembly, and the connection is the driver adapter
+// src/index.ts picks from DB_PROVIDER.
 generator client {
-  provider      = "prisma-client-js"
-  // "native" covers local development on Windows/macOS; the musl target is
-  // what the alpine-based hub and web images actually load.
-  binaryTargets = ["native", "linux-musl-openssl-3.0.x"]
+  provider = "prisma-client"
+  output   = "../generated/prisma"
 }
 
 // ---------------------------------------------------------------------------

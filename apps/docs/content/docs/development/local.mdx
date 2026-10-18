@@ -8,7 +8,7 @@ icon: SquareTerminal
 pnpm install
 # The stack ships no database, so bring one up however you like:
 docker run -d --name magnemite-db -p 127.0.0.1:5433:5432   -e POSTGRES_USER=magnemite -e POSTGRES_PASSWORD=magnemite   -e POSTGRES_DB=magnemite postgres:17-alpine
-pnpm --filter @magnemite/db exec dotenv -e ../../.env -- prisma migrate dev
+pnpm db:migrate
 pnpm db:seed   # optional: starter app target, sources, group, first token
 
 pnpm --filter @magnemite/hub dev     # :3001
@@ -29,9 +29,11 @@ With no Caddy in front, the hub serves `/files/*` itself and stands in for it.
 `DATABASE_URL` points at whatever database you brought up.
 
 For MariaDB instead, set `DB_PROVIDER=mysql` and a `mysql://` `DATABASE_URL`
-**before** running `prisma migrate dev` — the two engines keep separate
+**before** running `pnpm db:migrate` — the two engines keep separate
 migration histories, see [Postgres or
-MariaDB](/docs/deployment/docker-compose#postgres-or-mariadb).
+MariaDB](/docs/deployment/docker-compose#postgres-or-mariadb). Switching an
+existing checkout also needs `pnpm db:generate`: the client is generated for one
+provider, and it fails on the first query against the other.
 
 <Callout type="warn">
   Leave `SERVE_ARTIFACTS` **off** in either deployment. Both put Caddy in front of `/files/*`, and
@@ -42,8 +44,8 @@ MariaDB](/docs/deployment/docker-compose#postgres-or-mariadb).
 
 | Command            | Does                                                                 |
 | ------------------ | -------------------------------------------------------------------- |
-| `pnpm db:generate` | Regenerate the Prisma client                                         |
-| `pnpm db:migrate`  | Create and apply a migration (development)                           |
+| `pnpm db:generate` | Regenerate the Prisma client (`pnpm install` also does)              |
+| `pnpm db:migrate`  | Create and apply a migration (development), then regenerate          |
 | `pnpm db:deploy`   | Apply pending migrations (production)                                |
 | `pnpm db:push`     | Push the schema without a migration                                  |
 | `pnpm db:studio`   | Prisma Studio                                                        |

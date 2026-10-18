@@ -191,3 +191,9 @@ make agent-test        # Git Bash only
 Prisma schema is **generated**: edit `packages/db/prisma/schema.base.prisma`,
 never `schema.prisma`. Migrations must be written for both providers —
 `prisma/migrations/` and `prisma/migrations-mysql/`.
+
+The client is generated too, into `packages/db/generated/` (Prisma 7), and for
+**one** provider: `pnpm install` and `pnpm db:migrate` regenerate it, but plain
+`prisma migrate dev` no longer does. After a schema edit or a `DB_PROVIDER`
+switch, `pnpm db:generate` — a client generated for the other database fails on
+its first query, not at import.
