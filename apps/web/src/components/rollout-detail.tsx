@@ -84,10 +84,14 @@ export function RolloutActions({
           </Button>
         ) : null}
 
-        {status === "PAUSED" || status === "SOAKING" ? (
+        {status === "PAUSED" || status === "SOAKING" || status === "PENDING" ? (
           <Button disabled={pending} onClick={() => run(() => resumeRolloutAction(rolloutId))}>
             <PlayCircle />
-            {status === "SOAKING" ? "Release fleet now" : "Resume anyway"}
+            {status === "SOAKING"
+              ? "Release fleet now"
+              : status === "PENDING"
+                ? "Start now"
+                : "Resume anyway"}
           </Button>
         ) : null}
 

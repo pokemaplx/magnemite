@@ -40,6 +40,7 @@ type Fake struct {
 	sessions   map[string]bool
 	nextID     int
 	pending    string
+	pendingPkg string
 	commitFail int
 	started    time.Time
 }
@@ -62,13 +63,18 @@ func NewFake(serial, statePath string) *Fake {
 	return f
 }
 
-// SetPendingVersion tells the fake what an install-commit should end up
-// reporting. Only the fake needs this; on a real box the version comes out of
-// the APKs themselves.
-func (f *Fake) SetPendingVersion(v string) {
+// SetPending tells the fake what an install-commit should end up reporting:
+// which package, at which version. Only the fake needs this; on a real box both
+// come out of the APKs themselves.
+//
+// The package used to be fixed to Pokémon GO, so every other install -- a MITM
+// above all -- committed and then failed its verify, and the config write that
+// comes after the verify could not be exercised on a fake box at all.
+func (f *Fake) SetPending(pkg, version string) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	f.pending = v
+	f.pendingPkg = pkg
+	f.pending = version
 }
 
 func (f *Fake) load() {
@@ -246,7 +252,10 @@ func (f *Fake) pm(ctx context.Context, args []string) (string, error) {
 			}
 		}
 
-		pkg := "com.nianticlabs.pokemongo"
+		pkg := f.pendingPkg
+		if pkg == "" {
+			pkg = "com.nianticlabs.pokemongo"
+		}
 		f.packages[pkg] = proto.PackageInfo{
 			PackageName: pkg,
 			VersionName: f.pending,

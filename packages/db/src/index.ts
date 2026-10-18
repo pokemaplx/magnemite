@@ -166,6 +166,17 @@ export type HubSettingsValues = {
   /** Seconds without a job_progress message before a job is considered stalled. */
   jobStallTimeoutSeconds: number;
   /**
+   * How long a box that has just come up waits before its group's join
+   * installs start, measured from its boot.
+   *
+   * A container that has just enrolled is a minute-old Android, still
+   * compiling its own packages and still settling Magisk, and a 170 MB game
+   * pushed into the middle of that is how the first install of a box's life
+   * became its flakiest. Only the join installs wait -- a rollout somebody
+   * started is somebody choosing now -- and 0 turns the wait off.
+   */
+  joinInstallDelaySeconds: number;
+  /**
    * Seconds between stored readings. Boxes beat every 20 seconds and no chart
    * is read at that resolution, so the hub keeps one beat per interval and
    * drops the rest. Floored at the heartbeat interval — asking for less than 20
@@ -241,6 +252,7 @@ export type HubSettingsValues = {
 const HUB_SETTINGS_DEFAULTS: HubSettingsValues = {
   maxConcurrentJobs: 10,
   jobStallTimeoutSeconds: 900,
+  joinInstallDelaySeconds: 120,
   metricsSampleSeconds: 60,
   metricsRetentionDays: 7,
   rotomSampleSeconds: 60,

@@ -163,6 +163,16 @@ export async function retryJob(jobId: string) {
   });
   await logJobEvent(jobId, "retry requested by operator", { phase: "QUEUED" });
   publishJob(updated);
+  // A rollout whose jobs had all finished is COMPLETED, and the scheduler only
+  // dispatches from running ones -- so a retried job in it sat QUEUED for good.
+  // That is every one-box rollout the moment its only job fails, a join install
+  // among them, and it made Retry a button that did nothing. Reopened here, it
+  // completes again when this job does, and releases what was waiting on it.
+  const reopened = await prisma.rollout.updateMany({
+    where: { id: job.rolloutId, status: "COMPLETED" },
+    data: { status: "RUNNING", finishedAt: null },
+  });
+  if (reopened.count > 0) bus.publish({ kind: "rollout", rolloutId: job.rolloutId });
   await recomputeRollout(job.rolloutId);
   return updated;
 }
@@ -257,6 +267,50 @@ export async function requeueStalled(stallTimeoutSeconds: number) {
 }
 
 /**
+ * Whether a rollout finished with every job a success -- a SKIPPED job counts,
+ * since the box already had the build. What a rollout waiting on this one is
+ * waiting for.
+ */
+export function rolloutSucceeded(rollout: {
+  status: RolloutStatus;
+  jobs: { state: JobState }[];
+}): boolean {
+  return (
+    rollout.status === "COMPLETED" &&
+    rollout.jobs.every((job) => job.state === "SUCCESS" || job.state === "SKIPPED")
+  );
+}
+
+/**
+ * Start the rollouts that were waiting for this one, now that it succeeded.
+ *
+ * One that finished with a failure releases nothing: its waiters stay PENDING,
+ * which is the point of waiting, and a retry of the failed job is what
+ * completes it again and lets them go.
+ */
+async function releaseWaiting(rolloutId: string) {
+  const waiting = await prisma.rollout.findMany({
+    where: { waitsForId: rolloutId, status: "PENDING" },
+    select: { id: true, canaryCount: true },
+  });
+  for (const rollout of waiting) {
+    await prisma.rollout.update({
+      where: { id: rollout.id },
+      data: { status: rollout.canaryCount > 0 ? "CANARY" : "RUNNING", startedAt: new Date() },
+    });
+    const jobs = await prisma.job.findMany({
+      where: { rolloutId: rollout.id, state: "QUEUED" },
+      select: { id: true },
+    });
+    for (const job of jobs) {
+      await logJobEvent(job.id, "what this waited for is installed, starting", { phase: "QUEUED" });
+    }
+    log.info({ rolloutId: rollout.id, after: rolloutId }, "released a waiting rollout");
+    bus.publish({ kind: "rollout", rolloutId: rollout.id });
+  }
+}
+
+/**
  * Roll the per-job outcomes up into the rollout state machine:
  * canary finishes -> soak -> full fleet -> done, with a failed canary
  * parking the rollout instead of pushing a bad build to the whole fleet.
@@ -297,5 +351,9 @@ export async function recomputeRollout(rolloutId: string) {
   if (status !== rollout.status || Object.keys(data).length > 0) {
     await prisma.rollout.update({ where: { id: rolloutId }, data: { ...data, status } });
     bus.publish({ kind: "rollout", rolloutId });
+  }
+
+  if (status === "COMPLETED" && rolloutSucceeded({ status, jobs })) {
+    await releaseWaiting(rolloutId);
   }
 }

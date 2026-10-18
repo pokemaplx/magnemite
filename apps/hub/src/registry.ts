@@ -18,10 +18,44 @@ export type Connection = {
    * the box's agent.log that explains it. Null from an older agent.
    */
   sessionId: string | null;
+  /**
+   * When this socket's agent process started, in unix seconds, from its hello.
+   * Null from an agent too old to report it, and until the hello lands.
+   *
+   * What tells an agent update still on its way from one that is not coming:
+   * the same process back on a new socket may be mid-download, while a
+   * different process still on the old version was not updated, whatever the
+   * hub thought it had sent.
+   */
+  agentStartedAt: number | null;
   connectedAt: number;
   lastSeenAt: number;
-  /** Job the agent says it is running right now, from hello/heartbeat. */
+  /**
+   * Job the agent is running right now: what it said in its hello and on every
+   * heartbeat, what the scheduler last handed it, and null again once that
+   * job's result is in.
+   */
   currentJobId: string | null;
+  /**
+   * When this socket's hello was applied -- the device row updated from it and
+   * the box's jobs reconciled against what it said it was running. Null until
+   * then, and nothing is dispatched down the socket while it is.
+   *
+   * A socket is registered before its hello has even arrived, so the registry
+   * alone says "online" a good second before the hub knows anything about this
+   * session. Dispatching in that second cost twice over on a box that had just
+   * enrolled: its row had no `capabilities` yet, so the MITM's config was
+   * dropped as "too old an agent" on an agent that could write it, and the
+   * hello then arrived saying "no job", so the job that had just gone out was
+   * re-queued and sent again to a box already running it.
+   */
+  readyAt: number | null;
+  /**
+   * A `push_config` is on its way to this box. Its jobs and any agent update
+   * wait for it: either would land between the stop and the start that
+   * surround the write.
+   */
+  pushingConfig: boolean;
   send: (msg: ServerMessage) => void;
 };
 

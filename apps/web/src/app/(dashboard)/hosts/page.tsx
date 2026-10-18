@@ -1,18 +1,8 @@
-import Link from "next/link";
 import { getRedroidSettings, prisma } from "@magnemite/db";
 import { requireUser } from "@/lib/session";
 import { AddHostDialog } from "@/components/add-host-dialog";
 import { DismissBootstrap } from "@/components/dismiss-bootstrap";
-import {
-  Table,
-  TableBody,
-  TableCell,
-  TableHead,
-  TableHeader,
-  TableRow,
-} from "@/components/ui/table";
-import { OnlineDot } from "@/components/status";
-import { RelativeTime } from "@/components/relative-time";
+import { HostsTable, type HostRow } from "@/components/hosts-table";
 import { formatBytes } from "@/lib/format";
 
 export const dynamic = "force-dynamic";
@@ -48,7 +38,27 @@ export default async function HostsPage() {
       redroidHost: {
         include: {
           instances: {
-            select: { id: true, present: true, containerState: true, workers: true },
+            // Enough of each container for the arrow on its machine's row: the
+            // box inside it, whether it is up, and what it is spending.
+            select: {
+              id: true,
+              index: true,
+              serial: true,
+              present: true,
+              containerState: true,
+              workers: true,
+              device: {
+                select: {
+                  id: true,
+                  name: true,
+                  status: true,
+                  cpuPercent: true,
+                  memTotalBytes: true,
+                  memAvailableBytes: true,
+                },
+              },
+            },
+            orderBy: { index: "asc" },
           },
         },
       },
@@ -75,17 +85,42 @@ export default async function HostsPage() {
     }),
   ]);
 
-  const rows = hosts.map((host) => {
+  const rows: HostRow[] = hosts.map((host) => {
     // Only the instances that are *supposed* to be there. A removed one keeps
     // its row so re-adding the index brings the same box back, and counting it
     // would make a drained machine look broken.
     const wanted = host.redroidHost?.instances.filter((i) => i.present) ?? [];
     return {
-      host,
+      id: host.id,
+      name: host.name,
+      serial: host.serial,
+      online: host.status === "ONLINE",
+      adopted: (host.redroidHost?.adoptedAt ?? null) !== null,
       desired: wanted.length,
       running: wanted.filter((i) => i.containerState === "running").length,
       workers: wanted.reduce((sum, i) => sum + (i.workers ?? 0), 0),
-      adopted: host.redroidHost?.adoptedAt ?? null,
+      cpuPercent: host.cpuPercent,
+      memory: ofTotal(host.memAvailableBytes, host.memTotalBytes),
+      swap: ofTotal(host.swapFreeBytes, host.swapTotalBytes),
+      disk: ofTotal(host.freeBytes, host.totalBytes),
+      lastSeenAt: host.lastSeenAt?.toISOString() ?? null,
+      instances: wanted.map((instance) => ({
+        id: instance.id,
+        index: instance.index,
+        serial: instance.serial,
+        workers: instance.workers,
+        containerState: instance.containerState,
+        online: instance.device?.status === "ONLINE",
+        device: instance.device
+          ? {
+              id: instance.device.id,
+              name: instance.device.name,
+              cpuPercent: instance.device.cpuPercent,
+              memTotalBytes: num(instance.device.memTotalBytes),
+              memAvailableBytes: num(instance.device.memAvailableBytes),
+            }
+          : null,
+      })),
     };
   });
 
@@ -162,59 +197,7 @@ export default async function HostsPage() {
           </p>
         </div>
       ) : (
-        <div className="rounded-lg border">
-          <Table>
-            <TableHeader>
-              <TableRow>
-                <TableHead>Machine</TableHead>
-                <TableHead align="right">Instances</TableHead>
-                <TableHead align="right">Workers</TableHead>
-                <TableHead align="right">CPU</TableHead>
-                <TableHead>Memory</TableHead>
-                <TableHead>Swap</TableHead>
-                <TableHead>Disk</TableHead>
-                <TableHead>Last seen</TableHead>
-              </TableRow>
-            </TableHeader>
-            <TableBody>
-              {rows.map(({ host, desired, running, workers, adopted }) => (
-                <TableRow key={host.id}>
-                  <TableCell>
-                    <Link
-                      href={`/hosts/${host.id}`}
-                      className="flex items-center gap-2 font-medium"
-                    >
-                      <OnlineDot online={host.status === "ONLINE"} />
-                      {host.name}
-                    </Link>
-                    <div className="mt-0.5 text-xs text-muted-foreground">
-                      {adopted === null ? "not adopted yet" : host.serial}
-                    </div>
-                  </TableCell>
-                  <TableCell align="right" className="tabular-nums">
-                    {/* running/desired, so a machine mid-converge reads as one
-                        rather than as two numbers that disagree. */}
-                    {desired === 0 ? "—" : `${running}/${desired}`}
-                  </TableCell>
-                  <TableCell align="right" className="tabular-nums">
-                    {workers === 0 ? "—" : workers}
-                  </TableCell>
-                  <TableCell align="right" className="tabular-nums">
-                    {/* Share of a single core, as everywhere else: 250 is two
-                        and a half cores spent. */}
-                    {host.cpuPercent === null ? "—" : `${Math.round(host.cpuPercent)}%`}
-                  </TableCell>
-                  <TableCell>{ofTotal(host.memAvailableBytes, host.memTotalBytes)}</TableCell>
-                  <TableCell>{ofTotal(host.swapFreeBytes, host.swapTotalBytes)}</TableCell>
-                  <TableCell>{ofTotal(host.freeBytes, host.totalBytes)}</TableCell>
-                  <TableCell>
-                    <RelativeTime value={host.lastSeenAt} />
-                  </TableCell>
-                </TableRow>
-              ))}
-            </TableBody>
-          </Table>
-        </div>
+        <HostsTable rows={rows} />
       )}
     </div>
   );

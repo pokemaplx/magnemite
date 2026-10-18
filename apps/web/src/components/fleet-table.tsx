@@ -98,6 +98,8 @@ export type DeviceRow = {
   androidVersion: string | null;
   agentVersion: string | null;
   groupName: string | null;
+  /** The machine a Redroid container runs on, by its Device id. Null on hardware. */
+  hostId: string | null;
   installedVersion: string | null;
   /** Installed version of each group's MITM, keyed by package name. */
   mitmVersions: Record<string, string | null>;
@@ -140,6 +142,12 @@ export type VersionOption = {
 
 type Filter = "all" | "online" | "offline" | "outdated" | "pending";
 
+/**
+ * Where a box runs: "" for everywhere, "boxes" for hardware, "hosts" for any
+ * Redroid container, or `host:<id>` for the containers on one machine.
+ */
+type Where = string;
+
 function scannerCell(rotom: DeviceRow["rotom"]) {
   const state = scannerState(rotom);
   if (!rotom || state === "unmatched") {
@@ -174,6 +182,7 @@ export function FleetTable({
   mitmColumns,
   canOperate,
   machines,
+  hosts,
   enrolling,
 }: {
   rows: DeviceRow[];
@@ -185,6 +194,8 @@ export function FleetTable({
   canOperate: boolean;
   /** Online machines, the only things that can relay an adb enrollment. */
   machines: { id: string; name: string }[];
+  /** Every machine, online or not, for the "where it runs" filter. */
+  hosts: { id: string; name: string }[];
   /** Hardware boxes partway through being added over adb. */
   enrolling: EnrollingRow[];
 }) {
@@ -193,6 +204,7 @@ export function FleetTable({
   const [query, setQuery] = useState("");
   const [filter, setFilter] = useState<Filter>("all");
   const [group, setGroup] = useState("");
+  const [where, setWhere] = useState<Where>("");
   const [selected, setSelected] = useState<Set<string>>(new Set());
 
   const accessors = useMemo(() => {
@@ -232,6 +244,9 @@ export function FleetTable({
     const q = query.trim().toLowerCase();
     const filtered = rows.filter((row) => {
       if (group && row.groupName !== group) return false;
+      if (where === "boxes" && row.hostId !== null) return false;
+      if (where === "hosts" && row.hostId === null) return false;
+      if (where.startsWith("host:") && row.hostId !== where.slice("host:".length)) return false;
       if (filter === "online" && !row.online) return false;
       if (filter === "offline" && row.online) return false;
       if (filter === "pending" && row.approved) return false;
@@ -250,10 +265,10 @@ export function FleetTable({
       );
     });
     return sortRows(filtered);
-  }, [rows, query, filter, group, latestVersion, sortRows]);
+  }, [rows, query, filter, group, where, latestVersion, sortRows]);
 
   const pagination = useTablePagination(matching, {
-    resetKey: `${query}|${filter}|${group}|${sort.key}|${sort.direction}`,
+    resetKey: `${query}|${filter}|${group}|${where}|${sort.key}|${sort.direction}`,
   });
   const visible = pagination.rows;
 
@@ -363,6 +378,23 @@ export function FleetTable({
             ...groups.map((g) => ({ value: g.name, label: g.name })),
           ]}
         />
+
+        {/* Only once there is a machine: before that every box is hardware,
+            and a filter with one answer is clutter. */}
+        {hosts.length > 0 ? (
+          <Select
+            aria-label="Filter by where the box runs"
+            value={where}
+            onValueChange={setWhere}
+            className="w-48"
+            options={[
+              { value: "", label: "Boxes and hosts" },
+              { value: "boxes", label: "Boxes only" },
+              { value: "hosts", label: "Hosts only" },
+              ...hosts.map((host) => ({ value: `host:${host.id}`, label: `Host: ${host.name}` })),
+            ]}
+          />
+        ) : null}
       </div>
 
       <div className="overflow-hidden rounded-xl border border-border bg-card">

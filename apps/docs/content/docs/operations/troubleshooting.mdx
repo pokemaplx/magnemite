@@ -87,6 +87,24 @@ device page for the version that box reports, and the box's own log for
 
 Check the full flow in [updating the agent](/docs/fleet/agent#the-agent-updates-itself).
 
+## A MITM installed without its config
+
+The app is on the box and starts, then says its config is missing: Aegis
+prints `The configuration file aegis_config.json is invalid or inexistent`.
+The MITM's job on **Rollouts** says why the hub sent none, as a warning:
+
+| Line on the job                                   | Means                                                                                                                             |
+| ------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------- |
+| `config not sent: {{device.…}} is empty on <box>` | A [placeholder](/docs/fleet/configs#placeholders) had nothing to put in on that box.                                              |
+| `config not written: this box's agent is too old` | The agent does not claim `write_config`. It is told to update itself on its next hello.                                           |
+| neither                                           | The group's **MITM package** is another package, the group has no config path or JSON, or the deploy had the config switched off. |
+
+A box already in that state: **Execute → Rewrite _MITM_ config** on its
+device page writes the group's config and restarts the MITM, with nothing
+reinstalled (an agent of 1.0.5 or later). On an older agent, a **Manual deploy**
+of the same MITM build with the config switch left on does it by reinstalling in
+place.
+
 ## Small `/data`
 
 Boxes need roughly **450 MB** free: a 172 MB bundle unpacks to ~250 MB and both

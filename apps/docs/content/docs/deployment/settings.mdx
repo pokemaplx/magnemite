@@ -33,6 +33,7 @@ was offline adopts it when it comes back.
 | **Concurrent installs**      | `10`    | `1`  | Fleet-wide cap on boxes downloading or installing at once. A group can lower it for its own boxes. |
 | **Concurrent agent updates** | `5`     | `1`  | How many boxes may swap their agent binary at once — the fleet reconnecting after a hub deploy.    |
 | **Job stalls after**         | `900s`  | `1`  | Silence from a box mid-job before that job is re-queued to it.                                     |
+| **New boxes settle for**     | `120s`  | `0`  | Wait after a box boots before its group's join installs start. `0` installs on enrolment.          |
 
 ### Metric history
 

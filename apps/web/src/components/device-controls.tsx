@@ -22,7 +22,7 @@ import {
   setDeviceApproval,
   setDeviceGroup,
 } from "@/actions/devices";
-import { DeviceExec } from "@/components/device-exec";
+import { DeviceExec, type ExecMitm } from "@/components/device-exec";
 import { DeviceLiveLogs } from "@/components/device-live-logs";
 import { DeviceMaintenance } from "@/components/device-maintenance";
 import { DeviceScreenshot } from "@/components/device-screenshot";
@@ -55,6 +55,7 @@ export function DeviceControls({
   groups,
   maintenanceUntil,
   canScreenshot,
+  mitm,
 }: {
   deviceId: string;
   name: string;
@@ -71,6 +72,12 @@ export function DeviceControls({
    * here.
    */
   canScreenshot: boolean;
+  /**
+   * The group's MITM, for the Execute dialog's config buttons. Passed only to
+   * operators, as this whole component is: rewriting it shows the config,
+   * which is the MITM's credentials.
+   */
+  mitm: ExecMitm | null;
 }) {
   const router = useRouter();
   const toast = useToast();
@@ -212,7 +219,13 @@ export function DeviceControls({
         </DropdownMenu>
       </div>
 
-      <DeviceExec deviceId={deviceId} name={name} open={executing} onOpenChange={setExecuting} />
+      <DeviceExec
+        deviceId={deviceId}
+        name={name}
+        open={executing}
+        onOpenChange={setExecuting}
+        mitm={mitm}
+      />
 
       <DeviceLiveLogs deviceId={deviceId} name={name} open={liveLogs} onOpenChange={setLiveLogs} />
 

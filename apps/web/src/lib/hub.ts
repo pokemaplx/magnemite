@@ -10,6 +10,28 @@ const SECRET = process.env.HUB_INTERNAL_SECRET ?? "";
 
 export class HubError extends Error {}
 
+/** Mirrors `ConfigPreview` in the hub's configPush.ts. */
+export type DeviceConfigPreview =
+  | { state: "none" }
+  | {
+      state: "ready" | "refused";
+      path: string;
+      content: string;
+      reason: string | null;
+      stop: string | null;
+      start: string | null;
+      capable: boolean;
+    };
+
+/** Mirrors `PushOutcome` in the hub's configPush.ts. */
+export type DeviceConfigPush = {
+  ok: boolean;
+  path: string | null;
+  sha256: string | null;
+  error: string | null;
+  hookError: string | null;
+};
+
 async function call<T>(path: string, body?: unknown, method: "POST" | "GET" = "POST"): Promise<T> {
   let res: Response;
   try {
@@ -209,6 +231,15 @@ export const hub = {
    */
   setDeviceMaintenance: (id: string, minutes: number, byEmail: string | null) =>
     call<MaintenanceResult>(`/internal/devices/${id}/maintenance`, { minutes, byEmail }),
+  /** What rewriting this box's MITM config would write, and the hooks around it. */
+  previewDeviceConfig: (id: string) =>
+    call<DeviceConfigPreview>(`/internal/devices/${id}/config`, undefined, "GET"),
+  /**
+   * Write the config to the box and restart its MITM, no install. Null content
+   * writes the group's own template; anything else is rendered for the box.
+   */
+  pushDeviceConfig: (id: string, content: string | null) =>
+    call<DeviceConfigPush>(`/internal/devices/${id}/config`, { content }),
   /** Run a command on the box, as root, and get back what it printed. */
   execOnDevice: (id: string, command: string, timeoutSeconds?: number) =>
     call<{ ok: boolean; output: string; error: string | null }>(`/internal/devices/${id}/exec`, {

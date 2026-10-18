@@ -2,7 +2,7 @@ import { type RolloutHookMode, type RolloutMode, prisma } from "@magnemite/db";
 import { bus } from "../bus.js";
 import { log } from "../log.js";
 import { isOnline } from "../registry.js";
-import { logJobEvent, recomputeRollout } from "./jobs.js";
+import { logJobEvent, recomputeRollout, rolloutSucceeded } from "./jobs.js";
 import { inMaintenance } from "./maintenance.js";
 
 export type CreateRolloutInput = {
@@ -30,6 +30,18 @@ export type CreateRolloutInput = {
   retryBackoffSeconds?: number;
   /** Devices already on the target version get a SKIPPED job instead of a real one. */
   skipUpToDate?: boolean;
+  /**
+   * No job is dispatched before this. The same hold a failed attempt's backoff
+   * puts on a job, so the scheduler needs nothing new to honour it -- and the
+   * Retry button overrides it the same way.
+   */
+  notBefore?: Date | null;
+  /**
+   * A rollout this one waits for: it is created PENDING and starts only once
+   * that one has finished with every job a success. One that already has is
+   * nothing to wait for.
+   */
+  waitsForId?: string | null;
   createdById?: string | null;
   note?: string | null;
 };
@@ -102,13 +114,26 @@ export async function createRollout(input: CreateRolloutInput) {
   });
   const canaryIds = new Set(ordered.slice(0, canaryCount).map((d) => d.id));
 
+  // Read here rather than trusted from the caller: a prerequisite whose only
+  // job was SKIPPED completed the moment it was created, before anything could
+  // wait for it, and would otherwise hold this one PENDING with nothing left
+  // to release it.
+  const waitsFor = input.waitsForId
+    ? await prisma.rollout.findUnique({
+        where: { id: input.waitsForId },
+        select: { id: true, status: true, jobs: { select: { state: true } } },
+      })
+    : null;
+  const waiting = waitsFor !== null && !rolloutSucceeded(waitsFor);
+
   const rollout = await prisma.rollout.create({
     data: {
       appVersionId: appVersion.id,
       mode: input.mode ?? "MANUAL",
       // With canaries the fleet waits behind them; without, everything is
-      // free to dispatch immediately.
-      status: canaryIds.size > 0 ? "CANARY" : "RUNNING",
+      // free to dispatch immediately. Neither, while waiting on another.
+      status: waiting ? "PENDING" : canaryIds.size > 0 ? "CANARY" : "RUNNING",
+      waitsForId: waitsFor?.id ?? null,
       forceClean: input.forceClean ?? false,
       preInstallHook: input.preInstallHook?.trim() || null,
       postInstallHook: input.postInstallHook?.trim() || null,
@@ -122,7 +147,7 @@ export async function createRollout(input: CreateRolloutInput) {
       retryBackoffSeconds: input.retryBackoffSeconds ?? target.retryBackoffSeconds,
       createdById: input.createdById ?? null,
       note: input.note ?? null,
-      startedAt: new Date(),
+      startedAt: waiting ? null : new Date(),
       jobs: {
         create: targets.map((device) => {
           const current = device.packages[0]?.versionName ?? null;
@@ -134,6 +159,7 @@ export async function createRollout(input: CreateRolloutInput) {
             fromVersion: current,
             toVersion: appVersion.version,
             finishedAt: upToDate ? new Date() : null,
+            nextAttemptAt: upToDate ? null : (input.notBefore ?? null),
           };
         }),
       },
@@ -180,16 +206,24 @@ export async function cancelRollout(rolloutId: string) {
   return jobs.length;
 }
 
-/** Operator overrides a canary failure, or un-pauses a paused rollout. */
+/**
+ * Operator overrides a canary failure, un-pauses a paused rollout, or starts
+ * one that was waiting on another -- the MITM of a box whose game would not
+ * install, sent anyway.
+ */
 export async function resumeRollout(rolloutId: string) {
   const rollout = await prisma.rollout.findUnique({ where: { id: rolloutId } });
   if (!rollout) throw new Error("rollout not found");
-  if (rollout.status !== "PAUSED" && rollout.status !== "SOAKING") {
+  if (rollout.status !== "PAUSED" && rollout.status !== "SOAKING" && rollout.status !== "PENDING") {
     throw new Error(`rollout is ${rollout.status}, nothing to resume`);
   }
   await prisma.rollout.update({
     where: { id: rolloutId },
-    data: { status: "RUNNING", canaryPassedAt: rollout.canaryPassedAt ?? new Date() },
+    data: {
+      status: "RUNNING",
+      canaryPassedAt: rollout.canaryPassedAt ?? new Date(),
+      startedAt: rollout.startedAt ?? new Date(),
+    },
   });
   bus.publish({ kind: "rollout", rolloutId });
 }

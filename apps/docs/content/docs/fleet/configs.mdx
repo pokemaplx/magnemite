@@ -22,8 +22,11 @@ data**.
 | **Config JSON**      | The file's contents, with placeholders.                                                             |
 | **Install on join**  | Builds every box joining this group is given, before anybody asks. Empty by default.                |
 
-The **Fill from** buttons put in the real shapes for Aegis, Atlas and GC,
-paths and key sets.
+The **Fill from** buttons put in the real shapes for Aegis, Atlas, GoCheats
+and Cosmog, paths and key sets. **Aegis (Redroid)** and **Cosmog (Redroid)** are
+the same two for a group of containers, with `"workers": "{{device.workers}}"`
+instead of a fixed number, so each container gets the count its machine was
+scaled with.
 
 ## Install on join
 
@@ -59,7 +62,24 @@ What it does, precisely:
   add it, rather than at the one moment nobody is watching.
 - **Each build is its own rollout**, so they appear on **Rollouts** noted
   `joined its group` and are followed, retried and cancelled like any other.
-  There is no ordering: the scheduler decides when each runs.
+- **One after the other, the MITM last.** The builds go in the order they were
+  added, except the group's **MITM package**, which always goes last, and each
+  waits for the one before it to succeed: until then its rollout shows as
+  `pending`, after whatever it waits for. The MITM's install is the one that
+  writes its [config](#when-it-is-written) and starts it, so it wants the game
+  already on the box.
+- **No hooks, but the one that starts the MITM.** The game goes in with neither
+  hook: on a new box there is nothing running to stop, and the MITM a
+  post-install hook would start is not installed yet. The MITM's own install
+  runs only the post-install hook, after its config is written.
+- **A failed game holds the MITM back.** It stays `pending` rather than going in
+  without it. **Retry** on the failed job lets it go once that succeeds, and
+  **Start now** on the waiting rollout sends it regardless.
+- **Not before the box has settled.** Nothing starts until the box has been up
+  for **Settings → Tuning → New boxes settle for** (120 s), counted from its
+  boot. A minute-old Android is still compiling its packages and settling
+  Magisk, which is a poor moment to push a 170 MB game into. The job says
+  `held 118s while the box settles after booting`; `0` installs on enrolment.
 - **A box that already has one gets nothing for it.** The check is what the box
   reports installed, not whether it has enrolled before — so a re-enrolment
   queues nothing, and a box whose `/data` was wiped gets everything again,
@@ -131,16 +151,35 @@ Two things are refused rather than papered over:
 
 ## When it is written
 
-One path: **with the install.** A rollout of a group's own MITM carries that
+**With the install.** A rollout of a group's own MITM carries that
 group's config (if toggled on). The agent writes it after the install verifies and **before** the
-post-install hook.
+post-install hook. A [join install](#install-on-join) is such a rollout, so the
+MITM in a group's **Install on join** arrives already configured.
+
+**By hand, on one box.** The device page's **Execute** has two buttons built
+from the box's group:
+
+- **Show _MITM_ config** — `cat` of the group's config path, so you see the file
+  as it is on the box right now.
+- **Rewrite _MITM_ config…** — the group's config rendered for this box, in an
+  editor. **Write and restart** writes it with **nothing installed**: the box
+  stops the MITM with the group's pre-install hook, writes the file exactly as
+  an install does, and starts it again with the post-install hook. A group
+  without hooks gets `am force-stop` and the app's launcher. An edit goes to
+  this box alone; the group keeps its own template.
+
+The restart is the point of the second one, because a running MITM does not
+re-read a file it has already read. It needs an agent that knows `push_config`
+(1.0.5 or later); an older one says so instead of offering the button.
 
 Saving a group writes to the database and nothing else. An edited config reaches
-the fleet on the next deploy of that group's MITM (if toggled on), and not before.
+the fleet on the next deploy of that group's MITM (if toggled on), or a box at a
+time with **Rewrite config**, and not before.
 
 ## How it lands
 
-The agent takes the `config` object off the install job and:
+The agent takes the `config` object off the install job, or off `push_config`
+for a rewrite by hand, and:
 
 1. Writes to a temp file and **renames** it into place, so a scanner reading the
    file while it is replaced sees the old bytes or the new ones, never a

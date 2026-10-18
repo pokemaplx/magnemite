@@ -383,6 +383,11 @@ const (
 	// CapabilityBoxAdb says this agent can run adb against boxes on its LAN
 	// for the hub. Only ever claimed by a machine -- see AgentCapabilities.
 	CapabilityBoxAdb = "box_adb"
+
+	// CapabilityPushConfig says this build knows push_config: a MITM's config
+	// rewritten on a running box, between the group's hooks, with nothing
+	// installed.
+	CapabilityPushConfig = "push_config"
 )
 
 // AgentCapabilities is what this binary claims it can do.
@@ -393,7 +398,7 @@ const (
 // have the hub send it work it cannot do, and the switch in handle() has no
 // default branch -- so the hub would wait for a reply that never comes.
 func AgentCapabilities(boxAdb bool) []string {
-	caps := []string{CapabilityWriteConfig, CapabilityScreenshot}
+	caps := []string{CapabilityWriteConfig, CapabilityScreenshot, CapabilityPushConfig}
 	if boxAdb {
 		caps = append(caps, CapabilityBoxAdb)
 	}
@@ -481,6 +486,19 @@ type ExecResult struct {
 	OK        bool   `json:"ok"`
 	Output    string `json:"output"`
 	Error     string `json:"error,omitempty"`
+}
+
+// PushConfigResult is how a push_config went. OK is the write; a hook that
+// failed is said apart in HookError, because the file can be in place and the
+// scanner still stopped.
+type PushConfigResult struct {
+	Type      string `json:"type"` // "push_config_result"
+	RequestID string `json:"requestId"`
+	OK        bool   `json:"ok"`
+	// Of the bytes read back off the disk after the rename.
+	SHA256    string `json:"sha256,omitempty"`
+	Error     string `json:"error,omitempty"`
+	HookError string `json:"hookError,omitempty"`
 }
 
 // --- hub -> agent ----------------------------------------------------------
@@ -625,6 +643,21 @@ type ExecCommand struct {
 	CommandID      string `json:"commandId"`
 	Command        string `json:"command"`
 	TimeoutSeconds int    `json:"timeoutSeconds"`
+}
+
+// PushConfig rewrites a MITM's config on a running box with nothing
+// installed: PreHook stops what reads the file, the file goes in exactly as an
+// install writes it, and PostHook starts it again on the new settings. The
+// hooks are the group's own install hooks.
+//
+// Never logged: the content holds the MITM's credentials, which is why this is
+// a message and not a command typed into Execute.
+type PushConfig struct {
+	Type      string     `json:"type"`
+	RequestID string     `json:"requestId"`
+	Config    ConfigFile `json:"config"`
+	PreHook   string     `json:"preHook,omitempty"`
+	PostHook  string     `json:"postHook,omitempty"`
 }
 
 // --- enrollment ------------------------------------------------------------

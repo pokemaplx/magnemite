@@ -236,8 +236,13 @@ export async function enrollRoutes(app: FastifyInstance) {
     //
     // Not awaited for its result and never allowed to throw: a box that has
     // enrolled must get its token back even if the hub cannot queue a thing.
+    //
+    // Told the box came up just now, which is near enough: the agent starts on
+    // boot_completed and enrols on its first breath. The row cannot say -- a
+    // re-flashed box's `bootedAt` is its previous life's, and a new one has
+    // not sent a hello yet.
     if (kind === "BOX" && device.approved) {
-      await queueJoinInstalls(device.id).catch((err) =>
+      await queueJoinInstalls(device.id, { bootedAround: new Date() }).catch((err) =>
         log.warn({ err, deviceId: device.id }, "could not queue the group's join installs"),
       );
     }

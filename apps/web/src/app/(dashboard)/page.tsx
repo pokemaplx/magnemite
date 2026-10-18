@@ -37,6 +37,9 @@ export default async function FleetPage() {
       where: { kind: "BOX" },
       include: {
         group: { select: { id: true, name: true } },
+        // Which machine a container runs on -- `hostId` is that machine's own
+        // Device id -- for the filter that narrows the table to one of them.
+        redroidInstance: { select: { hostId: true } },
         packages: { where: { packageName: { in: [packageName, ...mitmNames] } } },
         jobs: {
           where: { state: { in: [...ACTIVE_OR_QUEUED] } },
@@ -71,6 +74,7 @@ export default async function FleetPage() {
       androidVersion: device.androidVersion,
       agentVersion: device.agentVersion,
       groupName: device.group?.name ?? null,
+      hostId: device.redroidInstance?.hostId ?? null,
       installedVersion: installed.get(packageName)?.versionName ?? null,
       mitmVersions: Object.fromEntries(
         mitmNames.map((name) => {
@@ -127,9 +131,16 @@ export default async function FleetPage() {
   // What can relay an adb enrollment, and what is already being enrolled.
   // Both only matter to the dialog and the banner, so they are read here
   // rather than threaded through the device query above.
-  const [machines, enrollingRows] = await Promise.all([
+  const [machines, hosts, enrollingRows] = await Promise.all([
     prisma.device.findMany({
       where: { kind: "HOST", status: "ONLINE" },
+      select: { id: true, name: true },
+      orderBy: { name: "asc" },
+    }),
+    // Every machine, online or not, for the filter: a machine that is down is
+    // exactly when somebody wants to see which boxes went with it.
+    prisma.device.findMany({
+      where: { kind: "HOST" },
       select: { id: true, name: true },
       orderBy: { name: "asc" },
     }),
@@ -167,6 +178,7 @@ export default async function FleetPage() {
     <FleetTable
       rows={rows}
       machines={machines}
+      hosts={hosts}
       enrolling={enrolling}
       groups={groups.map((g) => ({ id: g.id, name: g.name }))}
       versions={versionOptions}

@@ -4,7 +4,8 @@ import { prisma } from "@magnemite/db";
 import { getHubSettings } from "./hubSettings.js";
 import { env } from "../env.js";
 import { log } from "../log.js";
-import { isOnline, sendTo } from "../registry.js";
+import { getConnection, sendTo } from "../registry.js";
+import { agentUpdateInFlight } from "./agentRelease.js";
 import { hasWriteConfig, renderConfig } from "./deviceConfig.js";
 import { ACTIVE_STATES, logJobEvent, recomputeRollout, requeueStalled } from "./jobs.js";
 import { sweepExpiredMaintenance, notInMaintenance } from "./maintenance.js";
@@ -107,6 +108,13 @@ async function dispatchQueued(maxConcurrentJobs: number) {
   let capacity = maxConcurrentJobs - activeCount;
   if (capacity <= 0) return;
 
+  // Taken before the candidates are read, because their device rows are what
+  // this dispatch renders the MITM config from. A box whose hello was applied
+  // after this instant may be ready by the time the loop reaches it, while the
+  // row the loop holds still predates that hello -- no `capabilities` on a box
+  // that has just enrolled. It goes on the next tick, which its hello nudges.
+  const readAt = Date.now();
+
   const candidates = await prisma.job.findMany({
     where: {
       state: "QUEUED",
@@ -143,11 +151,18 @@ async function dispatchQueued(maxConcurrentJobs: number) {
 
   // Per-group in-flight counts, for sites on a thin uplink.
   const groupActive = new Map<string, number>();
+  // And the boxes already working on something. The agent runs one install
+  // at a time and refuses a second outright, and the hub took that refusal as
+  // a failed attempt: a box that joined a group with two builds to install got
+  // both in one tick, and the one that lost burned its attempts, a backoff at
+  // a time, against a box that was simply busy with the other.
+  const busy = new Set<string>();
   const activeJobs = await prisma.job.findMany({
     where: { state: { in: ACTIVE_STATES } },
-    select: { device: { select: { groupId: true } } },
+    select: { deviceId: true, device: { select: { groupId: true } } },
   });
   for (const j of activeJobs) {
+    busy.add(j.deviceId);
     const gid = j.device.groupId;
     if (gid) groupActive.set(gid, (groupActive.get(gid) ?? 0) + 1);
   }
@@ -159,7 +174,26 @@ async function dispatchQueued(maxConcurrentJobs: number) {
 
     // An offline box keeps its job queued; it gets dispatched the moment the
     // agent reconnects, no operator action needed.
-    if (!isOnline(job.deviceId)) continue;
+    const conn = getConnection(job.deviceId);
+    if (!conn) continue;
+
+    // "The moment it reconnects" means the moment its hello is applied, which
+    // is later than the moment its socket is registered. See `readyAt`.
+    if (conn.readyAt === null || conn.readyAt > readAt) continue;
+
+    // One job at a time. `busy` is what the hub has handed out; the
+    // connection's `currentJobId` is what the agent says it is doing, which
+    // covers a job the hub has already written off -- one cancelled, still
+    // winding down its post-install hook -- and the agent would refuse past.
+    if (busy.has(job.deviceId) || conn.currentJobId) continue;
+
+    // Its MITM's config is being rewritten, between a stop and a start that an
+    // install landing in the middle would undo. A push takes seconds.
+    if (conn.pushingConfig) continue;
+
+    // Swapping its own binary, which ends in a re-exec that would take an
+    // install started meanwhile down with it. Checked again at the send.
+    if (agentUpdateInFlight(conn)) continue;
 
     const rollout = job.rollout;
     if (rollout.status === "CANARY" && !job.isCanary) continue;
@@ -241,8 +275,17 @@ async function dispatchQueued(maxConcurrentJobs: number) {
     }
 
     const attempt = job.attempt + 1;
-    await prisma.job.update({
-      where: { id: job.id },
+    // A compare-and-set rather than a plain write. The candidates were read at
+    // the top of this pass, and a job can have moved since: cancelled, or
+    // failed and handed a backoff by a result that landed while this loop was
+    // awaiting. A plain write put DISPATCHED over both, which is how a job
+    // went out again in the same second it was told to wait a minute.
+    const claimed = await prisma.job.updateMany({
+      where: {
+        id: job.id,
+        state: "QUEUED",
+        OR: [{ nextAttemptAt: null }, { nextAttemptAt: { lte: new Date() } }],
+      },
       data: {
         state: "DISPATCHED",
         attempt,
@@ -251,16 +294,32 @@ async function dispatchQueued(maxConcurrentJobs: number) {
         progress: 0,
       },
     });
+    if (claimed.count === 0) continue;
 
-    if (!sendTo(job.deviceId, message)) {
-      // The socket died between the online check and the write. Put it back
-      // and let the next tick try again.
-      await prisma.job.update({
-        where: { id: job.id },
+    // Everything that can change across the awaits above, checked again with
+    // none between the check and the write. The socket may have died, or been
+    // replaced by a newer one whose hello is not in yet -- sending down that
+    // one is the race `readyAt` exists to close. And an agent update may have
+    // gone out meanwhile: `maybeUpdateAgent` ends in a block like this one,
+    // so whichever of the two runs second sees the first.
+    if (
+      getConnection(job.deviceId) !== conn ||
+      conn.pushingConfig ||
+      agentUpdateInFlight(conn) ||
+      !sendTo(job.deviceId, message)
+    ) {
+      // Put it back and let a later tick try again -- unless something has
+      // moved it on in the meantime, a cancel most likely.
+      await prisma.job.updateMany({
+        where: { id: job.id, state: "DISPATCHED" },
         data: { state: "QUEUED", attempt: job.attempt, dispatchedAt: null, heartbeatAt: null },
       });
       continue;
     }
+    // Ahead of the agent saying so on its next heartbeat, so nothing else --
+    // a second job, an agent update -- goes to the box in between.
+    conn.currentJobId = job.id;
+    busy.add(job.deviceId);
 
     await logJobEvent(job.id, `dispatched (attempt ${attempt}) → ${version.version}`, {
       phase: "DISPATCHED",

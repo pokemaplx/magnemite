@@ -11,6 +11,7 @@ import { NumberField, SettingGroup } from "@/components/settings/setting-fields"
 export type HubSettingsRow = {
   maxConcurrentJobs: number;
   jobStallTimeoutSeconds: number;
+  joinInstallDelaySeconds: number;
   heartbeatSeconds: number;
   agentUpdateConcurrency: number;
   deviceOfflineTimeoutSeconds: number;
@@ -104,6 +105,14 @@ export function HubSettingsForm({
               min={1}
               disabled={disabled}
               hint="Silence from a box mid-job before that job is re-queued to it."
+            />
+            <NumberField
+              name="joinInstallDelaySeconds"
+              label="New boxes settle for"
+              value={settings.joinInstallDelaySeconds}
+              min={0}
+              disabled={disabled}
+              hint="How long after it boots a box waits before its group's join installs start. 0 installs on enrolment."
             />
           </SettingGroup>
 

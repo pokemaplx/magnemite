@@ -42,6 +42,18 @@ can cap lower for a site on a thin uplink. The cap counts boxes
 downloading or installing, which is what consumes your egress and their
 `/data`.
 
+A box itself takes **one job at a time**. Two rollouts that both include it
+queue a job each, and the second goes out when the first is finished, oldest
+first. A box that is swapping its own agent binary takes none until it is back
+on the new one, because the swap ends in a restart that would take an install
+down with it.
+
+A rollout can also **wait for another**: it shows as `pending`, after the one it
+waits for, and starts on its own once that one has finished with every job a
+success. That is how a box joining its group gets its
+[MITM after its game](/docs/fleet/configs#install-on-join). **Start now** sends a
+waiting rollout without waiting.
+
 <Callout type="warn">
   A fleet-wide rollout to 200 boxes is roughly **35 GB** off your server. Concurrency paces it; it
   does not reduce it. Check your traffic allowance before the first one. Check the [troubleshooting topic](/docs/operations/troubleshooting#egress) for more information.
@@ -53,7 +65,7 @@ downloading or installing, which is what consumes your egress and their
 | ---------------------- | ------------------------------------------------------------------------------------------------- |
 | **Device offline**     | The job stays queued and dispatches when the agent reconnects.                                    |
 | **Job failed**         | Re-queued up to the attempt limit, after the backoff. Bytes already on disk make the retry cheap. |
-| **Attempts exhausted** | `Retry` and `Retry all failed` in the UI.                                                         |
+| **Attempts exhausted** | `Retry` and `Retry all failed` in the UI. A rollout that had finished is reopened for it.         |
 | **Job stalled**        | No progress for the stall timeout (**Settings → Tuning**, 900 s) and the hub re-queues it.        |
 | **Hub restarted**      | Jobs survive in the database; the scheduler picks them up on the next tick.                       |
 

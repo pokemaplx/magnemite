@@ -150,6 +150,50 @@ const PRESETS = [
   "disable_attest_delay": false
 }`,
   },
+  // The same two, for a group of Redroid containers. A container's worker
+  // count is its machine's to say -- set where the machine is scaled -- so it
+  // comes from the box rather than being typed here, where it would be one
+  // number for every machine in the group. In quotes because a placeholder can
+  // only stand inside a JSON string, which is what lets the template save.
+  //
+  // On a TV box `{{device.workers}}` is empty and the render refuses, naming
+  // the box: these are for container groups only, a group per kind.
+  {
+    id: "aegis-redroid",
+    label: "Aegis (Redroid)",
+    packageName: "com.pokemod.aegis",
+    configPath: "/data/local/tmp/aegis_config.json",
+    config: `{
+  "authBearer": "YOUR_ROTOM_SECRET",
+  "deviceAuthToken": "YOUR_AEGIS_AUTH_TOKEN",
+  "deviceName": "{{device.name}}",
+  "email": "YOUR_AEGIS_REGISTRATION_EMAIL",
+  "rotomUrl": "http://YOUR_ROTOM_URL:7072",
+  "runOnBoot": true,
+  "workers": "{{device.workers}}"
+}`,
+  },
+  {
+    id: "cosmog-redroid",
+    label: "Cosmog (Redroid)",
+    packageName: "com.sy1vi3.cosmog",
+    configPath: "/data/local/tmp/cosmog.json",
+    config: `{
+  "device_id": "{{device.name}}",
+  "rotom_worker_endpoint": "wss://YOUR_ROTOM_URL:7070",
+  "rotom_device_endpoint": "wss://YOUR_ROTOM_URL:7070/control",
+  "rotom_secret": "YOUR_ROTOM_SECRET",
+  "token": "YOUR_COSMOG_TOKEN",
+  "public_ip": "{{device.publicIp}}",
+  "use_local_safetynet": true,
+  "workers": "{{device.workers}}",
+  "injection_delay_ms": 5000,
+  "pogo_heartbeat_timeout_ms": 30000,
+  "concurrent_login_override": 0,
+  "worker_spawn_delay_override": 12500,
+  "disable_attest_delay": false
+}`,
+  },
 ] as const;
 
 export function GroupsSection({
@@ -310,7 +354,7 @@ function GroupForm({
             </p>
           </div>
           {!disabled ? (
-            <div className="flex items-center gap-1">
+            <div className="flex flex-wrap items-center gap-1">
               <span className="text-xs text-muted-foreground">Fill from</span>
               {PRESETS.map((preset) => (
                 <Button
@@ -562,8 +606,11 @@ function JoinInstalls({
           answer is not obvious either way. */}
       {group.joinInstalls.length > 0 ? (
         <p className="text-xs text-muted-foreground">
-          A box already reporting one of these gets nothing for it. Removing a build from this list
-          uninstalls nothing — the boxes that got it keep it.
+          They go in one after the other once the box has settled after booting (Settings → Tuning),
+          each when the one before has succeeded, and the MITM last — the only one that runs a hook,
+          its post-install one, so it starts on a box that already has the game. A box already
+          reporting one of these gets nothing for it. Removing a build from this list uninstalls
+          nothing — the boxes that got it keep it.
         </p>
       ) : null}
 
@@ -579,7 +626,7 @@ function CreateGroupForm() {
     <form action={formAction} className="flex flex-wrap items-end gap-2">
       <div className="flex flex-col gap-2">
         <Label htmlFor="new-group">New group</Label>
-        <Input id="new-group" name="name" placeholder="lisbon-site" className="w-56" />
+        <Input id="new-group" name="name" placeholder="magnemite-fleet" className="w-56" />
       </div>
       <Button type="submit" variant="outline">
         <Plus />

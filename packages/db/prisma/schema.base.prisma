@@ -68,7 +68,7 @@ enum RolloutMode {
 }
 
 enum RolloutStatus {
-  PENDING
+  PENDING // waiting for the rollout named in `waitsForId` to succeed
   CANARY // canary jobs dispatched
   SOAKING // canary succeeded, waiting out soakMinutes
   RUNNING // full fleet dispatched
@@ -647,9 +647,11 @@ model DeviceGroup {
 /// question -- what does a box need before it is any use -- and that is a
 /// build somebody picked and has already seen work.
 ///
-/// There is no ordering field. Each build becomes its own rollout and the
-/// scheduler decides when each one runs, so a column promising sequence would
-/// promise something nothing here can deliver.
+/// There is no ordering field. Each build becomes its own rollout, a box takes
+/// one install at a time and the scheduler sends the oldest job first, so they
+/// run in the order they were added -- except the group's MITM, which
+/// `queueJoinInstalls` always puts last, so its config and the hook that
+/// starts it land on a box that already has the game.
 model GroupJoinInstall {
   id      String      @id @default(cuid())
   groupId String
@@ -1332,6 +1334,18 @@ model Rollout {
   createdById String?
   createdBy   User?   @relation(fields: [createdById], references: [id], onDelete: SetNull)
 
+  /// Another rollout this one waits for. While that one has not finished with
+  /// every job a success, this one sits PENDING and the scheduler leaves its
+  /// jobs alone; the moment it has, this one starts.
+  ///
+  /// What a box joining its group installs in order: the game, and only once
+  /// it is on the box, the MITM -- whose config and post-install hook want the
+  /// game already there. A failed prerequisite leaves this waiting rather than
+  /// going ahead without it, and retrying that job is what releases it.
+  waitsForId String?
+  waitsFor   Rollout?  @relation("RolloutWaitsFor", fields: [waitsForId], references: [id], onDelete: SetNull)
+  waiting    Rollout[] @relation("RolloutWaitsFor")
+
   createdAt      DateTime  @default(now())
   startedAt      DateTime?
   canaryPassedAt DateTime?
@@ -1340,6 +1354,7 @@ model Rollout {
   jobs Job[]
 
   @@index([status])
+  @@index([waitsForId])
 }
 
 model Job {

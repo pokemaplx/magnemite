@@ -58,12 +58,12 @@ export type InstanceRow = {
  * "is there room" — the machine's own card answers that — but "which of these
  * is heavy".
  */
-function memoryUsed(device: InstanceRow["device"]): string {
+export function memoryUsed(device: InstanceRow["device"]): string {
   if (!device || device.memTotalBytes === null || device.memAvailableBytes === null) return "—";
   return `${formatBytes(device.memTotalBytes - device.memAvailableBytes)} / ${formatBytes(device.memTotalBytes)}`;
 }
 
-function stateOf(containerState: string | null, deviceId: string | null) {
+export function stateOf(containerState: string | null, deviceId: string | null) {
   if (containerState === null) return { label: "unknown", tone: "secondary" as const };
   if (containerState !== "running") return { label: containerState, tone: "danger" as const };
   // The state worth having a word for: the container is up and its agent has

@@ -18,6 +18,11 @@ export default async function RolloutsPage() {
       },
       createdBy: { select: { email: true, name: true } },
       jobs: { select: { state: true } },
+      waitsFor: {
+        select: {
+          appVersion: { select: { version: true, appTarget: { select: { displayName: true } } } },
+        },
+      },
     },
     orderBy: { createdAt: "desc" },
     take: 50,
@@ -32,6 +37,10 @@ export default async function RolloutsPage() {
       version: rollout.appVersion.version,
       source: rollout.appVersion.source,
       status: rollout.status,
+      waitingFor:
+        rollout.status === "PENDING" && rollout.waitsFor
+          ? `${rollout.waitsFor.appVersion.appTarget.displayName} ${rollout.waitsFor.appVersion.version}`
+          : null,
       mode: rollout.mode,
       forceClean: rollout.forceClean,
       startedBy:

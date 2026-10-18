@@ -6,7 +6,8 @@ import { getHubSettings, prisma } from "@magnemite/db";
 import { bus } from "../bus.js";
 import { env } from "../env.js";
 import { log } from "../log.js";
-import { listConnections } from "../registry.js";
+import { getConnection, listConnections } from "../registry.js";
+import { ACTIVE_STATES } from "./jobs.js";
 import { inMaintenance } from "./maintenance.js";
 
 /**
@@ -149,15 +150,20 @@ export function agentTargetVersion(): string | null {
  * Boxes told to update and not yet seen on the new version. Bounded by
  * the concurrent-agent-updates setting, so a fleet-wide version bump rolls through in
  * batches instead of all at once.
+ *
+ * Each entry remembers which agent process was told -- the `agentStartedAt`
+ * of its hello, null from an agent too old to report one -- because that is
+ * what tells an update still on its way apart from one that is not coming.
  */
-const inFlight = new Map<string, number>();
+type PendingUpdate = { sentAt: number; agentStartedAt: number | null };
+const inFlight = new Map<string, PendingUpdate>();
 /** A box that never comes back releases its slot rather than holding it. */
 const IN_FLIGHT_TTL_MS = 10 * 60 * 1000;
 
 function reapInFlight() {
   const cutoff = Date.now() - IN_FLIGHT_TTL_MS;
-  for (const [deviceId, startedAt] of inFlight) {
-    if (startedAt < cutoff) inFlight.delete(deviceId);
+  for (const [deviceId, pending] of inFlight) {
+    if (pending.sentAt < cutoff) inFlight.delete(deviceId);
   }
 }
 
@@ -171,39 +177,88 @@ export function agentUpdatesInFlight(): number {
 }
 
 /**
+ * Whether an update sent to this box may still be on its way.
+ *
+ * The scheduler holds the box's jobs while it may: the swap ends in a re-exec,
+ * and an install the box had started in the meantime dies with the process.
+ *
+ * "This box" is the agent process that was told, when the agent says which one
+ * it is -- a socket that dropped and came back mid-download is still the same
+ * download. An agent too old to say is judged by its socket instead: an update
+ * sent before that socket connected is over, because a box that reconnected on
+ * its old version was not updated, and holding its jobs until the slot expires
+ * would hold them ten minutes for nothing.
+ */
+export function agentUpdateInFlight(conn: {
+  deviceId: string;
+  connectedAt: number;
+  agentStartedAt: number | null;
+}): boolean {
+  reapInFlight();
+  const pending = inFlight.get(conn.deviceId);
+  if (!pending) return false;
+  if (pending.agentStartedAt !== null && conn.agentStartedAt !== null) {
+    return pending.agentStartedAt === conn.agentStartedAt;
+  }
+  return pending.sentAt >= conn.connectedAt;
+}
+
+/**
  * Decide whether this box should update right now, and send it if so.
  *
  * Called on every hello. The agent itself refuses to swap its binary mid-job,
  * but checking here too keeps a busy box out of the concurrency budget.
  */
 /**
- * Close the open attempt for a box, if there is one. Called when the box comes
- * back on the new version, and when the agent says the swap failed.
+ * Close the open attempts for a box. Called when the box comes back on the new
+ * version, when the agent says the swap failed, and when the hub can tell an
+ * update is not coming.
  *
- * Only the newest open row is closed: an attempt that was never answered stays
- * SENT rather than being retroactively marked as something it was not.
+ * The newest open row gets the outcome. An older one still open is an attempt
+ * that never landed and was overtaken, and is closed as that: left SENT, it
+ * read as "updating" for as long as anyone cared to look, and the next sweep
+ * then closed it as a success -- the eleven-minute "done" beside the
+ * one-second one that had actually done it.
  */
 async function finishAgentUpdate(
   deviceId: string,
   state: "SUCCESS" | "FAILED",
   opts: { version?: string; error?: string } = {},
 ) {
-  const open = await prisma.agentUpdate.findFirst({
+  const [latest, ...older] = await prisma.agentUpdate.findMany({
     where: {
       deviceId,
       state: "SENT",
       ...(opts.version ? { toVersion: opts.version } : {}),
     },
     orderBy: { sentAt: "desc" },
-    select: { id: true },
+    select: { id: true, sentAt: true },
   });
-  if (!open) return;
+  if (!latest) return;
 
   await prisma.agentUpdate.update({
-    where: { id: open.id },
+    where: { id: latest.id },
     data: { state, error: opts.error ?? null, finishedAt: new Date() },
   });
+  if (older.length > 0) {
+    await supersede(
+      deviceId,
+      latest.sentAt,
+      older.map((row) => row.id),
+    );
+  }
   bus.publish({ kind: "device", deviceId });
+}
+
+/**
+ * Close attempts that a later one overtook, as of the moment it did. Only rows
+ * still SENT: one the agent answered keeps the answer it gave.
+ */
+async function supersede(deviceId: string, at: Date, ids?: string[]) {
+  await prisma.agentUpdate.updateMany({
+    where: { deviceId, state: "SENT", ...(ids ? { id: { in: ids } } : {}) },
+    data: { state: "FAILED", error: "never landed; a later attempt was sent", finishedAt: at },
+  });
 }
 
 /** The agent could not swap its binary and said why. */
@@ -230,6 +285,8 @@ export async function maybeUpdateAgent(
     abi: string | null;
     agentVersion: string | null;
     currentJobId: string | null;
+    /** Which agent process this is, from its hello. Null from an old agent. */
+    agentStartedAt: number | null;
   },
   send: (msg: ServerMessage) => void,
 ): Promise<boolean> {
@@ -243,6 +300,35 @@ export async function maybeUpdateAgent(
     );
     if (wasUpdating) log.info({ deviceId: device.id, version: release.version }, "agent updated");
     return false;
+  }
+
+  // An update already out to this box that is not going to land. Neither case
+  // is ever reported by the agent, and both used to hold the slot for the full
+  // ten minutes it lives -- the slot being exactly what stops the box being
+  // told again, so the retry that then worked in a second waited out the lot.
+  const pending = inFlight.get(device.id);
+  if (pending) {
+    const restarted =
+      pending.agentStartedAt !== null &&
+      device.agentStartedAt !== null &&
+      pending.agentStartedAt !== device.agentStartedAt;
+    if (restarted) {
+      // A different agent process is answering, still on the old binary: the
+      // one that was told went down before it swapped. Told again below, now.
+      inFlight.delete(device.id);
+      void finishAgentUpdate(device.id, "FAILED", {
+        error: `the agent restarted on ${device.agentVersion ?? "its old version"} before swapping`,
+      }).catch((err) => log.error({ err, deviceId: device.id }, "could not close agent update"));
+    } else if (device.currentJobId) {
+      // Running a job, and an agent never swaps under one: it set the update
+      // aside, which an agent of this vintage does without a word. Released
+      // so the sweep asks again once the box is idle.
+      inFlight.delete(device.id);
+      void finishAgentUpdate(device.id, "FAILED", {
+        error: "set aside: the box was running a job, and is asked again once it is idle",
+      }).catch((err) => log.error({ err, deviceId: device.id }, "could not close agent update"));
+      return false;
+    }
   }
   if (device.currentJobId) return false;
 
@@ -268,24 +354,41 @@ export async function maybeUpdateAgent(
   // rather than one per box per sweep. The connection cannot answer it either
   // — it is held in memory from the box's hello and would be stale the moment
   // somebody parked the box.
-  const parked = await prisma.device.findUnique({
+  //
+  // The same read asks whether the hub has a job out to the box. The agent's
+  // own word is `currentJobId`, but that is a heartbeat old, and a job sent a
+  // moment ago is one it has not mentioned yet: the agent would defer the
+  // update -- it never swaps under a running install -- and this box would
+  // sit in `inFlight` with nothing coming, its jobs held behind it.
+  const row = await prisma.device.findUnique({
     where: { id: device.id },
-    select: { maintenanceUntil: true },
+    select: {
+      maintenanceUntil: true,
+      jobs: { where: { state: { in: ACTIVE_STATES } }, select: { id: true }, take: 1 },
+    },
   });
-  if (parked && inMaintenance(parked)) return false;
+  if (row && inMaintenance(row)) return false;
+  if (row && row.jobs.length > 0) return false;
+  // And once more after the last await, where nothing can come between the
+  // check and the send: the scheduler's dispatch is the same kind of block,
+  // so one of the two always sees the other.
+  const live = getConnection(device.id);
+  if (live?.currentJobId || live?.pushingConfig) return false;
 
-  inFlight.set(device.id, Date.now());
+  const sentAt = new Date();
+  inFlight.set(device.id, { sentAt: sentAt.getTime(), agentStartedAt: device.agentStartedAt });
   send({ type: "agent_update", url: build.url, sha256: build.sha256, version: release.version });
-  void prisma.agentUpdate
-    .create({
-      data: {
-        deviceId: device.id,
-        fromVersion: device.agentVersion,
-        toVersion: release.version,
-      },
-    })
-    .then(() => bus.publish({ kind: "device", deviceId: device.id }))
-    .catch((err) => log.error({ err, deviceId: device.id }, "could not record agent update"));
+  const toVersion = release.version;
+  void (async () => {
+    // One open attempt per box. Anything still open here never landed -- its
+    // slot expired, or the hub restarted and forgot it -- and this one is what
+    // overtook it.
+    await supersede(device.id, sentAt);
+    await prisma.agentUpdate.create({
+      data: { deviceId: device.id, fromVersion: device.agentVersion, toVersion, sentAt },
+    });
+    bus.publish({ kind: "device", deviceId: device.id });
+  })().catch((err) => log.error({ err, deviceId: device.id }, "could not record agent update"));
   log.info(
     { deviceId: device.id, from: device.agentVersion, to: release.version },
     "agent update sent",
@@ -311,6 +414,7 @@ export function startAgentUpdateSweep() {
           abi: conn.abi,
           agentVersion: conn.agentVersion,
           currentJobId: conn.currentJobId,
+          agentStartedAt: conn.agentStartedAt,
         },
         conn.send,
       ).catch((err) => log.error({ err, deviceId: conn.deviceId }, "agent update check failed"));

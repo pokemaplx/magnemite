@@ -33,6 +33,8 @@ export type RolloutRow = {
   version: string;
   source: VersionSource;
   status: RolloutStatus;
+  /** What a PENDING rollout is waiting on, as "Pokémon GO 0.433.0". */
+  waitingFor: string | null;
   mode: string;
   forceClean: boolean;
   startedBy: string;
@@ -209,6 +211,11 @@ export function RolloutsTable({ rows }: { rows: RolloutRow[] }) {
 
                     <TableCell>
                       <RolloutStatusBadge status={rollout.status} />
+                      {rollout.waitingFor ? (
+                        <div className="mt-1 text-xs text-muted-foreground">
+                          after {rollout.waitingFor}
+                        </div>
+                      ) : null}
                     </TableCell>
                     <TableCell>
                       <div className="flex flex-col gap-1">

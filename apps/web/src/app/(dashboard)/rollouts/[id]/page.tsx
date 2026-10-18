@@ -20,6 +20,12 @@ export default async function RolloutPage({ params }: { params: Promise<{ id: st
     include: {
       appVersion: { include: { appTarget: { select: { packageName: true } } } },
       createdBy: { select: { email: true, name: true } },
+      waitsFor: {
+        select: {
+          id: true,
+          appVersion: { select: { version: true, appTarget: { select: { displayName: true } } } },
+        },
+      },
       jobs: {
         include: {
           device: {
@@ -129,6 +135,18 @@ export default async function RolloutPage({ params }: { params: Promise<{ id: st
         <div className="rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-sm">
           The canary failed, so the rest of the fleet was held back. Fix the problem and retry, or
           resume to push on anyway.
+        </div>
+      ) : null}
+
+      {rollout.status === "PENDING" && rollout.waitsFor ? (
+        <div className="rounded-md border border-border bg-subtle px-3 py-2 text-sm">
+          Waiting for{" "}
+          <Link href={`/rollouts/${rollout.waitsFor.id}`} className="font-medium hover:underline">
+            {rollout.waitsFor.appVersion.appTarget.displayName}{" "}
+            {rollout.waitsFor.appVersion.version}
+          </Link>{" "}
+          to install first. It starts on its own once that has; if it failed, retrying it there is
+          what lets this one go — or start this now, without it.
         </div>
       ) : null}
 

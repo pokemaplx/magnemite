@@ -14,6 +14,7 @@ import { connectionCount, onlineDeviceIds, sendTo } from "../registry.js";
 import { adbKeysFile } from "../services/adbIdentity.js";
 import { cacheVersion, pruneArtifacts } from "../services/artifacts.js";
 import { getScan, startBoxEnroll, startScan } from "../services/boxEnroll.js";
+import { previewConfig, pushConfig } from "../services/configPush.js";
 import { execOnDevice } from "../services/deviceCommands.js";
 import { broadcastWelcome } from "../services/devices.js";
 import { normaliseLogPath, requestBundle, subscribeToLogs } from "../services/deviceLogs.js";
@@ -342,6 +343,43 @@ export async function internalRoutes(app: FastifyInstance) {
       }
     },
   );
+
+  /**
+   * What rewriting this box's MITM config would write, rendered for the box,
+   * and what would stop and start the MITM around it. Operators only, on the
+   * dashboard's side: the content is the MITM's credentials.
+   */
+  app.get<{ Params: { id: string } }>("/internal/devices/:id/config", async (request, reply) => {
+    try {
+      return await previewConfig(request.params.id);
+    } catch (err) {
+      return reply.status(404).send({ error: err instanceof Error ? err.message : String(err) });
+    }
+  });
+
+  /**
+   * Rewrite this box's MITM config and restart the MITM -- no install. The
+   * body's `content` is an edited version, rendered again here; absent, the
+   * group's own template is written. Waits for the box to answer.
+   */
+  app.post<{ Params: { id: string } }>("/internal/devices/:id/config", async (request, reply) => {
+    const body = z
+      .object({
+        content: z
+          .string()
+          .max(256 * 1024)
+          .nullish(),
+      })
+      .safeParse(request.body ?? {});
+    if (!body.success) return reply.status(400).send({ error: "invalid body" });
+
+    try {
+      return await pushConfig(request.params.id, body.data.content ?? null);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      return reply.status(message === "device is offline" ? 409 : 400).send({ error: message });
+    }
+  });
 
   /**
    * Ask a box for its logs and wait for the zip to land. The dashboard hands

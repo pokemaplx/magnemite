@@ -136,6 +136,10 @@ type Agent struct {
 	jobID   string
 	jobStop context.CancelFunc
 
+	// Held for the length of a push_config, so a second one is refused rather
+	// than restarting the scanner in the middle of the first.
+	pushMu sync.Mutex
+
 	// One follow per source, however many dashboards are watching it: the hub
 	// shares a stream between everyone on the same source, and asks for a
 	// second one only when someone is watching something else. Keyed by the
@@ -890,6 +894,15 @@ func (a *Agent) handle(ctx context.Context, data []byte) {
 		}
 		go a.execCommand(msg)
 
+	case "push_config":
+		var msg proto.PushConfig
+		if json.Unmarshal(data, &msg) != nil {
+			return
+		}
+		// Its own goroutine: the hooks around the write can take a while, and
+		// the read loop has to keep taking frames meanwhile.
+		go a.pushConfig(msg)
+
 	case "ping":
 		// The frame-level pong is enough; nothing to do.
 	}
@@ -929,9 +942,9 @@ func (a *Agent) startJob(ctx context.Context, job proto.InstallJob) {
 	a.jobStop = cancel
 	a.jobMu.Unlock()
 
-	// Let the fake box know what version a commit should report.
+	// Let the fake box know what a commit should report.
 	if fake, ok := a.Sys.(*sys.Fake); ok {
-		fake.SetPendingVersion(job.Version)
+		fake.SetPending(job.PackageName, job.Version)
 	}
 
 	go func() {

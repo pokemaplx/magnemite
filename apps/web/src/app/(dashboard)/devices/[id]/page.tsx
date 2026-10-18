@@ -172,6 +172,18 @@ export default async function DevicePage({ params }: { params: Promise<{ id: str
             groups={groups.map((g) => ({ id: g.id, name: g.name }))}
             maintenanceUntil={device.maintenanceUntil?.toISOString() ?? null}
             canScreenshot={hasCapability(device.capabilities, CAPABILITY_SCREENSHOT)}
+            mitm={
+              device.group?.mitmPackageName
+                ? {
+                    label:
+                      device.group.mitmLabel ||
+                      (device.group.mitmPackageName.split(".").pop() ??
+                        device.group.mitmPackageName),
+                    packageName: device.group.mitmPackageName,
+                    configPath: device.group.mitmConfigPath,
+                  }
+                : null
+            }
           />
         ) : null}
       </header>

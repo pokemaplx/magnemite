@@ -19,7 +19,17 @@ GO_IMAGE    ?= golang:1.23-alpine
 # The self-hosted stack. It runs no database of its own: DATABASE_URL in .env
 # points at one you already run, of either engine.
 COMPOSE_FILE ?= deploy/docker-compose.yml
+# Anything this machine needs that the versioned file should not carry -- an
+# extra port, a bind mount, a service of your own. Picked up automatically when
+# it exists, and gitignored, so `git pull` keeps delivering fixes to the file
+# below instead of landing on top of local edits to it. Compose merges the two
+# with the later one winning, and only when both are named: passing -f at all
+# turns off its own search for an override next to the base.
+COMPOSE_OVERRIDE := deploy/compose.override.yml
 COMPOSE     := docker compose --env-file .env -f $(COMPOSE_FILE)
+ifneq ($(wildcard $(COMPOSE_OVERRIDE)),)
+COMPOSE     := $(COMPOSE) -f $(COMPOSE_OVERRIDE)
+endif
 ROOT        := $(shell pwd)
 LDFLAGS     := -s -w -X main.version=$(VERSION)
 DOCKER_GO   := docker run --rm -v "$(ROOT)/agent":/src -w /src $(GO_IMAGE)

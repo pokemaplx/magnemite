@@ -3,7 +3,13 @@
 import { revalidatePath } from "next/cache";
 import { prisma } from "@magnemite/db";
 import { requireOperator } from "@/lib/session";
-import { type MaintenanceResult, type RotomDeviceAction, hub } from "@/lib/hub";
+import {
+  type DeviceConfigPreview,
+  type DeviceConfigPush,
+  type MaintenanceResult,
+  type RotomDeviceAction,
+  hub,
+} from "@/lib/hub";
 import {
   planFromNames,
   planRename,
@@ -242,6 +248,67 @@ export async function execOnDevice(
     output: result.output,
     message: result.ok ? "Command ran." : (result.error ?? "The command failed."),
   };
+}
+
+/**
+ * What rewriting the box's MITM config would write.
+ *
+ * Operators only, like Execute itself: the rendered file is the MITM's
+ * credentials, and the group form already keeps the template from a viewer.
+ */
+export async function previewDeviceConfig(
+  deviceId: string,
+): Promise<ActionState & { preview?: DeviceConfigPreview }> {
+  await requireOperator();
+  try {
+    return { ok: true, preview: await hub.previewDeviceConfig(deviceId) };
+  } catch (err) {
+    return { error: toMessage(err) };
+  }
+}
+
+/**
+ * Write the MITM's config to the box and restart the MITM -- no install.
+ *
+ * `content` is sent only when somebody edited it; otherwise the hub writes the
+ * group's own template, rendered for the box, which is the same file it would
+ * have written with the next install.
+ *
+ * Audited like Execute, but with the path and the hash and never the content:
+ * that is the MITM's credentials, and keeping them out of the audit log is
+ * the reason this is not a command typed into Execute.
+ */
+export async function pushDeviceConfig(
+  deviceId: string,
+  content: string | null,
+): Promise<ActionState & { result?: DeviceConfigPush }> {
+  const user = await requireOperator();
+
+  let result: DeviceConfigPush;
+  try {
+    result = await hub.pushDeviceConfig(deviceId, content);
+  } catch (err) {
+    return { error: toMessage(err) };
+  }
+
+  await prisma.auditLog.create({
+    data: {
+      userId: user.id,
+      userEmail: user.email,
+      action: "device.config.push",
+      targetType: "Device",
+      targetId: deviceId,
+      meta: {
+        path: result.path,
+        sha256: result.sha256,
+        ok: result.ok,
+        edited: content !== null,
+        hookError: result.hookError,
+      },
+    },
+  });
+
+  return { ok: true, result };
 }
 
 /**

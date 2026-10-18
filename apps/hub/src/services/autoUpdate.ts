@@ -24,6 +24,11 @@ export async function runAutoUpdate(appTargetId: string) {
     where: {
       appVersion: { appTargetId },
       status: { in: [...ACTIVE_ROLLOUT_STATUSES] },
+      // Except one waiting on another: that is a single new box's MITM queued
+      // behind its game, and one whose game failed waits until somebody
+      // retries it -- which must not hold this app's updates back across the
+      // whole fleet for as long as nobody does.
+      NOT: { status: "PENDING", waitsForId: { not: null } },
     },
   });
   if (active > 0) return null;

@@ -65,6 +65,8 @@ export async function updateHubSettings(
 
   const maxConcurrentJobs = int("maxConcurrentJobs", 1);
   const jobStallTimeoutSeconds = int("jobStallTimeoutSeconds", 1);
+  // Zero is a real answer: install the moment the box enrols.
+  const joinInstallDelaySeconds = int("joinInstallDelaySeconds", 0);
   const heartbeatSeconds = int("heartbeatSeconds", 5);
   const agentUpdateConcurrency = int("agentUpdateConcurrency", 1);
   // Three missed 20-second heartbeats is the floor that stops a box flapping
@@ -74,13 +76,14 @@ export async function updateHubSettings(
   if (
     maxConcurrentJobs === null ||
     jobStallTimeoutSeconds === null ||
+    joinInstallDelaySeconds === null ||
     agentUpdateConcurrency === null ||
     deviceOfflineTimeoutSeconds === null ||
     heartbeatSeconds === null
   ) {
     return {
       error:
-        "Every field needs a whole number — 1 or more. The heartbeat starts at 5 and the offline timeout at 30.",
+        "Every field needs a whole number — 1 or more, or 0 for the join install wait. The heartbeat starts at 5 and the offline timeout at 30.",
     };
   }
 
@@ -96,6 +99,7 @@ export async function updateHubSettings(
   const patch: Partial<HubSettingsValues> = {
     maxConcurrentJobs,
     jobStallTimeoutSeconds,
+    joinInstallDelaySeconds,
     heartbeatSeconds,
     agentUpdateConcurrency,
     deviceOfflineTimeoutSeconds,

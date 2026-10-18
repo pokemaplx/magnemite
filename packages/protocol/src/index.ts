@@ -442,6 +442,20 @@ export const execResultSchema = z.object({
   error: z.string().nullish(),
 });
 
+/**
+ * How a `push_config` went. `ok` is the write: the file is in place, with the
+ * sha256 of what was read back off the box. A hook that failed is said apart,
+ * because the file can be in place and the scanner still stopped.
+ */
+export const pushConfigResultSchema = z.object({
+  type: z.literal("push_config_result"),
+  requestId: z.string(),
+  ok: z.boolean(),
+  sha256: z.string().nullish(),
+  error: z.string().nullish(),
+  hookError: z.string().nullish(),
+});
+
 export const pongSchema = z.object({ type: z.literal("pong") });
 
 /**
@@ -528,6 +542,7 @@ export const agentMessageSchema = z.discriminatedUnion("type", [
   screenshotResultSchema,
   logLinesSchema,
   execResultSchema,
+  pushConfigResultSchema,
   pongSchema,
   hostConvergeResultSchema,
   hostBootstrapResultSchema,
@@ -737,6 +752,29 @@ export const execCommandSchema = z.object({
 });
 
 /**
+ * A MITM's config, rewritten on a running box with nothing installed.
+ *
+ * `preHook` stops what reads the file, the file goes in exactly as an install
+ * writes it -- temp file, rename, read back -- and `postHook` starts it again.
+ * The hooks are the point: a running scanner does not re-read a file it has
+ * already read, which is what retired the first `write_config`, a push of the
+ * file and nothing else. These are the group's own install hooks, so the
+ * restart is the one every install already does.
+ *
+ * A message rather than a command typed into Execute because of what is in the
+ * file -- an aegis config holds `authBearer` and `deviceAuthToken` -- and a
+ * command lands in the audit log, the hub's log and the box's own agent.log.
+ * Neither side logs this one's content.
+ */
+export const pushConfigSchema = z.object({
+  type: z.literal("push_config"),
+  requestId: z.string(),
+  config: deviceConfigFileSchema,
+  preHook: z.string().nullish(),
+  postHook: z.string().nullish(),
+});
+
+/**
  * Names the agent puts in `hello.capabilities`.
  *
  * Still `write_config` after the message of that name was removed: it says the
@@ -766,6 +804,13 @@ export const CAPABILITY_SCREENSHOT = "screenshot";
  * request times out, and the operator is told nothing.
  */
 export const CAPABILITY_BOX_ADB = "box_adb";
+
+/**
+ * The agent knows `push_config`. Checked so the dashboard can say the box's
+ * agent is too old rather than send a message the agent's type switch drops,
+ * and wait out the timeout to learn nothing.
+ */
+export const CAPABILITY_PUSH_CONFIG = "push_config";
 
 /**
  * Does this box's `hello.capabilities` claim one?
@@ -963,6 +1008,7 @@ export const serverMessageSchema = z.discriminatedUnion("type", [
   logStreamStartSchema,
   logStreamStopSchema,
   execCommandSchema,
+  pushConfigSchema,
   pingSchema,
   hostConvergeSchema,
   hostBootstrapSchema,

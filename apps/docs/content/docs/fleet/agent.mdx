@@ -125,6 +125,18 @@ A box reporting a different `agentVersion`, not running a job, is sent an
 `agent_update` with the URL, sha256 and version. Boxes on the target are left
 alone.
 
+This is decided before the box is handed any job, and a box told to update
+gets none until it is back on the new version: the swap ends in a re-exec, and
+an install started in the meantime would die with the old process. On a fresh
+container whose image carries an older agent, that is the first thing it does.
+
+An update that is not going to land is noticed rather than waited out. A box
+that comes back as a **new agent process still on its old version** lost it, and
+is told again at once; one found **running a job** set it aside — an agent
+never swaps under an install — and is told again once it is idle. Either way the
+attempt is closed as failed, saying which, and an attempt overtaken by a later
+one is closed as that instead of being left `updating`.
+
 </Step>
 
 <Step>

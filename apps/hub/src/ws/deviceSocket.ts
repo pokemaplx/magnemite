@@ -8,6 +8,7 @@ import { bus } from "../bus.js";
 import { log } from "../log.js";
 import { getConnection, isOnline, register, unregister } from "../registry.js";
 import { maybeUpdateAgent, recordAgentUpdateFailure } from "../services/agentRelease.js";
+import { resolveConfigPush } from "../services/configPush.js";
 import { resolveExec } from "../services/deviceCommands.js";
 import { dropStreams, failBundle, publishLogLines, rearmStreams } from "../services/deviceLogs.js";
 import { failScreenshot } from "../services/deviceScreenshots.js";
@@ -118,9 +119,14 @@ async function onConnection(ws: WebSocket, req: IncomingMessage, deviceId: strin
     agentVersion: null,
     abi: null,
     sessionId: null,
+    agentStartedAt: null,
     connectedAt: Date.now(),
     lastSeenAt: Date.now(),
     currentJobId: null,
+    // Set by the hello, once it has been applied. Until then the scheduler
+    // leaves this socket alone.
+    readyAt: null,
+    pushingConfig: false,
     send,
   });
 
@@ -219,8 +225,9 @@ async function onConnection(ws: WebSocket, req: IncomingMessage, deviceId: strin
     log.info({ deviceId, code, reason: reason.toString() }, "device disconnected");
   });
 
-  // The box may have been offline while a rollout was created for it.
-  nudge();
+  // No nudge here, though the box may have been offline while a rollout was
+  // created for it: nothing is dispatched down this socket until its hello has
+  // been applied, so the nudge that matters is the one at the end of the hello.
 }
 
 async function handleMessage(ws: WebSocket, deviceId: string, ip: string | null, raw: string) {
@@ -256,34 +263,65 @@ async function handleMessage(ws: WebSocket, deviceId: string, ip: string | null,
         conn.agentVersion = msg.agentVersion;
         conn.abi = msg.device.abi ?? null;
         conn.sessionId = msg.device.sessionId ?? null;
+        conn.agentStartedAt = msg.device.agentStartedAt ?? null;
         conn.currentJobId = msg.currentJobId ?? null;
       }
 
-      await markOnline(deviceId, {
-        agentVersion: msg.agentVersion,
-        publicIp: ip,
-        info: msg.device,
-        capabilities: msg.capabilities,
-      });
-      await applyMetrics(deviceId, msg.metrics);
-      // Absent from every box. A machine's own readings went through
-      // applyMetrics above, like any Device's; this is the half only a host
-      // has -- what docker is, and what containers it is holding.
-      if (msg.host) await applyHostReport(deviceId, msg.host);
-      await reconcileJobs(deviceId, msg.currentJobId ?? null, (m) => ws.send(JSON.stringify(m)));
-      // A box on an older binary than the hub ships gets told to update
-      // itself. It re-execs and comes straight back with a new hello, which
-      // is where the update is confirmed.
-      void maybeUpdateAgent(
-        {
-          id: deviceId,
-          abi: msg.device.abi ?? null,
+      try {
+        await markOnline(deviceId, {
           agentVersion: msg.agentVersion,
-          currentJobId: msg.currentJobId ?? null,
-        },
-        (m) => ws.send(JSON.stringify(m)),
-      ).catch((err) => log.error({ err, deviceId }, "agent update check failed"));
-      nudge();
+          publicIp: ip,
+          info: msg.device,
+          capabilities: msg.capabilities,
+        });
+        await applyMetrics(deviceId, msg.metrics);
+        // Absent from every box. A machine's own readings went through
+        // applyMetrics above, like any Device's; this is the half only a host
+        // has -- what docker is, and what containers it is holding.
+        if (msg.host) await applyHostReport(deviceId, msg.host);
+        await reconcileJobs(deviceId, msg.currentJobId ?? null, (m) => ws.send(JSON.stringify(m)));
+        // A box on an older binary than the hub ships gets told to update
+        // itself. It re-execs and comes straight back with a new hello, which
+        // is where the update is confirmed.
+        //
+        // Awaited, and before the box is marked ready below, so the update and
+        // the first install cannot cross. A fresh container whose image
+        // carries an older agent is told to update on this very hello; had a
+        // job gone out alongside it, the re-exec would have killed the install
+        // half way, and the hello after it would have re-queued the job as one
+        // the box had never heard of. Decided first, an update in flight holds
+        // the box's jobs (see the scheduler) and a box with none to do takes
+        // its jobs now.
+        await maybeUpdateAgent(
+          {
+            id: deviceId,
+            abi: msg.device.abi ?? null,
+            agentVersion: msg.agentVersion,
+            currentJobId: msg.currentJobId ?? null,
+            agentStartedAt: msg.device.agentStartedAt ?? null,
+          },
+          (m) => ws.send(JSON.stringify(m)),
+        ).catch((err) => log.error({ err, deviceId }, "agent update check failed"));
+      } finally {
+        // Only now may the scheduler hand this socket a job: the row carries
+        // what this agent can do, and the reconcile above ran against a list
+        // that nothing on this socket could have added to. See `readyAt`.
+        //
+        // In a `finally` because the hello is never sent twice: a database
+        // blip half way through it would otherwise leave the box taking no
+        // jobs at all until it next reconnected, which can be days.
+        //
+        // Looked up again rather than taken from the top of this case: a box
+        // that reconnected while this hello was being applied has a newer
+        // socket whose own hello has not been, and marking *that* one ready
+        // would reopen exactly the window this closes.
+        const live = getConnection(deviceId);
+        if (live && live.socket === ws) live.readyAt = Date.now();
+
+        // The box may have been offline while a rollout was created for it,
+        // and this is the first moment it can be handed one.
+        nudge();
+      }
       break;
     }
 
@@ -326,6 +364,13 @@ async function handleMessage(ws: WebSocket, deviceId: string, ip: string | null,
     }
 
     case "job_result": {
+      // The box is free again, so its next job need not wait a heartbeat for
+      // the agent to say so. Before the ownership check rather than inside it:
+      // a result for a job the hub has since deleted still frees the box.
+      const conn = getConnection(deviceId);
+      if (conn && conn.socket === ws && conn.currentJobId === msg.jobId) {
+        conn.currentJobId = null;
+      }
       await assertJobBelongsTo(deviceId, msg.jobId, async () => {
         await completeJob(msg.jobId, {
           ok: msg.ok,
@@ -359,6 +404,16 @@ async function handleMessage(ws: WebSocket, deviceId: string, ip: string | null,
       break;
     }
 
+    case "push_config_result": {
+      resolveConfigPush(msg.requestId, {
+        ok: msg.ok,
+        sha256: msg.sha256 ?? null,
+        error: msg.error ?? null,
+        hookError: msg.hookError ?? null,
+      });
+      break;
+    }
+
     case "log_lines": {
       publishLogLines(deviceId, msg.streamId, { lines: msg.lines, dropped: msg.dropped });
       break;
@@ -385,7 +440,12 @@ async function handleMessage(ws: WebSocket, deviceId: string, ip: string | null,
     case "agent_update_result": {
       // Only failures are reported. A successful swap is confirmed by the
       // hello the new binary sends, not by a frame from the old one.
-      if (!msg.ok) await recordAgentUpdateFailure(deviceId, msg.version, msg.error ?? null);
+      if (!msg.ok) {
+        await recordAgentUpdateFailure(deviceId, msg.version, msg.error ?? null);
+        // Its jobs were held for an update that is not coming, so they go
+        // now rather than on the next tick.
+        nudge();
+      }
       break;
     }
 
@@ -410,6 +470,12 @@ async function assertJobBelongsTo(deviceId: string, jobId: string, fn: () => Pro
  * The two drift whenever one side restarts: a hub restart loses nothing, but
  * a box that reboots mid-install comes back with no job while the row still
  * says INSTALLING.
+ *
+ * Every active job this finds was dispatched down an *earlier* socket, which
+ * is what makes "the agent has not heard of it" true. That holds because the
+ * scheduler sends nothing down a socket before its hello is applied -- when it
+ * could, this re-queued the job it had just sent, read against a hello the box
+ * wrote before that job reached it, and the box got the same job twice.
  */
 async function reconcileJobs(
   deviceId: string,
