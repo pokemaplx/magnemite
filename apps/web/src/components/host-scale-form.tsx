@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo, useState, useTransition } from "react";
+import { type ReactNode, useMemo, useState, useTransition } from "react";
 import { MoreHorizontal, RefreshCw, Wrench } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -77,6 +77,26 @@ function WhyZero({
   }
 
   return null;
+}
+
+/**
+ * A label over an input, in a row that lines its fields up on their bottom
+ * edge.
+ *
+ * The input gets a box of its own height because password managers put their
+ * in-field icon *next to* it, as a sibling in the DOM. Left in the column, that
+ * sibling took the column's spacing, made the one field holding it taller than
+ * the rest, and `items-end` lifted that field out of line with its neighbours
+ * and the Save button. Inside a fixed-height box, whatever lands there cannot
+ * change the column.
+ */
+function Field({ id, label, children }: { id: string; label: string; children: ReactNode }) {
+  return (
+    <div className="space-y-1.5">
+      <Label htmlFor={id}>{label}</Label>
+      <div className="h-9">{children}</div>
+    </div>
+  );
 }
 
 export type Capacity = {
@@ -288,8 +308,7 @@ export function HostScaleForm({
       </CardHeader>
       <CardContent className="space-y-4">
         <div className="flex flex-wrap items-end gap-3">
-          <div className="space-y-1.5">
-            <Label htmlFor="instances">Instances</Label>
+          <Field id="instances" label="Instances">
             <Input
               id="instances"
               className="w-24 tabular-nums"
@@ -298,9 +317,8 @@ export function HostScaleForm({
               onChange={(event) => setCount(event.target.value)}
               disabled={!canOperate || pending}
             />
-          </div>
-          <div className="space-y-1.5">
-            <Label htmlFor="workers">Workers each</Label>
+          </Field>
+          <Field id="workers" label="Workers each">
             <Input
               id="workers"
               className="w-24 tabular-nums"
@@ -309,9 +327,8 @@ export function HostScaleForm({
               onChange={(event) => setWorkerCount(event.target.value)}
               disabled={!canOperate || pending}
             />
-          </div>
-          <div className="space-y-1.5">
-            <Label htmlFor="memLimit">Memory each</Label>
+          </Field>
+          <Field id="memLimit" label="Memory each">
             <Input
               id="memLimit"
               className="w-28 tabular-nums"
@@ -323,7 +340,7 @@ export function HostScaleForm({
               onChange={(event) => setMemLimit(event.target.value)}
               disabled={!canOperate || pending}
             />
-          </div>
+          </Field>
           {canOperate ? (
             <Button
               onClick={() =>

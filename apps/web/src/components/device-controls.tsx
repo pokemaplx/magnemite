@@ -16,6 +16,7 @@ import {
   Wrench,
 } from "lucide-react";
 import { deleteDevice, setDeviceApproval, setDeviceGroup } from "@/actions/devices";
+import { removeInstance } from "@/actions/hosts";
 import { DeviceActionDialogs, useLogcat, type DeviceTarget } from "@/components/device-actions";
 import { useHotkey } from "@/components/shortcuts/hotkeys";
 import { Button } from "@/components/ui/button";
@@ -43,6 +44,7 @@ import {
   type DeviceAction,
   type DeviceCommand,
 } from "@/lib/device-commands";
+import { FORGET_INSTANCE_DESCRIPTION, REMOVE_INSTANCE_DESCRIPTION } from "@/lib/instance-removal";
 import type { ExecMitm } from "@/lib/mitm-columns";
 import { primaryKey } from "@/lib/shortcuts";
 
@@ -56,6 +58,7 @@ export function DeviceControls({
   maintenanceUntil,
   canScreenshot,
   mitm,
+  instance,
 }: {
   deviceId: string;
   name: string;
@@ -78,6 +81,16 @@ export function DeviceControls({
    * which is the MITM's credentials.
    */
   mitm: ExecMitm | null;
+  /**
+   * The Redroid container this box is, or null for hardware. Removing one is
+   * the machine's job, not this row's: deleting the row would leave the
+   * container running with a token that no longer works.
+   *
+   * Once removed it is only a row waiting for its index to come back, so the
+   * one thing left to do from here is forget it — the machine's table lists
+   * present instances only, and would not offer it.
+   */
+  instance: { id: string; hostId: string; index: number; present: boolean } | null;
 }) {
   const router = useRouter();
   const pathname = usePathname();
@@ -89,6 +102,32 @@ export function DeviceControls({
   const logcat = useLogcat();
 
   const parked = maintenanceUntil !== null && new Date(maintenanceUntil).getTime() > Date.now();
+  const removal = instance
+    ? instance.present
+      ? {
+          label: "Remove instance",
+          title: `Remove instance ${instance.index}?`,
+          description: REMOVE_INSTANCE_DESCRIPTION,
+          remove: () => removeInstance(instance.id, false),
+          // Back to the machine, where the instance it no longer runs is the
+          // thing to see. The row stays, but nothing on this page acts on it.
+          after: `/hosts/${instance.hostId}`,
+        }
+      : {
+          label: "Forget instance",
+          title: `Forget instance ${instance.index}?`,
+          description: FORGET_INSTANCE_DESCRIPTION,
+          remove: () => removeInstance(instance.id, true),
+          after: `/hosts/${instance.hostId}`,
+        }
+    : {
+        label: "Remove device",
+        title: `Remove ${name}?`,
+        description:
+          "Its token stops working immediately and its update history is deleted. The box itself is untouched — it will keep retrying until you re-enroll it or remove the Magisk module.",
+        remove: () => deleteDevice(deviceId),
+        after: "/",
+      };
   const target: DeviceTarget = {
     id: deviceId,
     name,
@@ -252,7 +291,7 @@ export function DeviceControls({
 
             <DropdownMenuItem destructive onSelect={() => setConfirmDelete(true)}>
               <Trash2 />
-              Remove device
+              {removal.label}
             </DropdownMenuItem>
           </DropdownMenuContent>
         </DropdownMenu>
@@ -268,12 +307,8 @@ export function DeviceControls({
       <Dialog open={confirmDelete} onOpenChange={setConfirmDelete}>
         <DialogContent className="max-w-md">
           <DialogHeader>
-            <DialogTitle>Remove {name}?</DialogTitle>
-            <DialogDescription>
-              Its token stops working immediately and its update history is deleted. The box itself
-              is untouched — it will keep retrying until you re-enroll it or remove the Magisk
-              module.
-            </DialogDescription>
+            <DialogTitle>{removal.title}</DialogTitle>
+            <DialogDescription>{removal.description}</DialogDescription>
           </DialogHeader>
           <DialogFooter>
             <Button variant="ghost" onClick={() => setConfirmDelete(false)}>
@@ -282,14 +317,9 @@ export function DeviceControls({
             <Button
               variant="destructive"
               disabled={pending}
-              onClick={() =>
-                run(
-                  () => deleteDevice(deviceId),
-                  () => router.push("/"),
-                )
-              }
+              onClick={() => run(removal.remove, () => router.push(removal.after))}
             >
-              Remove device
+              {removal.label}
             </Button>
           </DialogFooter>
         </DialogContent>

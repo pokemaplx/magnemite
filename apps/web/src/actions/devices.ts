@@ -644,13 +644,23 @@ export async function syncRotom(): Promise<ActionState> {
  * from ever being added again. Not reachable from the UI, where the fleet
  * lists boxes and a machine's device page redirects to `/hosts`, but this is a
  * server action and therefore an endpoint.
+ *
+ * Hardware only, for the same reason. A Redroid box deleted here would leave
+ * its container running on the machine with a token that no longer works, and
+ * an instance row pointing at nothing; `removeInstance` is what takes one away.
  */
 export async function deleteDevice(deviceId: string): Promise<ActionState> {
   const user = await requireOperator();
-  const device = await prisma.device.findUnique({ where: { id: deviceId } });
+  const device = await prisma.device.findUnique({
+    where: { id: deviceId },
+    include: { redroidInstance: { select: { id: true } } },
+  });
   if (!device) return { error: "Device not found." };
   if (device.kind === "HOST") {
     return { error: "That is a machine. Remove it from its own page, so its containers go too." };
+  }
+  if (device.redroidInstance) {
+    return { error: "That is a Redroid instance. Remove it as one, so its container goes too." };
   }
 
   await prisma.device.delete({ where: { id: deviceId } });

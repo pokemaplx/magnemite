@@ -38,6 +38,9 @@ export default async function DevicePage({ params }: { params: Promise<{ id: str
       where: { id },
       include: {
         group: true,
+        // Set when the box is a Redroid container, which changes what removing
+        // it means: the container is the machine's to destroy, not this row's.
+        redroidInstance: { select: { id: true, hostId: true, index: true, present: true } },
         packages: { orderBy: { packageName: "asc" } },
         agentUpdates: {
           orderBy: { sentAt: "desc" },
@@ -175,6 +178,7 @@ export default async function DevicePage({ params }: { params: Promise<{ id: str
             maintenanceUntil={device.maintenanceUntil?.toISOString() ?? null}
             canScreenshot={hasCapability(device.capabilities, CAPABILITY_SCREENSHOT)}
             mitm={device.group ? execMitm(device.group) : null}
+            instance={device.redroidInstance}
           />
         ) : null}
       </header>

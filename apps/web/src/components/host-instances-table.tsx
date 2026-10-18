@@ -20,6 +20,7 @@ import { RelativeTime } from "@/components/relative-time";
 import { InstanceSetup } from "@/components/instance-setup";
 import { removeInstance, setHostGroup, setHostNameTemplate } from "@/actions/hosts";
 import { formatBytes } from "@/lib/format";
+import { FORGET_INSTANCE_DESCRIPTION, REMOVE_INSTANCE_DESCRIPTION } from "@/lib/instance-removal";
 import type { SetupView } from "@/lib/instance-setup";
 
 export type InstanceRow = {
@@ -290,11 +291,7 @@ export function HostInstancesTable({
             ? `Forget instance ${doomed.row.index}?`
             : `Remove instance ${doomed?.row.index}?`
         }
-        description={
-          doomed?.forget
-            ? "The container, its /data volume and the box's row all go. Its history, its name and its identity go with them, and re-adding this index later creates a new box."
-            : "The container goes. Its volume and the box's row stay, so re-adding this index brings the same box back with everything it had. Any job it is running is cancelled first."
-        }
+        description={doomed?.forget ? FORGET_INSTANCE_DESCRIPTION : REMOVE_INSTANCE_DESCRIPTION}
         confirmLabel={doomed?.forget ? "Forget it" : "Remove it"}
         pendingLabel={doomed?.forget ? "Forgetting…" : "Removing…"}
         pending={pending}
