@@ -2,6 +2,7 @@ import { prisma } from "@magnemite/db";
 import { bus } from "../../bus.js";
 import { log } from "../../log.js";
 import { runAutoUpdate } from "../autoUpdate.js";
+import { announceBuildsDiscovered, noteSourcePass } from "../fleetEvents.js";
 import { pollFeed } from "./feed.js";
 import type { DiscoveredVersion } from "./types.js";
 
@@ -177,6 +178,9 @@ export async function pollAllSources(only?: ReadonlySet<string>): Promise<PollSu
       }
 
       let discovered = 0;
+      // What this pass created for this target, announced once below rather
+      // than per build: a source added today lists years of releases.
+      const builds: { id: string; version: string }[] = [];
       for (const item of dedupe(found)) {
         const existing = await prisma.appVersion.findUnique({
           where: {
@@ -206,6 +210,7 @@ export async function pollAllSources(only?: ReadonlySet<string>): Promise<PollSu
             },
           });
           discovered += 1;
+          builds.push({ id: created.id, version: created.version });
           bus.publish({ kind: "version", versionId: created.id });
           log.info(
             { target: target.packageName, version: item.version, feedId: item.feedId },
@@ -274,6 +279,9 @@ export async function pollAllSources(only?: ReadonlySet<string>): Promise<PollSu
 
       discoveredTotal += discovered;
       if (discovered > 0) log.info({ target: target.packageName, discovered }, "poll complete");
+      // Before auto-update runs, so "there is a new build" arrives ahead of
+      // "auto-update is rolling it out" rather than after it.
+      announceBuildsDiscovered(target, builds);
 
       try {
         await runAutoUpdate(target.id);
@@ -281,7 +289,13 @@ export async function pollAllSources(only?: ReadonlySet<string>): Promise<PollSu
         log.error({ err, target: target.packageName }, "auto-update check failed");
       }
     }
-    for (const [feedId, stat] of pass) pollStats.set(feedId, stat);
+    for (const [feedId, stat] of pass) {
+      // Whether a source has started failing is a question about passes, not
+      // about one target's read of it -- which is why it is asked here, once
+      // per feed, rather than inside the loop above.
+      noteSourcePass({ id: feedId, name: stat.name }, stat.ok, stat.error);
+      pollStats.set(feedId, stat);
+    }
 
     return {
       ran: true,

@@ -7,6 +7,7 @@ import {
 } from "@magnemite/db";
 import { bus } from "../bus.js";
 import { log } from "../log.js";
+import { announceRolloutPaused, announceRolloutSettled } from "./fleetEvents.js";
 
 /** States the agent moves through while it is actually working on a job. */
 export const ACTIVE_STATES: JobState[] = [
@@ -356,12 +357,25 @@ export async function recomputeRollout(rolloutId: string) {
     data.finishedAt = new Date();
   }
 
-  if (status !== rollout.status || Object.keys(data).length > 0) {
-    await prisma.rollout.update({ where: { id: rolloutId }, data: { ...data, status } });
-    bus.publish({ kind: "rollout", rolloutId });
-  }
+  if (status === rollout.status && Object.keys(data).length === 0) return;
 
-  if (status === "COMPLETED" && rolloutSucceeded({ status, jobs })) {
-    await releaseWaiting(rolloutId);
+  // A compare-and-set on the status read above, not a plain write. Two jobs
+  // that finish at the same moment both get here having both seen every job
+  // done, and a plain write let both of them complete the rollout -- releasing
+  // what waited on it twice, and announcing it twice. It could also put back a
+  // status `cancelRollout` had just replaced. The call that loses the race
+  // changes nothing: whoever moved the rollout first owns what follows.
+  const { count } = await prisma.rollout.updateMany({
+    where: { id: rolloutId, status: rollout.status },
+    data: { ...data, status },
+  });
+  if (count === 0) return;
+  bus.publish({ kind: "rollout", rolloutId });
+
+  if (status === "COMPLETED") {
+    announceRolloutSettled({ ...rollout, jobs });
+    if (rolloutSucceeded({ status, jobs })) await releaseWaiting(rolloutId);
+  } else if (status === "PAUSED" && rollout.status === "CANARY") {
+    announceRolloutPaused(rolloutId);
   }
 }

@@ -9,7 +9,7 @@ import {
   type ReactNode,
   type RefObject,
 } from "react";
-import { useRouter } from "next/navigation";
+import { useRouter } from "@bprogress/next/app";
 import { NAV_LINKS, type NavLink } from "@/lib/nav";
 import {
   SHORTCUT_IDS,

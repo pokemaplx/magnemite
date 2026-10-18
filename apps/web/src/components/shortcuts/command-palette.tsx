@@ -1,7 +1,8 @@
 "use client";
 
 import { useEffect, useRef, useState, type ReactNode } from "react";
-import { usePathname, useRouter } from "next/navigation";
+import { useRouter } from "@bprogress/next/app";
+import { usePathname } from "next/navigation";
 import { useTheme } from "next-themes";
 import { Command } from "cmdk";
 import {
@@ -565,7 +566,7 @@ export function CommandPalette() {
         data-palette=""
         showClose={false}
         aria-describedby={undefined}
-        className="top-[12vh] w-[calc(100%-2rem)] max-w-xl translate-y-0 overflow-hidden p-0"
+        className="top-[12vh] max-w-xl translate-y-0 overflow-hidden p-0"
         onEscapeKeyDown={(event) => {
           // Escape inside a box's list steps back out, the way Backspace does.
           if (page.kind === "device") {

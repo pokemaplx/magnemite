@@ -21,9 +21,15 @@ const DialogContent = React.forwardRef<
     <DialogPrimitive.Content
       ref={ref}
       className={cn(
-        "fixed left-1/2 top-1/2 z-50 w-full max-w-lg -translate-x-1/2 -translate-y-1/2",
+        // A 1rem gutter each side rather than `w-full`: on a phone a dialog
+        // flush with both edges reads as a new page, not a layer over this one.
+        "fixed left-1/2 top-1/2 z-50 w-[calc(100%-2rem)] max-w-lg -translate-x-1/2 -translate-y-1/2",
         "rounded-xl border border-border bg-card p-6 shadow-2xl",
-        "max-h-[85vh] overflow-y-auto",
+        // `dvh`, not `vh`: on a phone `vh` counts the height behind the URL
+        // bar, and the bottom of a tall dialog went under it. No bounce: the
+        // page under it is locked, so there is nothing to chain to, and iOS
+        // otherwise drags the contents off past the dialog's edges.
+        "max-h-[85dvh] overflow-y-auto overscroll-none",
         className,
       )}
       {...props}

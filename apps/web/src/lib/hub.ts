@@ -1,4 +1,5 @@
 import "server-only";
+import type { NotifyChannel } from "@magnemite/db";
 
 /**
  * Client for the hub's /internal API. Reads go straight to the database from
@@ -274,9 +275,15 @@ export const hub = {
    * them. Optional because a hub from an older deploy does not send it.
    */
   refreshSettings: () => call<{ ok: boolean; pushed?: number }>("/internal/settings"),
-  /** Prove every configured channel, ignoring the level filters and the dedupe window. */
-  testAlert: () =>
-    call<{ ok: boolean; error: string | null; detail: string | null }>("/internal/monitor/test"),
+  /**
+   * Prove one channel -- or, with none named, every channel that is set up --
+   * ignoring routing and the dedupe window.
+   */
+  testNotification: (channel?: NotifyChannel) =>
+    call<{ ok: boolean; error: string | null; detail: string | null }>(
+      "/internal/notify/test",
+      channel ? { channel } : {},
+    ),
   /** Force an evaluation pass rather than waiting for the next tick. */
   runMonitor: () => call<{ ok: boolean }>("/internal/monitor/run"),
   pollSources: () =>

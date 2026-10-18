@@ -1,8 +1,8 @@
 "use client";
 
 import { useActionState, useEffect, useState, useTransition } from "react";
-import { BellRing, Send } from "lucide-react";
-import { sendTestAlert, updateMonitorSettings } from "@/actions/monitoring";
+import { BellRing } from "lucide-react";
+import { updateNotificationSettings } from "@/actions/notifications";
 import { deletePushSubscription, savePushSubscription } from "@/actions/push";
 import type { ActionState } from "@/actions/rollouts";
 import { Button } from "@/components/ui/button";
@@ -10,22 +10,29 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/com
 import { Label } from "@/components/ui/label";
 import { SaveButton } from "@/components/ui/save-button";
 import { Switch } from "@/components/ui/switch";
-import type { MonitorSettingsRow } from "@/components/settings/monitoring-section";
+import {
+  ChannelStatus,
+  TestButton,
+  TestOutcome,
+  useChannelTest,
+} from "@/components/settings/notification-channel-cards";
+import { Outcome } from "@/components/settings/setting-fields";
+import type { NotifySettingsRow } from "@/components/settings/notifications-section";
 
 /**
  * Web push: a notification on the machine looking at this page.
  *
- * Its own file rather than a fourth card in `monitor-tuning-cards.tsx`,
- * because it is the only one that is not a form. The others read and write
- * settings; this one also talks to the browser — permissions, a service
+ * Its own file rather than a third card in `notification-channel-cards.tsx`,
+ * because it is the only one that is not just a form. The others read and
+ * write settings; this one also talks to the browser — permissions, a service
  * worker, a subscription that exists on this machine and nowhere else — and
- * mixing that in beside three plain forms buried the difference.
+ * mixing that in beside two plain forms buried the difference.
  *
- * Two halves that look like one card and are not. The switch and the level
- * are fleet-wide settings, saved on Save like every other card here.
- * Subscribing is per browser and per person: it writes a row holding an
- * endpoint only this browser can be reached at, so it saves on the click, and
- * the button says "this browser" for that reason.
+ * Two halves that look like one card and are not. The switch is a fleet-wide
+ * setting, saved on Save like every other card here. Subscribing is per
+ * browser and per person: it writes a row holding an endpoint only this
+ * browser can be reached at, so it saves on the click, and the button says
+ * "this browser" for that reason.
  *
  * There is nothing to paste in for the credential half. A push service only
  * accepts messages signed by the VAPID key it saw at subscription time, so
@@ -79,21 +86,31 @@ function browserLabel(): string {
   return os ? `${browser} on ${os}` : browser;
 }
 
-export function MonitorWebPushCard({
+export function WebPushCard({
   settings,
+  ready,
   disabled,
   vapidPublicKey,
   subscribedCount,
 }: {
-  settings: MonitorSettingsRow;
+  settings: NotifySettingsRow;
+  ready: boolean;
   disabled: boolean;
   /** Null when the hub has no VAPID keypair, which no form here can fix. */
   vapidPublicKey: string | null;
   subscribedCount: number;
 }) {
-  const [state, formAction] = useActionState<ActionState, FormData>(updateMonitorSettings, {});
+  const [state, formAction] = useActionState<ActionState, FormData>(updateNotificationSettings, {});
   const [enabled, setEnabled] = useState(settings.webPushEnabled);
-  const [test, setTest] = useState<ActionState>({});
+  // Back to what is saved once a save lands. React resets the form after its
+  // action, and Radix answers a reset by putting the switch back to the value
+  // it was *mounted* with — through `onCheckedChange`, so straight into this
+  // state. Without this, turning web push on and saving showed it off again,
+  // with the hidden input below ready to save "off" on the next click.
+  useEffect(() => {
+    setEnabled(settings.webPushEnabled);
+  }, [state, settings.webPushEnabled]);
+  const test = useChannelTest("webPush");
   const [pending, startTransition] = useTransition();
 
   // `undefined` while the browser is still being asked. Rendering "not
@@ -196,6 +213,7 @@ export function MonitorWebPushCard({
         <CardTitle className="flex items-center gap-2">
           <BellRing className="h-4 w-4 text-muted-foreground" />
           Web push
+          <ChannelStatus ready={ready} />
         </CardTitle>
         <CardDescription>
           A desktop or phone notification from the dashboard itself, to whoever asked for one. No
@@ -218,10 +236,10 @@ export function MonitorWebPushCard({
         <form action={formAction} className="flex flex-col gap-4">
           <div className="flex items-start justify-between gap-4">
             <div>
-              <Label htmlFor="webPushEnabled">Send alerts by web push</Label>
+              <Label htmlFor="webPushEnabled">Send notifications by web push</Label>
               <p className="mt-1 text-xs text-muted-foreground">
-                Off leaves the subscriptions in place and simply stops using them. Which rules use
-                this channel is set on each rule.
+                Off leaves the subscriptions in place and simply stops using them. Which events and
+                rules use this channel is chosen on each of them.
               </p>
             </div>
             <Switch
@@ -238,23 +256,12 @@ export function MonitorWebPushCard({
             <input type="hidden" name="webPushEnabled" value={enabled ? "on" : "off"} />
           </div>
 
-          {state.error ? <p className="text-sm text-destructive">{state.error}</p> : null}
-          {test.error ? <p className="text-sm text-destructive">{test.error}</p> : null}
-          {test.ok ? <p className="text-sm text-success">{test.message}</p> : null}
+          <Outcome state={state} />
+          <TestOutcome result={test.result} />
 
           {!disabled ? (
             <div className="flex flex-wrap justify-end gap-2">
-              <Button
-                type="button"
-                variant="outline"
-                disabled={pending}
-                onClick={() => {
-                  startTransition(async () => setTest(await sendTestAlert()));
-                }}
-              >
-                <Send className="h-4 w-4" />
-                Send test alert
-              </Button>
+              <TestButton testing={test.testing} onClick={test.run} />
               <SaveButton state={state} />
             </div>
           ) : null}

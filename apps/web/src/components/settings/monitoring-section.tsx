@@ -2,7 +2,7 @@
 
 import { useMemo, useState, useTransition, type ReactNode } from "react";
 import { Bell, BellOff, Binoculars, Pencil, Plus, Trash2, TriangleAlert } from "lucide-react";
-import type { MonitorChannel } from "@magnemite/db";
+import type { NotifyChannel } from "@magnemite/db";
 import { deleteMonitorRule, setMonitorEnabled, setMonitorRuleEnabled } from "@/actions/monitoring";
 import type { ActionState } from "@/actions/rollouts";
 import { Badge } from "@/components/ui/badge";
@@ -34,17 +34,10 @@ export type MonitorSettingsRow = {
   startupGraceSeconds: number;
   maxActionsPerDeviceHour: number;
   maxRebootsPerDeviceDay: number;
-  alertDedupeMinutes: number;
   autoCollectLogsOnRecovery: boolean;
   autoCollectMinIntervalMinutes: number;
   autoCollectMaxPerHour: number;
   eventRetentionDays: number;
-  discordWebhookUrl: string;
-  discordMentionRoleId: string;
-  ntfyUrl: string;
-  ntfyTopic: string;
-  ntfyToken: string;
-  webPushEnabled: boolean;
 };
 
 // ---------------------------------------------------------------------------
@@ -54,12 +47,14 @@ export type MonitorSettingsRow = {
 /**
  * The switch and the rules.
  *
- * Two things this tab deliberately does *not* hold. The record of what the
+ * Three things this tab deliberately does *not* hold. The record of what the
  * rules did lives on the Monitoring page in the main nav, because it answers
  * an operational question rather than a configuration one, and a feed that
  * grows all day does not belong in Settings. The ceilings, graces and
- * intervals live on the Hub tab, because every one of them is measured
- * against a number that was already there.
+ * intervals live on the Tuning tab, because every one of them is measured
+ * against a number that was already there. And the channels a rule announces
+ * on are set up on the Notifications tab, beside everything else the fleet
+ * says — a rule only picks among them.
  */
 export function MonitoringSection({
   settings,
@@ -358,7 +353,7 @@ function RuleRow({
                 {rule.notifyChannels.length === CHANNEL_IDS.length
                   ? "Everywhere"
                   : rule.notifyChannels
-                      .map((channel) => CHANNEL_LABELS[channel as MonitorChannel])
+                      .map((channel) => CHANNEL_LABELS[channel as NotifyChannel])
                       .join(", ")}
               </Badge>
             ) : (
@@ -450,7 +445,7 @@ function RuleRow({
  *
  * Only Critical used to carry a badge, which made a row with none of them
  * ambiguous: a warning and an info rule looked identical, and the level is
- * what the Discord minimum is weighed against.
+ * what decides how loudly a phone is told and whether Discord pings a role.
  */
 function LevelBadge({ level }: { level: string }) {
   if (level === "CRITICAL") return <Badge variant="danger">Critical</Badge>;

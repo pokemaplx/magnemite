@@ -315,7 +315,6 @@ measured against the heartbeat or the offline timeout, which sit directly above.
 | **Grace · after a hub restart** | 180s    | A restart drops every socket at once; without this, a deploy looks like a fleet-wide outage.                                                                    |
 | **Actions per box per hour**    | 4       | Circuit breaker. Past it, one critical alert and the box is left alone. This is what bounds a rule that turns out to be wrong.                                  |
 | **Reboots per box per day**     | 6       | The same, counted separately, because a reboot costs a scanning session and the other actions do not. Reboots sent through Rotom count here too.                |
-| **Repeat an alert after**       | 30 min  | The same signal on the same box is not announced again inside this. The action still happens and is still recorded.                                             |
 | **Collect logs on recovery**    | off     | When a box comes back from a real outage, fetch its logs automatically so the window that explains it is not lost. See [Logs](/docs/fleet/logs).                |
 | **One capture per box every**   | 60 min  | A box that flaps all night would otherwise be collected from all night.                                                                                         |
 | **Captures per hour, fleet**    | 10      | An outage at the hub end brings every box back at once; collecting from all of them together is a second outage on top of the first.                            |
@@ -333,77 +332,31 @@ raise that rule's own threshold, which is per group.
 
 ## Where alerts go
 
-Three channels, on the same tab, each set up on its own: **Discord**, **ntfy**
-and **web push**. They are independent in every way that matters — its own
-credential, and one being broken says nothing about the other two. Configure
-none of them and the rules still run: remediation never depends on a
-notification going out.
+The channels — **Discord**, **ntfy** and **web push** — are set up on
+**Settings → Notifications**, beside everything else the fleet announces, and
+[Notifications](/docs/fleet/notifications) covers each of them. Configure none
+of them and the rules still run: remediation never depends on a notification
+going out.
 
 **Which rules reach which channel is decided on the rule**, in **Announce it** —
 a dropdown of the three, and picking none is a rule that acts quietly. Set up a
-channel here; choose who uses it there.
+channel there; choose who uses it here.
 
-None of the cards has a minimum severity. There used to be one per channel, and
-two filters in series meant a rule set to announce could silently not, with
+None of the channels has a minimum severity. There used to be one per channel,
+and two filters in series meant a rule set to announce could silently not, with
 nothing on the rule to say why. One filter, on the rule, where somebody looking
 for the reason is already looking.
 
-What the channels do share is the repeat window. The point of it is that a
-flapping box does not announce itself thirty times, and a window per channel
-would let it do exactly that by taking turns.
+A rule's **Severity** changes how an alert arrives, never whether it does. It
+drives ntfy's priority dial, which is what decides whether a phone in a pocket
+makes a sound — `INFO` is quiet, `WARN` is high, and `CRITICAL` is max, which on
+Android gets through Do Not Disturb — and only `CRITICAL` pings the Discord role.
 
-### Discord
-
-A **webhook URL** — empty turns the channel off and leaves the rules running —
-and an optional **role to ping**, used on critical only: a mention on every
-warning is how a channel gets muted, which costs you the alert that mattered.
-
-### ntfy
-
-A **server** — the public `https://ntfy.sh`, or your own — and a **topic**.
-Empty topic turns it off. Install the ntfy app, subscribe to the topic, and a
-fault buzzes the phone with a link straight to the box.
-
-On ntfy.sh a topic is the only thing protecting it: anyone who guesses the name
-reads your alerts, so pick one nobody would. The **access token** is for a
-self-hosted server or a reserved topic; empty publishes anonymously, which is
-what a public topic wants.
-
-A rule's **Severity** drives ntfy's own priority dial, which is what decides
-whether a phone in a pocket makes a sound: `INFO` is quiet, `WARN` is high, and
-`CRITICAL` is max — which on Android gets through Do Not Disturb. It changes how
-the alert arrives, never whether it does.
-
-### Web push
-
-A notification from the dashboard itself, on the desktop or phone of whoever
-asked for one. Nothing to install and no third party in the path.
-
-Two halves that look like one card and are not. The switch is a fleet-wide
-setting, saved with **Save** like everything else here.
-**Notify this browser** is per browser and per person — it asks for the
-notification permission, registers a service worker and stores an endpoint only
-that browser can be reached at — so it takes effect on the click. Alerts then
-arrive with every tab closed.
-
-It needs a VAPID keypair in the hub's environment; without one the card says so
-rather than offering a button that cannot work. Generate it once:
-
-```sh
-npx web-push generate-vapid-keys
-```
-
-and set `VAPID_PUBLIC_KEY`, `VAPID_PRIVATE_KEY` and `VAPID_SUBJECT`. Keep them:
-a push service only accepts messages signed by the key it saw when a browser
-subscribed, so regenerating the pair silently unsubscribes everyone. There is
-no way for the server to ask a push service what it still holds — a browser
-that was cleared or revoked is only discovered when it answers 404 or 410, and
-its row is dropped then.
-
-<Callout type="info" title="Safari and iOS need the Home Screen">
-  iOS only allows web push for a site added to the Home Screen. Until then the card says the browser
-  cannot do it, which is accurate rather than a bug.
-</Callout>
+What the channels do share is the **repeat window**, on the **Monitoring
+alerts** card of the same tab: the same signal on the same box is not announced
+again inside it, 30 minutes by default. The point of it is that a flapping box
+does not announce itself thirty times, and a window per channel would let it do
+exactly that by taking turns. The action still happens and is still recorded.
 
 Individual rules can be silenced without being switched off — **Announce it**
 set to nothing. "Pogo not in focus" ships that way: a box briefly on the
@@ -420,11 +373,8 @@ somewhere the fault was not is a message about nothing — and it ignores the
 repeat window, which has just been filled by the fault it ends. Only an episode that actually reached the rule's threshold
 gets one — an all-clear for a fault nobody was told about is noise.
 
-Press **Send test alert** before trusting any of it — the button is on all
-three cards and sends through every channel that is set up, reporting each one
-separately, because "it worked" is useless when the question is which of three
-is misconfigured. It has no rule behind it, so it ignores both the per-rule
-channels and the repeat window on purpose.
+Press **Send test** on a channel's card before trusting it — see
+[Notifications](/docs/fleet/notifications#test-before-you-trust-it).
 
 A channel that stops working never stops the remediation — the box is still
 restarted, and the Monitoring page records that the message did not arrive. An

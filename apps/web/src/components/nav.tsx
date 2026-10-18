@@ -53,7 +53,8 @@ export function Nav({
     setCollapsed(window.localStorage.getItem(COLLAPSED_KEY) === "1");
   }, []);
 
-  // A tap on a link should leave the drawer behind, not on top of the page.
+  // A link closes the drawer itself, on the tap (below). This is for every
+  // other way of getting somewhere — the palette, a hotkey, the back button.
   useEffect(() => setDrawerOpen(false), [pathname]);
 
   useEffect(() => {
@@ -64,16 +65,11 @@ export function Nav({
   }, [drawerOpen]);
 
   // The page behind the drawer must not scroll under a thumb aimed at the
-  // menu. Restored on close rather than cleared, so a page that had its own
-  // overflow set keeps it.
-  useEffect(() => {
-    if (!drawerOpen) return;
-    const previous = document.body.style.overflow;
-    document.body.style.overflow = "hidden";
-    return () => {
-      document.body.style.overflow = previous;
-    };
-  }, [drawerOpen]);
+  // menu — and that is done with `touch-action` on the backdrop and the
+  // drawer, not `overflow: hidden` on <body>. Chrome on Android brings its URL
+  // bar back the moment the page stops being scrollable, so locking <body>
+  // resized the viewport halfway through the slide: the page jumped, the
+  // drawer's `dvh` height jumped with it, and the open read as a flicker.
 
   function toggleCollapsed() {
     setCollapsed((prev) => {
@@ -88,7 +84,7 @@ export function Nav({
   return (
     <TooltipProvider delayDuration={150}>
       {/* Phones get a bar of their own; the sidebar itself is off-canvas there. */}
-      <header className="fixed inset-x-0 top-0 z-30 flex h-14 items-center gap-2 border-b border-border bg-background px-3 lg:hidden">
+      <header className="fixed inset-x-0 top-0 z-30 flex h-14 items-center gap-2 border-b border-border bg-background px-3 [-webkit-tap-highlight-color:transparent] lg:hidden">
         <Button
           variant="ghost"
           size="icon"
@@ -112,17 +108,28 @@ export function Nav({
         </Button>
       </header>
 
-      {drawerOpen ? (
-        <div
-          className="fixed inset-0 z-40 bg-black/40 lg:hidden"
-          onClick={() => setDrawerOpen(false)}
-          aria-hidden
-        />
-      ) : null}
+      {/* Always mounted, so it can fade with the slide. Mounted only while
+          open, it landed at full strength on the first frame and vanished the
+          same way on close, with the drawer still mid-slide over it — the
+          flash that made the menu feel like it blinked. */}
+      <div
+        className={cn(
+          "fixed inset-0 z-40 touch-none bg-black/40 lg:hidden",
+          "transition-opacity duration-300 ease-out motion-reduce:transition-none",
+          drawerOpen ? "opacity-100" : "pointer-events-none opacity-0",
+        )}
+        onClick={() => setDrawerOpen(false)}
+        aria-hidden
+      />
 
       <aside
         className={cn(
           "fixed inset-y-0 left-0 z-50 flex shrink-0 flex-col border-r border-border bg-subtle",
+          "[-webkit-tap-highlight-color:transparent]",
+          // Only the list scrolls; the rest of the drawer takes no pan at all,
+          // so a drag on it cannot reach the page underneath. The list
+          // re-enables panning for itself by being a scroller.
+          "max-lg:touch-none",
           // `h-screen` is 100vh, which on a phone is taller than what the
           // browser actually shows — the theme toggle at the bottom ended up
           // under the URL bar. `dvh` is the visible height.
@@ -134,7 +141,13 @@ export function Nav({
           // transitioning it means the slide-out still plays before it goes.
           // Not `aria-hidden`: that cannot be undone per breakpoint, and on a
           // desktop the sidebar is on screen with `drawerOpen` false.
-          "transition-[width,transform,visibility] duration-200 ease-out",
+          // The slide is the drawer curve — fast off the mark, long settle —
+          // on a layer of its own, so the page committing underneath it when
+          // a link is tapped cannot stall it. The desktop rail only ever
+          // animates its width.
+          "transition-[transform,visibility] duration-300 ease-[cubic-bezier(0.32,0.72,0,1)]",
+          "max-lg:will-change-transform motion-reduce:transition-none",
+          "lg:transition-[width] lg:duration-200 lg:ease-out",
           drawerOpen ? "translate-x-0 visible" : "invisible -translate-x-full",
           "lg:visible lg:sticky lg:top-0 lg:h-screen lg:translate-x-0",
           collapsed ? "lg:w-[68px]" : "lg:w-60",
@@ -200,7 +213,12 @@ export function Nav({
           <Tooltip label={`Search (${mac ? "⌘" : "Ctrl"} K)`} disabled={!collapsed}>
             <button
               type="button"
-              onClick={() => setPaletteOpen(true)}
+              // On a phone the palette is the next screen, not a layer over
+              // the menu — left open, the drawer was still there on Escape.
+              onClick={() => {
+                setDrawerOpen(false);
+                setPaletteOpen(true);
+              }}
               className={cn(
                 "flex w-full items-center gap-2.5 rounded-lg border border-border bg-card px-3 py-1.5 text-sm",
                 "text-muted-foreground transition-colors hover:border-border-emphasis hover:text-foreground",
@@ -217,7 +235,7 @@ export function Nav({
           </Tooltip>
         </div>
 
-        <nav className="flex flex-1 flex-col gap-5 overflow-y-auto px-2 py-2">
+        <nav className="flex flex-1 flex-col gap-5 overflow-y-auto overscroll-contain px-2 py-2">
           {NAV_SECTIONS.map((section, i) => (
             <div key={section.label ?? i} className="flex flex-col gap-0.5">
               {section.label ? (
@@ -244,6 +262,11 @@ export function Nav({
                     <Link
                       href={href}
                       aria-current={active ? "page" : undefined}
+                      // Closed on the tap rather than when the new path
+                      // arrives: that is a server round trip later, and until
+                      // then the menu sat there as if the tap had missed. The
+                      // bar along the top is what says the page is coming.
+                      onClick={() => setDrawerOpen(false)}
                       className={cn(
                         "group flex items-center gap-2.5 rounded-lg px-3 py-2 text-sm font-medium leading-5",
                         "transition-colors",
@@ -254,7 +277,7 @@ export function Nav({
                         collapsed && "lg:mx-auto lg:h-9 lg:w-9 lg:justify-center lg:p-0",
                         active
                           ? "bg-primary/15 text-foreground"
-                          : "text-muted-foreground hover:bg-emphasis/60 hover:text-foreground",
+                          : "text-muted-foreground hover:bg-emphasis/60 hover:text-foreground active:bg-emphasis",
                       )}
                     >
                       <Icon
@@ -294,7 +317,9 @@ export function Nav({
           ))}
         </nav>
 
-        <div className="flex flex-col gap-3 border-t border-border p-3">
+        {/* Raised on a phone: at the very bottom of the drawer the theme
+            toggle sat on the home indicator, where a tap is a swipe home. */}
+        <div className="flex flex-col gap-3 border-t border-border p-3 max-lg:pb-[max(2rem,env(safe-area-inset-bottom))]">
           <Tooltip label={`${online} of ${total} devices online`} disabled={!collapsed}>
             {/* `12/40` in a monospace font was a fraction, and read like one —
                 a ratio to work out rather than a fleet to glance at. A dot for

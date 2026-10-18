@@ -1,4 +1,4 @@
-import type { DeviceKind, MonitorChannel } from "@magnemite/db";
+import type { DeviceKind, NotifyChannel } from "@magnemite/db";
 import {
   AppWindow,
   Ban,
@@ -633,9 +633,9 @@ export const CHANNEL_IDS = [
   "discord",
   "ntfy",
   "webPush",
-] as const satisfies readonly MonitorChannel[];
+] as const satisfies readonly NotifyChannel[];
 
-export const CHANNEL_LABELS: Record<MonitorChannel, string> = {
+export const CHANNEL_LABELS: Record<NotifyChannel, string> = {
   discord: "Discord",
   ntfy: "ntfy",
   webPush: "Web push",

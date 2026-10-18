@@ -1,6 +1,6 @@
 "use client";
 
-import { useRouter } from "next/navigation";
+import { useRouter } from "@bprogress/next/app";
 import { useHotkey } from "@/components/shortcuts/hotkeys";
 
 export type DevicePage = "overview" | "rotom" | "metrics" | "connectivity";

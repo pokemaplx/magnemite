@@ -7,6 +7,7 @@ import { bus } from "../bus.js";
 import { env } from "../env.js";
 import { log } from "../log.js";
 import { getConnection, listConnections } from "../registry.js";
+import { announceAgentUpdateFailed } from "./fleetEvents.js";
 import { ACTIVE_STATES } from "./jobs.js";
 import { inMaintenance } from "./maintenance.js";
 
@@ -273,6 +274,10 @@ export async function recordAgentUpdateFailure(
     error: error ?? "the agent reported a failure with no detail",
   });
   log.warn({ deviceId, version, error }, "agent update failed on the box");
+  // Only here, where the agent said so. The other FAILED rows in this file
+  // are the hub's own inferences -- a restart before the swap, an update set
+  // aside for a job -- and are retried without anything being wrong.
+  announceAgentUpdateFailed(deviceId, version, error);
 }
 
 /**

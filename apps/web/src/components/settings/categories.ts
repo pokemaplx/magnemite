@@ -1,5 +1,6 @@
 import {
   AppWindow,
+  Bell,
   Binoculars,
   Boxes,
   KeyRound,
@@ -9,7 +10,7 @@ import {
 } from "lucide-react";
 
 export type SettingsSectionId =
-  "tuning" | "monitoring" | "apps" | "sources" | "groups" | "enrollment";
+  "tuning" | "monitoring" | "notifications" | "apps" | "sources" | "groups" | "enrollment";
 
 export type SettingsCategory = {
   id: SettingsSectionId;
@@ -56,10 +57,8 @@ export const SETTINGS_CATEGORIES: SettingsCategory[] = [
       "heartbeat",
       "offline timeout",
       // The monitoring knobs live on this tab now, so the words somebody
-      // would search for have to point here rather than at the rules.
-      "discord webhook",
-      "alerts",
-      "notifications",
+      // would search for have to point here rather than at the rules. Where
+      // alerts go does not: that is the Notifications tab's.
       "actions per hour",
       "reboots per day",
       "reboot grace",
@@ -97,6 +96,39 @@ export const SETTINGS_CATEGORIES: SettingsCategory[] = [
       "cooldown",
       "quiet hours",
       "probe",
+    ],
+  },
+  {
+    id: "notifications",
+    label: "Notifications",
+    icon: Bell,
+    summary: "Discord, ntfy and web push, and which fleet events go to each.",
+    // The channels' own field names, then the events by the words an
+    // operator would use for them — "rollout finished", not the event id.
+    terms: [
+      "discord webhook",
+      "role to ping",
+      "ntfy",
+      "topic",
+      "access token",
+      "web push",
+      "vapid",
+      "this browser",
+      "test alert",
+      "alerts",
+      "repeat an alert",
+      "dedupe",
+      "rollout started",
+      "rollout finished",
+      "auto-update started",
+      "manual deploy",
+      "canary failed",
+      "new build",
+      "download failed",
+      "source failing",
+      "machine setup",
+      "containers failed",
+      "agent update failed",
     ],
   },
   {

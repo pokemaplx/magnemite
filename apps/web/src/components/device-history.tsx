@@ -207,7 +207,7 @@ export function DeviceHistory({
       </div>
 
       <div className="border-t border-border">
-        <Table containerClassName="max-h-[26rem]">
+        <Table containerClassName="lg:max-h-[26rem]">
           <TableHeader>
             <TableRow>
               <TableSortHead {...headProps("version")}>Version</TableSortHead>

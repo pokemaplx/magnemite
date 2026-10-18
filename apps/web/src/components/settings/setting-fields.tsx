@@ -1,6 +1,7 @@
 "use client";
 
 import type { ReactNode } from "react";
+import type { ActionState } from "@/actions/rollouts";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 
@@ -120,4 +121,17 @@ export function Suffixed({ suffix, children }: { suffix: string; children: React
       <span className="shrink-0 text-xs text-muted-foreground">{suffix}</span>
     </div>
   );
+}
+
+/**
+ * The one outcome a save button cannot show: saved, but the hub could not be
+ * told, so it is still running on the old values. And the error, inline,
+ * because a form error belongs next to the form rather than in a toast.
+ */
+export function Outcome({ state }: { state: ActionState }) {
+  if (state.error) return <p className="text-sm text-destructive">{state.error}</p>;
+  if (state.ok && state.message && state.message !== "Saved.") {
+    return <p className="text-sm text-warning">{state.message}</p>;
+  }
+  return null;
 }

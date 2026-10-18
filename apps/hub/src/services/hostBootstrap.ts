@@ -8,6 +8,11 @@ import { bus } from "../bus.js";
 import { env } from "../env.js";
 import { log } from "../log.js";
 import { clampError } from "./redroid.js";
+import {
+  announceMachineReady,
+  announceMachineRerun,
+  announceMachineSetupFailed,
+} from "./fleetEvents.js";
 import { getConnection, sendTo } from "../registry.js";
 import { type BootstrapStep, parseStep, stepWriter } from "./stepWriter.js";
 import { REDROID_IMAGE, REDROID_IMAGE_SOURCE } from "../version.js";
@@ -75,18 +80,28 @@ const BOOTSTRAP_TIMEOUT_SECONDS = 30 * 60;
  * and the machine is the only thing that can close it out.
  */
 export async function reapOrphanedBootstraps(): Promise<number> {
-  const { count } = await prisma.redroidBootstrap.updateMany({
+  // Read first, so each one can be announced by name -- somebody who started
+  // a setup and then watched the hub restart is waiting on exactly this.
+  const orphans = await prisma.redroidBootstrap.findMany({
     where: { state: "RUNNING" },
-    data: {
-      state: "FAILED",
-      error:
-        "The hub restarted while this was running, so nothing was left watching it. " +
-        "The machine may be half-provisioned; the bootstrap is safe to run again, " +
-        "and skips what is already done.",
-      finishedAt: new Date(),
-    },
+    select: { id: true, name: true, deviceId: true },
   });
-  if (count > 0) log.warn({ count }, "failed bootstraps orphaned by a hub restart");
+  if (orphans.length === 0) return 0;
+
+  const error =
+    "The hub restarted while this was running, so nothing was left watching it. " +
+    "The machine may be half-provisioned; the bootstrap is safe to run again, " +
+    "and skips what is already done.";
+  // Still conditional on RUNNING: the ids came from a read, and a row that
+  // moved on since is not an orphan any more.
+  const { count } = await prisma.redroidBootstrap.updateMany({
+    where: { id: { in: orphans.map((row) => row.id) }, state: "RUNNING" },
+    data: { state: "FAILED", error, finishedAt: new Date() },
+  });
+  log.warn({ count }, "failed bootstraps orphaned by a hub restart");
+  for (const row of orphans) {
+    announceMachineSetupFailed({ name: row.name, deviceId: row.deviceId, error });
+  }
   return count;
 }
 
@@ -263,6 +278,12 @@ async function run(id: string, serial: string, name: string, access: SshAccess):
       .then(() => bus.publish({ kind: "bootstrap", bootstrapId: id }))
       .catch(() => undefined);
     log.warn({ bootstrapId: id, err: message }, "bootstrap failed");
+    announceMachineSetupFailed({
+      name,
+      deviceId: null,
+      error: message,
+      step: steps.find((step) => !step.ok)?.name ?? null,
+    });
   }
 }
 
@@ -280,6 +301,7 @@ export async function claimBootstrap(deviceId: string, serial: string): Promise<
     where: { serial },
     select: {
       id: true,
+      name: true,
       state: true,
       desiredInstances: true,
       desiredWorkers: true,
@@ -289,11 +311,20 @@ export async function claimBootstrap(deviceId: string, serial: string): Promise<
   });
   if (!row || row.state === "DONE") return;
 
-  await prisma.redroidBootstrap.update({
-    where: { id: row.id },
+  // Claimed by a compare-and-set rather than the read above: a machine that
+  // enrols twice in quick succession -- a retry after a slow first answer --
+  // would otherwise be adopted, scaled, converged and announced twice.
+  const { count } = await prisma.redroidBootstrap.updateMany({
+    where: { id: row.id, state: { not: "DONE" } },
     data: { state: "DONE", deviceId, finishedAt: new Date() },
   });
+  if (count === 0) return;
   bus.publish({ kind: "bootstrap", bootstrapId: row.id });
+  announceMachineReady({
+    name: row.name,
+    deviceId,
+    desiredInstances: row.desiredInstances,
+  });
 
   // Known-empty, so adopting is a fact rather than an assumption.
   //
@@ -642,4 +673,5 @@ export async function recordBootstrapResult(
     },
   });
   log.info({ deviceId, ok: result.ok, steps: result.steps.length }, "bootstrap re-run reported");
+  announceMachineRerun(deviceId, result);
 }

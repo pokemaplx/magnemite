@@ -8,6 +8,7 @@ import { prisma } from "@magnemite/db";
 import { bus } from "../bus.js";
 import { env } from "../env.js";
 import { log } from "../log.js";
+import { announceBuildCacheFailed } from "./fleetEvents.js";
 
 /**
  * One artifact downloads at a time. The VPS pulling 250 MB while 10 devices
@@ -192,6 +193,10 @@ async function doCacheVersion(versionId: string) {
     });
     bus.publish({ kind: "version", versionId });
     log.error({ err, versionId }, "artifact caching failed");
+    // Worth a message where a download that worked is not: auto-update passes
+    // over a FAILED build, so the next release a fleet waits for can be held
+    // up here without anything else saying so.
+    announceBuildCacheFailed(version, message);
     throw err;
   }
 }

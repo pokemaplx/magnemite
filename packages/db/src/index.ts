@@ -19,11 +19,10 @@ export const prisma: PrismaClient =
 if (process.env.NODE_ENV !== "production") globalForPrisma.prisma = prisma;
 
 /**
- * Issuer Better Auth stamps on email/password accounts. Anything that writes a
+ * Provider id Better Auth gives email/password accounts. Anything that writes a
  * credential row — the seed, the admin account form — has to use it, because
- * sign-in looks the account up by (issuer, accountId).
+ * sign-in looks the account up by (providerId, accountId).
  */
-export const CREDENTIAL_ISSUER = "local:credential";
 export const CREDENTIAL_PROVIDER_ID = "credential";
 
 // ---------------------------------------------------------------------------
@@ -82,7 +81,7 @@ export async function syncAdminFromEnv(): Promise<void> {
 
   const duplicates = await prisma.$transaction(async (tx) => {
     const admins = await tx.user.findMany({
-      where: { role: "ADMIN", accounts: { some: { issuer: CREDENTIAL_ISSUER } } },
+      where: { role: "ADMIN", accounts: { some: { providerId: CREDENTIAL_PROVIDER_ID } } },
       orderBy: { createdAt: "asc" },
       select: { id: true, email: true },
     });
@@ -127,13 +126,12 @@ export async function syncAdminFromEnv(): Promise<void> {
     if (credential) {
       await tx.account.update({
         where: { id: credential.id },
-        data: { password: passwordHash, issuer: CREDENTIAL_ISSUER },
+        data: { password: passwordHash },
       });
     } else {
       await tx.account.create({
         data: {
           userId: admin.id,
-          issuer: CREDENTIAL_ISSUER,
           providerId: CREDENTIAL_PROVIDER_ID,
           accountId: admin.id,
           password: passwordHash,
@@ -298,8 +296,19 @@ const HUB_SETTINGS_DEFAULTS: HubSettingsValues = {
  * webhook URL saved perfectly and then vanished on every read. Comparing
  * against the default's own type keeps that honest for whatever gets added
  * next, and doubles as the guard against a row left behind by an older shape.
+ *
+ * A list of strings is the one shape `typeof` cannot tell apart — an array,
+ * an object and a JSON `null` are all "object" — so a list-valued setting is
+ * checked for what it actually is instead.
  */
-type SettingValue = number | string | boolean;
+type SettingValue = number | string | boolean | string[];
+
+function sameShape(value: unknown, fallback: SettingValue): boolean {
+  if (Array.isArray(fallback)) {
+    return Array.isArray(value) && value.every((entry) => typeof entry === "string");
+  }
+  return typeof value === typeof fallback;
+}
 
 function mergeGroup<T extends Record<string, SettingValue>>(
   defaults: T,
@@ -310,7 +319,7 @@ function mergeGroup<T extends Record<string, SettingValue>>(
   for (const row of rows) {
     const name = row.key.slice(prefix.length);
     if (!(name in defaults)) continue;
-    if (typeof row.value !== typeof defaults[name]) continue;
+    if (!sameShape(row.value, defaults[name] as SettingValue)) continue;
     values[name as keyof T] = row.value as T[keyof T];
   }
   return values;
@@ -582,8 +591,6 @@ export type MonitorSettingsValues = {
   maxActionsPerDeviceHour: number;
   /** The same, for the expensive half of the ladder. */
   maxRebootsPerDeviceDay: number;
-  /** The same signal on the same box is not re-announced inside this. */
-  alertDedupeMinutes: number;
   /** Days of monitor history to keep. 0 keeps it forever. */
   eventRetentionDays: number;
   /**
@@ -609,7 +616,53 @@ export type MonitorSettingsValues = {
    * logcat dumps and uploads would be a second outage on top of the first.
    */
   autoCollectMaxPerHour: number;
-  /** Empty turns notifications off while leaving remediation running. */
+  // Where alerts go used to live here as well: the three channels' settings
+  // and the repeat window. They moved to the `notify.` group below when
+  // monitoring stopped being the only thing that announces -- a rollout
+  // finishing has nothing to do with a watchdog, and it reads the same webhook.
+};
+
+const MONITOR_SETTINGS_DEFAULTS: MonitorSettingsValues = {
+  enabled: false,
+  rotomSyncSeconds: 10,
+  rotomStaleSeconds: 600,
+  rebootGraceSeconds: 600,
+  startupGraceSeconds: 180,
+  maxActionsPerDeviceHour: 4,
+  maxRebootsPerDeviceDay: 6,
+  autoCollectLogsOnRecovery: false,
+  autoCollectMinIntervalMinutes: 60,
+  autoCollectMaxPerHour: 10,
+  eventRetentionDays: 30,
+};
+
+export const MONITOR_SETTINGS_PREFIX = "monitor.";
+
+export async function getMonitorSettings(): Promise<MonitorSettingsValues> {
+  return readGroup(MONITOR_SETTINGS_DEFAULTS, MONITOR_SETTINGS_PREFIX);
+}
+
+export async function updateMonitorSettings(patch: Partial<MonitorSettingsValues>): Promise<void> {
+  await writeGroup(patch, MONITOR_SETTINGS_PREFIX);
+}
+
+// ---------------------------------------------------------------------------
+// Notifications
+// ---------------------------------------------------------------------------
+
+/**
+ * The knobs behind Settings → Notifications, under a `notify.` prefix.
+ *
+ * Their own group because two different things announce now: the monitor,
+ * about a box gone wrong, and the fleet itself, about a rollout finishing or a
+ * build that would not download. Both go out through the same three channels,
+ * so the channels belong to neither of them.
+ *
+ * These rows used to be `monitor.*`; the migration that split them out is a
+ * rename, and the defaults are the ones they always had.
+ */
+export type NotifySettingsValues = {
+  /** Empty turns Discord off while everything else keeps running. */
   discordWebhookUrl: string;
   /** A role to ping on CRITICAL only. Empty pings nobody. */
   discordMentionRoleId: string;
@@ -637,48 +690,50 @@ export type MonitorSettingsValues = {
    * the credential.
    */
   webPushEnabled: boolean;
+  /**
+   * The same monitor signal on the same box is not re-announced inside this.
+   *
+   * Monitor alerts only. A fleet event is announced on a transition -- a
+   * rollout finishes once -- so there is nothing for a window to hold back.
+   */
+  alertDedupeMinutes: number;
 };
 
-const MONITOR_SETTINGS_DEFAULTS: MonitorSettingsValues = {
-  enabled: false,
-  rotomSyncSeconds: 10,
-  rotomStaleSeconds: 600,
-  rebootGraceSeconds: 600,
-  startupGraceSeconds: 180,
-  maxActionsPerDeviceHour: 4,
-  maxRebootsPerDeviceDay: 6,
-  alertDedupeMinutes: 30,
-  autoCollectLogsOnRecovery: false,
-  autoCollectMinIntervalMinutes: 60,
-  autoCollectMaxPerHour: 10,
-  eventRetentionDays: 30,
+const NOTIFY_SETTINGS_DEFAULTS: NotifySettingsValues = {
   discordWebhookUrl: "",
   discordMentionRoleId: "",
   ntfyUrl: "https://ntfy.sh",
   ntfyTopic: "",
   ntfyToken: "",
   webPushEnabled: false,
+  alertDedupeMinutes: 30,
 };
 
+export const NOTIFY_SETTINGS_PREFIX = "notify.";
+
+export async function getNotifySettings(): Promise<NotifySettingsValues> {
+  return readGroup(NOTIFY_SETTINGS_DEFAULTS, NOTIFY_SETTINGS_PREFIX);
+}
+
+export async function updateNotifySettings(patch: Partial<NotifySettingsValues>): Promise<void> {
+  await writeGroup(patch, NOTIFY_SETTINGS_PREFIX);
+}
+
 /**
- * The notification channels a rule can announce to.
+ * The channels anything can announce to.
  *
  * Here rather than in the hub because three things need the same list and the
- * same ids: the hub sends, the dashboard renders the picker, and the rule rows
- * store them. Ids are what is written to the database, so they are frozen --
- * the labels beside them are not.
+ * same ids: the hub sends, the dashboard renders the pickers, and both the
+ * monitor rules and the event routes below store them. Ids are what is written
+ * to the database, so they are frozen -- the labels the dashboard shows beside
+ * them are not.
  */
-export const MONITOR_CHANNELS = ["discord", "ntfy", "webPush"] as const;
-export type MonitorChannel = (typeof MONITOR_CHANNELS)[number];
-
-export const MONITOR_CHANNEL_LABELS: Record<MonitorChannel, string> = {
-  discord: "Discord",
-  ntfy: "ntfy",
-  webPush: "Web push",
-};
+export const NOTIFY_CHANNELS = ["discord", "ntfy", "webPush"] as const;
+export type NotifyChannel = (typeof NOTIFY_CHANNELS)[number];
 
 /**
- * Read a rule's `notifyChannels` column.
+ * Read a stored list of channels: a rule's `notifyChannels` column, or an
+ * event's route.
  *
  * An empty array is a real answer -- "act, say nothing" -- so it survives.
  * Anything *unreadable* becomes every channel instead: a column that has been
@@ -687,22 +742,71 @@ export const MONITOR_CHANNEL_LABELS: Record<MonitorChannel, string> = {
  * that has gone quiet without saying so is the failure this whole subsystem
  * exists to avoid.
  */
-export function parseNotifyChannels(value: unknown): MonitorChannel[] {
-  if (!Array.isArray(value)) return [...MONITOR_CHANNELS];
-  const known = new Set<string>(MONITOR_CHANNELS);
+export function parseNotifyChannels(value: unknown): NotifyChannel[] {
+  if (!Array.isArray(value)) return [...NOTIFY_CHANNELS];
+  const known = new Set<string>(NOTIFY_CHANNELS);
   return value.filter(
-    (entry): entry is MonitorChannel => typeof entry === "string" && known.has(entry),
+    (entry): entry is NotifyChannel => typeof entry === "string" && known.has(entry),
   );
 }
 
-export const MONITOR_SETTINGS_PREFIX = "monitor.";
+/**
+ * The fleet events that can be announced, in the order the dashboard lists
+ * them, and whether each is on for a fleet that never touched the setting.
+ *
+ * The ids are setting keys -- `notify.event.<id>` -- so they are frozen the
+ * same way the channel ids are. What each one says and when it fires is the
+ * hub's (`services/fleetEvents.ts`); what the dashboard calls it is the web's.
+ *
+ * Everything is on by default except the one that is chatty by nature: a
+ * channel nobody has set up sends nothing anyway, so "on" costs a fleet with
+ * no channels nothing, and a fleet that does have one asked to be told.
+ */
+export const NOTIFY_EVENTS = [
+  { id: "rolloutAutoStarted", on: true },
+  { id: "rolloutStarted", on: true },
+  { id: "rolloutSucceeded", on: true },
+  { id: "rolloutFailed", on: true },
+  { id: "rolloutPaused", on: true },
+  { id: "buildDiscovered", on: false },
+  { id: "buildCacheFailed", on: true },
+  { id: "sourceFailing", on: true },
+  { id: "machineReady", on: true },
+  { id: "machineSetupFailed", on: true },
+  { id: "convergeFailed", on: true },
+  { id: "joinInstallFailed", on: true },
+  { id: "agentUpdateFailed", on: true },
+] as const;
 
-export async function getMonitorSettings(): Promise<MonitorSettingsValues> {
-  return readGroup(MONITOR_SETTINGS_DEFAULTS, MONITOR_SETTINGS_PREFIX);
+export type NotifyEventId = (typeof NOTIFY_EVENTS)[number]["id"];
+
+export const NOTIFY_EVENT_IDS: NotifyEventId[] = NOTIFY_EVENTS.map((event) => event.id);
+
+/** Which channels each fleet event goes to. An empty list is "off". */
+export type NotifyRoutes = Record<NotifyEventId, NotifyChannel[]>;
+
+const NOTIFY_ROUTES_PREFIX = "notify.event.";
+
+const NOTIFY_ROUTES_DEFAULTS = Object.fromEntries(
+  NOTIFY_EVENTS.map((event) => [event.id, event.on ? [...NOTIFY_CHANNELS] : []]),
+) as Record<NotifyEventId, string[]>;
+
+/**
+ * The event routes, one row per event.
+ *
+ * A group of its own under `notify.event.`, read through `readGroup` like
+ * every other: an event added in a later version arrives with its default,
+ * and a row for an event that no longer exists is simply never asked for.
+ */
+export async function getNotifyRoutes(): Promise<NotifyRoutes> {
+  const stored = await readGroup(NOTIFY_ROUTES_DEFAULTS, NOTIFY_ROUTES_PREFIX);
+  return Object.fromEntries(
+    NOTIFY_EVENT_IDS.map((id) => [id, parseNotifyChannels(stored[id])]),
+  ) as NotifyRoutes;
 }
 
-export async function updateMonitorSettings(patch: Partial<MonitorSettingsValues>): Promise<void> {
-  await writeGroup(patch, MONITOR_SETTINGS_PREFIX);
+export async function updateNotifyRoutes(patch: Partial<NotifyRoutes>): Promise<void> {
+  await writeGroup(patch, NOTIFY_ROUTES_PREFIX);
 }
 
 // ---------------------------------------------------------------------------

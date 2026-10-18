@@ -92,7 +92,7 @@ export function DeviceConnectivity({ deviceId, rows }: { deviceId: string; rows:
         </label>
       ) : null}
 
-      <Table containerClassName="max-h-[32rem]">
+      <Table containerClassName="lg:max-h-[32rem]">
         <TableHeader>
           <TableRow>
             <TableHead className="w-8" />

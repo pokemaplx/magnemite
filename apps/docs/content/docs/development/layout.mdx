@@ -43,9 +43,10 @@ apps/hub/src
 │   ├── artifacts.ts      Cache-once + sha256
 │   ├── autoUpdate.ts     The hands-off pipeline
 │   ├── monitor.ts        Rules, escalation, circuit breakers
-│   ├── notify.ts         Discord alerts
+│   ├── notify.ts         Discord, ntfy and web push, for alerts and events
+│   ├── fleetEvents.ts    What the fleet announces: rollouts, builds, machines
 │   ├── rotom.ts          Scanning state, matching, restart
-│   ├── hubSettings.ts    The cached copy of Settings → Tuning
+│   ├── hubSettings.ts    The cached copy of the settings groups
 │   ├── uploads.ts        Manual installs: an APK in, an AppVersion out
 │   └── sources/          feed.ts, poller.ts, types.ts
 └── ws/deviceSocket.ts    The protocol, server side

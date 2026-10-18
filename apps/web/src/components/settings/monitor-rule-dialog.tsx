@@ -3,7 +3,7 @@
 import { useActionState, useEffect, useState, type ReactNode } from "react";
 import { ChevronDown, Plus, Trash2 } from "lucide-react";
 import { createMonitorRule, updateMonitorRule } from "@/actions/monitoring";
-import type { DeviceKind, MonitorChannel } from "@magnemite/db";
+import type { DeviceKind, NotifyChannel } from "@magnemite/db";
 import type { ActionState } from "@/actions/rollouts";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
@@ -169,8 +169,8 @@ function RuleForm({
   const [probeKind, setProbeKind] = useState(rule?.probe?.kind ?? "none");
   // Lifted out of its own Toggle only because the all-clear switch below it
   // has nothing to mean while this is off.
-  const [channels, setChannels] = useState<MonitorChannel[]>(
-    () => (rule?.notifyChannels as MonitorChannel[] | undefined) ?? [...CHANNEL_IDS],
+  const [channels, setChannels] = useState<NotifyChannel[]>(
+    () => (rule?.notifyChannels as NotifyChannel[] | undefined) ?? [...CHANNEL_IDS],
   );
   const [steps, setSteps] = useState<MonitorStepRow[]>(
     rule?.steps.length
@@ -235,7 +235,7 @@ function RuleForm({
   const id = (field: string) => `${field}-${rule?.id ?? "new"}`;
 
   return (
-    <form action={formAction} className="flex max-h-[85vh] flex-col">
+    <form action={formAction} className="flex max-h-[85dvh] flex-col">
       <DialogHeader className="mb-0 shrink-0 border-b border-border px-6 py-4 pr-12">
         <DialogTitle>{rule ? rule.name : "New rule"}</DialogTitle>
         <DialogDescription>Configure this rule. A signal to watch for.</DialogDescription>
@@ -868,10 +868,10 @@ function ChannelPicker({
   onChange,
 }: {
   id: string;
-  value: MonitorChannel[];
-  onChange: (next: MonitorChannel[]) => void;
+  value: NotifyChannel[];
+  onChange: (next: NotifyChannel[]) => void;
 }) {
-  const toggle = (channel: MonitorChannel) => {
+  const toggle = (channel: NotifyChannel) => {
     onChange(
       value.includes(channel)
         ? value.filter((entry) => entry !== channel)
@@ -927,8 +927,8 @@ function ChannelPicker({
       </DropdownMenu>
       <input type="hidden" name="notifyChannels" value={value.join(",")} />
       <p className="text-xs text-muted-foreground">
-        Nowhere, and the rule still acts, quietly. A channel that is not set up in the cards above
-        is skipped.
+        Nowhere, and the rule still acts, quietly. A channel that is not set up on the Notifications
+        tab is skipped.
       </p>
     </div>
   );

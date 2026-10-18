@@ -217,7 +217,7 @@ export function VersionsTable({
       </div>
 
       <div className="overflow-hidden rounded-xl border border-border bg-card">
-        <Table containerClassName="max-h-[62vh]">
+        <Table containerClassName="lg:max-h-[62vh]">
           <TableHeader>
             <TableRow>
               <TableSortHead {...headProps("version")}>Version</TableSortHead>

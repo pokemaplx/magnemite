@@ -3,9 +3,9 @@
 import { revalidatePath } from "next/cache";
 import {
   type DeviceKind,
-  MONITOR_CHANNELS,
+  NOTIFY_CHANNELS,
   type MonitorAction,
-  type MonitorChannel,
+  type NotifyChannel,
   type MonitorLevel,
   type MonitorSettingsValues,
   type MonitorSignal,
@@ -131,22 +131,25 @@ function savedMessage(told: boolean): string {
 // Settings
 // ---------------------------------------------------------------------------
 
-/** The master switch, the timings, the ceilings, and all three channels. */
+/**
+ * The timings and the ceilings. Where alerts go is Settings → Notifications
+ * now, saved by `updateNotificationSettings`.
+ */
 export async function updateMonitorSettings(
   _prev: ActionState,
   formData: FormData,
 ): Promise<ActionState> {
   const user = await requireOperator();
 
-  // Both monitoring cards save through this one action, and each posts only
-  // the fields it shows. So a field that is absent means "this card does not
-  // own it" — not zero, not empty — and keeps whatever is stored.
+  // A field that is absent means "this form does not own it" — not zero, not
+  // empty — and keeps whatever is stored.
   //
-  // The cards used to mirror each other's values in hidden inputs instead,
-  // which failed twice: one was missing the Rotom sync interval, so saving a
-  // webhook was rejected over a number that form does not have; the other
-  // posted no Discord fields at all, so saving a timing silently wiped the
-  // webhook. Reading absence here is what makes both impossible.
+  // The cards that shared this action used to mirror each other's values in
+  // hidden inputs instead, which failed twice: one was missing the Rotom sync
+  // interval, so saving a webhook was rejected over a number that form does not
+  // have; the other posted no Discord fields at all, so saving a timing
+  // silently wiped the webhook. Reading absence here is what makes both
+  // impossible.
   const stored = await readMonitorSettings();
   const submitted = (name: string) => formData.get(name) !== null;
 
@@ -170,7 +173,6 @@ export async function updateMonitorSettings(
   const startupGraceSeconds = int("startupGraceSeconds", 0, stored.startupGraceSeconds);
   const maxActionsPerDeviceHour = int("maxActionsPerDeviceHour", 1, stored.maxActionsPerDeviceHour);
   const maxRebootsPerDeviceDay = int("maxRebootsPerDeviceDay", 1, stored.maxRebootsPerDeviceDay);
-  const alertDedupeMinutes = int("alertDedupeMinutes", 0, stored.alertDedupeMinutes);
   const eventRetentionDays = int("eventRetentionDays", 0, stored.eventRetentionDays);
   const autoCollectMinIntervalMinutes = int(
     "autoCollectMinIntervalMinutes",
@@ -186,7 +188,6 @@ export async function updateMonitorSettings(
     startupGraceSeconds === null ||
     maxActionsPerDeviceHour === null ||
     maxRebootsPerDeviceDay === null ||
-    alertDedupeMinutes === null ||
     eventRetentionDays === null ||
     autoCollectMinIntervalMinutes === null ||
     autoCollectMaxPerHour === null
@@ -194,23 +195,6 @@ export async function updateMonitorSettings(
     return {
       error:
         "Every field needs a whole number. The Rotom sync starts at 5 seconds, the reboot grace at 60, and the two ceilings at 1.",
-    };
-  }
-
-  // The shape is checked only when it was typed. A stored value that predates
-  // this rule must not block a save from the other card, which never shows the
-  // webhook at all.
-  const webhook = submitted("discordWebhookUrl")
-    ? String(formData.get("discordWebhookUrl")).trim()
-    : stored.discordWebhookUrl;
-  if (
-    submitted("discordWebhookUrl") &&
-    webhook &&
-    !/^https:\/\/(discord|discordapp)\.com\/api\/webhooks\//.test(webhook)
-  ) {
-    return {
-      error:
-        "That does not look like a Discord webhook. Copy it from the channel's Integrations settings — it starts with https://discord.com/api/webhooks/.",
     };
   }
 
@@ -225,32 +209,6 @@ export async function updateMonitorSettings(
     };
   }
 
-  // ntfy. The topic is what decides whether the channel is on, so a server
-  // URL alone is not an error -- it is the default sitting there unused.
-  const ntfyUrl = submitted("ntfyUrl") ? String(formData.get("ntfyUrl")).trim() : stored.ntfyUrl;
-  if (submitted("ntfyUrl") && ntfyUrl && !/^https?:\/\//.test(ntfyUrl)) {
-    return {
-      error:
-        "The ntfy server needs to be a URL, starting with https:// — or http:// for one on your own network.",
-    };
-  }
-
-  const ntfyTopic = submitted("ntfyTopic")
-    ? String(formData.get("ntfyTopic")).trim()
-    : stored.ntfyTopic;
-  // ntfy's own rule for a topic, and worth enforcing here rather than
-  // discovering as a 400 during an incident: a slash would silently address a
-  // different path on the server entirely.
-  if (submitted("ntfyTopic") && ntfyTopic && !/^[A-Za-z0-9_-]{1,64}$/.test(ntfyTopic)) {
-    return {
-      error:
-        "An ntfy topic is letters, digits, dashes and underscores — no slashes, and no spaces. Put the server in the field beside it.",
-    };
-  }
-  if (ntfyTopic && !ntfyUrl) {
-    return { error: "A topic needs a server. https://ntfy.sh is the public one." };
-  }
-
   const patch: Partial<MonitorSettingsValues> = {
     // Absent is "keep it", not "off": a card that does not show the master
     // switch posts nothing for it, and the switch itself saves through
@@ -262,28 +220,14 @@ export async function updateMonitorSettings(
     startupGraceSeconds,
     maxActionsPerDeviceHour,
     maxRebootsPerDeviceDay,
-    alertDedupeMinutes,
     eventRetentionDays,
     // Same shape as `enabled` above: only read when this form actually carried
-    // it, so a save from the other card cannot silently switch it off.
+    // it, so a save from another form cannot silently switch it off.
     autoCollectLogsOnRecovery: submitted("autoCollectLogsOnRecovery")
       ? formData.get("autoCollectLogsOnRecovery") === "on"
       : stored.autoCollectLogsOnRecovery,
     autoCollectMinIntervalMinutes,
     autoCollectMaxPerHour,
-    discordWebhookUrl: webhook,
-    discordMentionRoleId: submitted("discordMentionRoleId")
-      ? String(formData.get("discordMentionRoleId")).trim()
-      : stored.discordMentionRoleId,
-    ntfyUrl,
-    ntfyTopic,
-    ntfyToken: submitted("ntfyToken") ? String(formData.get("ntfyToken")).trim() : stored.ntfyToken,
-    // The web push card posts this as an explicit "on"/"off" rather than
-    // leaving an unchecked switch to post nothing, which would be
-    // indistinguishable from a save that came from another card.
-    webPushEnabled: submitted("webPushEnabled")
-      ? formData.get("webPushEnabled") === "on"
-      : stored.webPushEnabled,
   };
   await updateMonitorSettingsInDb(patch);
 
@@ -293,14 +237,7 @@ export async function updateMonitorSettings(
       userId: user.id,
       userEmail: user.email,
       action: "settings.monitoring",
-      // The webhook is a credential — anyone who has it can post to the
-      // channel — so the audit log records that it changed, not what to.
-      meta: {
-        ...patch,
-        discordWebhookUrl: webhook ? "set" : "",
-        ntfyToken: patch.ntfyToken ? "set" : "",
-        hubNotified: told,
-      },
+      meta: { ...patch, hubNotified: told },
     },
   });
 
@@ -335,23 +272,6 @@ export async function setMonitorEnabled(enabled: boolean): Promise<ActionState> 
   return { ok: true, message: savedMessage(told) };
 }
 
-/** Prove the webhook, so nobody finds out it was wrong during an incident. */
-export async function sendTestAlert(): Promise<ActionState> {
-  await requireOperator();
-  try {
-    const result = await hub.testAlert();
-    if (!result.ok) return { error: result.error ?? "Nothing accepted the message." };
-    // Which channels took it, because "sent" is useless when the question is
-    // which of three is misconfigured.
-    return {
-      ok: true,
-      message: result.detail ? `Sent — ${result.detail}.` : "Sent — check the channel.",
-    };
-  } catch (err) {
-    return { error: err instanceof Error ? err.message : String(err) };
-  }
-}
-
 /** Run a pass now rather than waiting for the next tick. */
 export async function runMonitorNow(): Promise<ActionState> {
   await requireOperator();
@@ -380,7 +300,7 @@ type ParsedRule = {
   windowStart: string | null;
   windowEnd: string | null;
   notifyLevel: MonitorLevel;
-  notifyChannels: MonitorChannel[];
+  notifyChannels: NotifyChannel[];
   notifyRecovery: boolean;
   enabled: boolean;
   steps: { atFailure: number; action: MonitorAction; command: string | null }[];
@@ -482,8 +402,8 @@ function parseRule(formData: FormData): ParsedRule | string {
     // find that out.
     notifyChannels: String(formData.get("notifyChannels") ?? "")
       .split(",")
-      .filter((entry): entry is MonitorChannel =>
-        (MONITOR_CHANNELS as readonly string[]).includes(entry),
+      .filter((entry): entry is NotifyChannel =>
+        (NOTIFY_CHANNELS as readonly string[]).includes(entry),
       ),
     // Only meaningful for a rule that announces somewhere, and the dialog
     // hides the switch when it does not — a hidden checkbox posts nothing, so

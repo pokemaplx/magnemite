@@ -2,7 +2,7 @@ import { createReadStream } from "node:fs";
 import fsp from "node:fs/promises";
 import type { FastifyInstance } from "fastify";
 import { z } from "zod";
-import { prisma, serialize } from "@magnemite/db";
+import { NOTIFY_CHANNELS, prisma, serialize } from "@magnemite/db";
 import {
   getHubSettings,
   invalidateHubSettingsCache,
@@ -28,7 +28,7 @@ import {
   releaseMaintenance,
 } from "../services/maintenance.js";
 import { evaluate } from "../services/monitor.js";
-import { sendTestAlert } from "../services/notify.js";
+import { sendTestNotification } from "../services/notify.js";
 import { cancelRollout, createRollout, resumeRollout } from "../services/rollouts.js";
 import {
   type RotomAction,
@@ -288,14 +288,25 @@ export async function internalRoutes(app: FastifyInstance) {
     sent: await broadcastWelcome(),
   }));
 
-  // --- monitoring ----------------------------------------------------------
+  // --- notifications -------------------------------------------------------
 
   /**
-   * Prove the Discord webhook before anyone trusts it. Bypasses the level
-   * filter and the dedupe window: somebody pressing "Send test alert" wants to
-   * see a message, not to find out later that one was suppressed.
+   * Prove a channel before anyone trusts it — the one named, or every channel
+   * that is set up. Bypasses routing and the dedupe window: somebody pressing
+   * "Send test" wants to see a message, not to find out later that one was
+   * suppressed.
    */
-  app.post("/internal/monitor/test", async () => sendTestAlert());
+  app.post("/internal/notify/test", async (request, reply) => {
+    const parsed = z
+      .object({ channel: z.enum(NOTIFY_CHANNELS).optional() })
+      .safeParse(request.body ?? {});
+    if (!parsed.success) {
+      return reply.status(400).send({ error: "invalid body", issues: parsed.error.issues });
+    }
+    return sendTestNotification(parsed.data.channel);
+  });
+
+  // --- monitoring ----------------------------------------------------------
 
   /** Force an evaluation pass, for the dashboard's "Run now" and for testing. */
   app.post("/internal/monitor/run", async () => {

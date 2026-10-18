@@ -2,7 +2,7 @@
 
 import { useActionState, useEffect, useMemo, useRef, useState, useTransition } from "react";
 import Link from "next/link";
-import { useRouter } from "next/navigation";
+import { useRouter } from "@bprogress/next/app";
 import { useFormStatus } from "react-dom";
 import {
   AlertTriangle,
@@ -564,7 +564,7 @@ export function FleetTable({
       </div>
 
       <div className="overflow-hidden rounded-xl border border-border bg-card">
-        <Table containerClassName="max-h-[64vh]">
+        <Table containerClassName="lg:max-h-[64vh]">
           <TableHeader>
             <TableRow>
               <TableHead className="w-10">

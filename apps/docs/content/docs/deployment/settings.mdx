@@ -53,50 +53,29 @@ was offline adopts it when it comes back.
 
 ## Settings → Monitoring
 
-Stored under a `monitor.` prefix and read by the evaluation pass. Most are
-ceilings rather than features — [monitoring](/docs/fleet/monitoring) has the
-why for each.
+Stored under a `monitor.` prefix and read by the evaluation pass. The master
+switch and the rules are on this tab; the numbers are the **How it watches**
+card on **Settings → Tuning**, beside the heartbeat they are measured against.
+Most are ceilings rather than features — [monitoring](/docs/fleet/monitoring)
+has the why for each.
 
-| Setting                      | Default           | Min        | What it does                                                                                                                                                                                                                              |
-| ---------------------------- | ----------------- | ---------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **Enabled**                  | `off`             | —          | The master switch. Off, so upgrading a fleet never starts remediating by itself.                                                                                                                                                          |
-| **Ask Rotom every**          | `10s`             | `5`        | Resolution of everything Rotom-shaped, at one request per interval for the whole fleet. It floors **Metric history → Scanner (Rotom) → Sample every**, which is what decides how much is kept. Ignored when the Rotom integration is off. |
-| **Rotom stale after**        | `600s`            | `2 × sync` | Silence from Rotom before a box counts as disconnected. Measured against the sync interval above.                                                                                                                                         |
-| **After a reboot**           | `600s`            | `60`       | No action on a box for this long after we rebooted it, so a slow boot is not rebooted again.                                                                                                                                              |
-| **After a hub restart**      | `180s`            | `0`        | Nothing acts for this long after the hub starts, while the whole fleet reconnects.                                                                                                                                                        |
-| **Actions per box per hour** | `4`               | `1`        | Circuit breaker. Past it, the box is alerted about and left alone.                                                                                                                                                                        |
-| **Reboots per box per day**  | `6`               | `1`        | The same, for the expensive half of the ladder.                                                                                                                                                                                           |
-| **Repeat an alert after**    | `30 min`          | `0`        | The same signal on the same box is not re-announced inside this.                                                                                                                                                                          |
-| **Keep history for**         | `30 days`         | `0`        | Monitor history retention. `0` keeps it forever.                                                                                                                                                                                          |
-| **Discord webhook**          | empty             | —          | Empty turns notifications off while leaving remediation running.                                                                                                                                                                          |
-| **Mention role**             | empty             | —          | Pinged on `CRITICAL` only. Empty pings nobody.                                                                                                                                                                                            |
-| **ntfy server**              | `https://ntfy.sh` | —          | The public ntfy, or your own. The topic beside it is what decides whether ntfy is used at all.                                                                                                                                            |
-| **ntfy topic**               | empty             | —          | Empty turns ntfy off. On ntfy.sh anyone who guesses the topic reads your alerts, so pick a name nobody would.                                                                                                                             |
-| **ntfy access token**        | empty             | —          | Only for a protected or reserved topic. Empty publishes anonymously.                                                                                                                                                                      |
-| **Web push**                 | `off`             | —          | Notifications in the dashboard's own browsers. Needs a VAPID keypair in the hub's environment; without one the card says so and the switch is unavailable.                                                                                |
+| Setting                      | Default   | Min        | What it does                                                                                                                                                                                                                              |
+| ---------------------------- | --------- | ---------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Enabled**                  | `off`     | —          | The master switch. Off, so upgrading a fleet never starts remediating by itself.                                                                                                                                                          |
+| **Ask Rotom every**          | `10s`     | `5`        | Resolution of everything Rotom-shaped, at one request per interval for the whole fleet. It floors **Metric history → Scanner (Rotom) → Sample every**, which is what decides how much is kept. Ignored when the Rotom integration is off. |
+| **Rotom stale after**        | `600s`    | `2 × sync` | Silence from Rotom before a box counts as disconnected. Measured against the sync interval above.                                                                                                                                         |
+| **After a reboot**           | `600s`    | `60`       | No action on a box for this long after we rebooted it, so a slow boot is not rebooted again.                                                                                                                                              |
+| **After a hub restart**      | `180s`    | `0`        | Nothing acts for this long after the hub starts, while the whole fleet reconnects.                                                                                                                                                        |
+| **Actions per box per hour** | `4`       | `1`        | Circuit breaker. Past it, the box is alerted about and left alone.                                                                                                                                                                        |
+| **Reboots per box per day**  | `6`       | `1`        | The same, for the expensive half of the ladder.                                                                                                                                                                                           |
+| **Keep history for**         | `30 days` | `0`        | Monitor history retention. `0` keeps it forever.                                                                                                                                                                                          |
 
 The pass itself has no interval to set: it runs once per heartbeat, because it
 reads what the boxes last said and they say it once per beat.
 
-The three channels are independent: each has its own credential, and one being
-broken says nothing about the other two. What they share is **Repeat an alert
-after** — the point of that window is that a flapping box does not announce
-itself thirty times, and a window per channel would let it do exactly that by
-taking turns.
-
-**None of them has a minimum severity.** Which rules reach which channel is
-picked on each rule, in **Announce it**. There used to be a floor per channel
-as well, and two filters in series meant a rule set to announce could silently
-not — with nothing on the rule to say why. One filter, where the person looking
-for the reason is already looking.
-
-The VAPID keypair for web push is the one notification credential that is
-**not** here. A push service only accepts a message signed by the key it saw
-when the browser subscribed, so it is deployment identity rather than a knob:
-it goes in the hub's environment as `VAPID_PUBLIC_KEY`, `VAPID_PRIVATE_KEY` and
-`VAPID_SUBJECT`, generated once with `npx web-push generate-vapid-keys`.
-Regenerating the pair silently unsubscribes every browser, which is exactly why
-there is no button for it.
+Where the alerts go — the channels, and how often the same alert may repeat —
+is [Settings → Notifications](#settings--notifications), with everything else
+the fleet announces. Which channels a rule uses is picked on the rule.
 
 ### A monitoring rule
 
@@ -142,6 +121,66 @@ from the machine that runs it — `REBOOT` is deliberately not overloaded to mea
   data behind them. The vocabulary the rule dialog is built from has not learned them, so there is
   no way to write one from **Settings → Monitoring** today.
 </Callout>
+
+## Settings → Notifications
+
+Stored under a `notify.` prefix, and read by the hub whenever it has something
+to say — a monitoring alert, or one of the fleet events below.
+[Notifications](/docs/fleet/notifications) has the why for each.
+
+| Setting                   | Default           | Min | What it does                                                                                                                                               |
+| ------------------------- | ----------------- | --- | ---------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Discord webhook**       | empty             | —   | Empty turns Discord off. Nothing else stops.                                                                                                               |
+| **Role to ping**          | empty             | —   | Pinged on `CRITICAL` monitoring alerts only. Empty pings nobody.                                                                                           |
+| **ntfy server**           | `https://ntfy.sh` | —   | The public ntfy, or your own. The topic beside it is what decides whether ntfy is used at all.                                                             |
+| **ntfy topic**            | empty             | —   | Empty turns ntfy off. On ntfy.sh anyone who guesses the topic reads every message, so pick a name nobody would.                                            |
+| **ntfy access token**     | empty             | —   | Only for a protected or reserved topic. Empty publishes anonymously.                                                                                       |
+| **Web push**              | `off`             | —   | Notifications in the dashboard's own browsers. Needs a VAPID keypair in the hub's environment; without one the card says so and the switch is unavailable. |
+| **Repeat an alert after** | `30 min`          | `0` | Monitoring alerts only: the same signal on the same box is not re-announced inside this. Fleet events are said once each and need no window.               |
+
+The three channels are independent: each has its own credential, and one being
+broken says nothing about the other two. What they share is **Repeat an alert
+after** — the point of that window is that a flapping box does not announce
+itself thirty times, and a window per channel would let it do exactly that by
+taking turns.
+
+**None of them has a minimum severity.** Which monitoring rules reach which
+channel is picked on each rule, in **Announce it**, and which fleet events do is
+the matrix below. There used to be a floor per channel as well, and two filters
+in series meant a rule set to announce could silently not — with nothing on the
+rule to say why. One filter, where the person looking for the reason is already
+looking.
+
+The VAPID keypair for web push is the one notification credential that is
+**not** here. A push service only accepts a message signed by the key it saw
+when the browser subscribed, so it is deployment identity rather than a knob:
+it goes in the hub's environment as `VAPID_PUBLIC_KEY`, `VAPID_PRIVATE_KEY` and
+`VAPID_SUBJECT`, generated once with `npx web-push generate-vapid-keys`.
+Regenerating the pair silently unsubscribes every browser, which is exactly why
+there is no button for it.
+
+### Fleet events
+
+One row per event, each stored as `notify.event.<id>`: the list of channels it
+goes to, empty for off. A fresh install has every event on every channel except
+**New build found**, which is off — a channel nobody has set up sends nothing
+anyway, so "on" costs a fleet with no channels nothing.
+
+| Event                                | Default | Stored as                         |
+| ------------------------------------ | ------- | --------------------------------- |
+| **Auto-update started a rollout**    | on      | `notify.event.rolloutAutoStarted` |
+| **Rollout or manual deploy started** | on      | `notify.event.rolloutStarted`     |
+| **Rollout finished**                 | on      | `notify.event.rolloutSucceeded`   |
+| **Rollout finished with failures**   | on      | `notify.event.rolloutFailed`      |
+| **Canary failed, rollout paused**    | on      | `notify.event.rolloutPaused`      |
+| **New build found**                  | off     | `notify.event.buildDiscovered`    |
+| **Build failed to download**         | on      | `notify.event.buildCacheFailed`   |
+| **Version source failing**           | on      | `notify.event.sourceFailing`      |
+| **Machine set up**                   | on      | `notify.event.machineReady`       |
+| **Machine setup failed**             | on      | `notify.event.machineSetupFailed` |
+| **Containers failed to apply**       | on      | `notify.event.convergeFailed`     |
+| **New box failed its group install** | on      | `notify.event.joinInstallFailed`  |
+| **Agent update failed**              | on      | `notify.event.agentUpdateFailed`  |
 
 ## Settings → Apps
 

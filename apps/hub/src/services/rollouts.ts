@@ -2,6 +2,7 @@ import { type RolloutHookMode, type RolloutMode, prisma } from "@magnemite/db";
 import { bus } from "../bus.js";
 import { log } from "../log.js";
 import { isOnline } from "../registry.js";
+import { announceRolloutStarted } from "./fleetEvents.js";
 import { logJobEvent, recomputeRollout, rolloutSucceeded } from "./jobs.js";
 import { inMaintenance } from "./maintenance.js";
 
@@ -184,6 +185,10 @@ export async function createRollout(input: CreateRolloutInput) {
   );
   bus.publish({ kind: "rollout", rolloutId: rollout.id });
   await recomputeRollout(rollout.id);
+  // After the recompute, so the message reads the status it really starts in
+  // -- and so a rollout with nothing to do has already completed, which is
+  // what keeps it from being announced at all.
+  announceRolloutStarted(rollout);
   return rollout;
 }
 

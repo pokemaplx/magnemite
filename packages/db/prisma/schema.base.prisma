@@ -1537,12 +1537,14 @@ model Session {
 }
 
 model Account {
-  id         String @id @default(cuid())
-  /// Namespaces the identity so an OAuth provider id can never collide with a
-  /// local one. Credential accounts use "local:credential"
-  /// (`CREDENTIAL_ISSUER` in @magnemite/db) — sign-in looks the account up by
-  /// this, so a row without it simply will not authenticate.
-  issuer     String
+  id         String  @id @default(cuid())
+  /// Dead. Better Auth 1.7.0–1.7.2 required it and looked accounts up by
+  /// (issuer, accountId); 1.7.3 went back to (providerId, accountId) and
+  /// refuses to start while a column it never writes is still required. Kept
+  /// nullable rather than dropped so a hub or dashboard still on the old build
+  /// mid-deploy — which writes it and selects it — keeps working; drop it in a
+  /// later migration.
+  issuer     String?
   accountId  String
   providerId String
 
@@ -1561,7 +1563,6 @@ model Account {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  @@unique([issuer, accountId])
   @@index([userId])
   @@map("account")
 }
@@ -1826,7 +1827,7 @@ model MonitorEvent {
   /// needs more than the 191 characters a String gets on MySQL: the agent caps
   /// a detail at 512 bytes, and a truncated explanation is worse than none.
   detail   String?        @db.Text
-  /// Whether this went to Discord, so a silent hour is explicable.
+  /// Whether any channel took this, so a silent hour is explicable.
   notified Boolean        @default(false)
   /// The all-clear rather than a fault. Kept as a column rather than read off
   /// the level or the message because the alert dedupe window has to ignore

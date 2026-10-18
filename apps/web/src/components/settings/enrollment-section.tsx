@@ -151,7 +151,7 @@ sh ./bootstrap.sh`;
         )}
 
         {tokens.length > 0 ? (
-          <Table containerClassName="max-h-[24rem]">
+          <Table containerClassName="lg:max-h-[24rem]">
             <TableHeader>
               <TableRow>
                 <TableHead>Label</TableHead>

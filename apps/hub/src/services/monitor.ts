@@ -2,9 +2,9 @@ import type { deviceMetricsSchema, MonitorSpec } from "@magnemite/protocol";
 import type { z } from "zod";
 import {
   type DeviceKind,
-  MONITOR_CHANNELS,
+  NOTIFY_CHANNELS,
   type MonitorAction,
-  type MonitorChannel,
+  type NotifyChannel,
   type MonitorLevel,
   type MonitorSignal,
   parseNotifyChannels,
@@ -201,7 +201,7 @@ type RuleProbe = Omit<MonitorSpec["checks"][number], "id">;
  * below does, pointed the other way. A malformed probe should stop being
  * evaluated; a malformed channel list should not stop being heard.
  */
-function channelsOf(rule: RuleRow): MonitorChannel[] {
+function channelsOf(rule: RuleRow): NotifyChannel[] {
   return parseNotifyChannels(rule.notifyChannels);
 }
 
@@ -1124,7 +1124,7 @@ async function record(
   device: DeviceRow,
   rule: RuleRow,
   event: EventInput,
-  announce: MonitorChannel[] = channelsOf(rule),
+  announce: NotifyChannel[] = channelsOf(rule),
 ): Promise<void> {
   const recovery = event.recovery ?? false;
   const notified =
@@ -1189,7 +1189,7 @@ type Seed = {
   threshold: number;
   cooldownSeconds: number;
   /** Which channels the seed announces to. Empty is "act, say nothing". */
-  notifyChannels: MonitorChannel[];
+  notifyChannels: NotifyChannel[];
   notifyLevel: MonitorLevel;
   steps: { atFailure: number; action: MonitorAction }[];
 };
@@ -1220,7 +1220,7 @@ const SEEDS: Seed[] = [
     },
     threshold: 1,
     cooldownSeconds: 300,
-    notifyChannels: [...MONITOR_CHANNELS],
+    notifyChannels: [...NOTIFY_CHANNELS],
     notifyLevel: "WARN",
     steps: [
       { atFailure: 1, action: "RESTART_APP" },
@@ -1251,7 +1251,7 @@ const SEEDS: Seed[] = [
     config: {},
     threshold: 1,
     cooldownSeconds: 120,
-    notifyChannels: [...MONITOR_CHANNELS],
+    notifyChannels: [...NOTIFY_CHANNELS],
     notifyLevel: "WARN",
     steps: [
       // ENTER dismisses the dialog, which is usually the whole fix.
@@ -1279,7 +1279,7 @@ const SEEDS: Seed[] = [
     },
     threshold: 1,
     cooldownSeconds: 600,
-    notifyChannels: [...MONITOR_CHANNELS],
+    notifyChannels: [...NOTIFY_CHANNELS],
     notifyLevel: "WARN",
     steps: [{ atFailure: 1, action: "KILL_APP" }],
   },
@@ -1299,7 +1299,7 @@ const SEEDS: Seed[] = [
     },
     threshold: 1,
     cooldownSeconds: 600,
-    notifyChannels: [...MONITOR_CHANNELS],
+    notifyChannels: [...NOTIFY_CHANNELS],
     notifyLevel: "WARN",
     steps: [{ atFailure: 1, action: "RESTART_APP" }],
   },
@@ -1313,7 +1313,7 @@ const SEEDS: Seed[] = [
     // disconnection would carry, and a slow beat should not be an alert.
     threshold: 2,
     cooldownSeconds: 600,
-    notifyChannels: [...MONITOR_CHANNELS],
+    notifyChannels: [...NOTIFY_CHANNELS],
     notifyLevel: "WARN",
     // Unlike "Box unreachable", a ladder here could actually do something —
     // the socket is open. It still ships as notify-only, because what to do
@@ -1327,7 +1327,7 @@ const SEEDS: Seed[] = [
     config: {},
     threshold: 1,
     cooldownSeconds: 1800,
-    notifyChannels: [...MONITOR_CHANNELS],
+    notifyChannels: [...NOTIFY_CHANNELS],
     notifyLevel: "WARN",
     // Nothing else is possible: a box Magnemite cannot reach cannot be told
     // to do anything about it.
@@ -1340,7 +1340,7 @@ const SEEDS: Seed[] = [
     config: {},
     threshold: 2,
     cooldownSeconds: 1800,
-    notifyChannels: [...MONITOR_CHANNELS],
+    notifyChannels: [...NOTIFY_CHANNELS],
     notifyLevel: "WARN",
     steps: [
       { atFailure: 1, action: "NOTIFY_ONLY" },
@@ -1360,7 +1360,7 @@ const SEEDS: Seed[] = [
     // one waits longer than the rest before it believes anything.
     threshold: 3,
     cooldownSeconds: 1800,
-    notifyChannels: [...MONITOR_CHANNELS],
+    notifyChannels: [...NOTIFY_CHANNELS],
     notifyLevel: "WARN",
     steps: [
       { atFailure: 1, action: "NOTIFY_ONLY" },
@@ -1377,7 +1377,7 @@ const SEEDS: Seed[] = [
     // reading is not five minutes of evidence. Five of them is.
     threshold: 5,
     cooldownSeconds: 1800,
-    notifyChannels: [...MONITOR_CHANNELS],
+    notifyChannels: [...NOTIFY_CHANNELS],
     notifyLevel: "WARN",
     steps: [
       { atFailure: 1, action: "NOTIFY_ONLY" },
@@ -1407,7 +1407,7 @@ const SEEDS: Seed[] = [
     // takes most of its memory in the first minute and hands some back.
     threshold: 3,
     cooldownSeconds: 1800,
-    notifyChannels: [...MONITOR_CHANNELS],
+    notifyChannels: [...NOTIFY_CHANNELS],
     notifyLevel: "WARN",
     steps: [
       { atFailure: 1, action: "CLEAR_CACHE_RESTART" },
@@ -1422,7 +1422,7 @@ const SEEDS: Seed[] = [
     // A disk fills slowly, so two in a row is a trend rather than a spike.
     threshold: 2,
     cooldownSeconds: 3600,
-    notifyChannels: [...MONITOR_CHANNELS],
+    notifyChannels: [...NOTIFY_CHANNELS],
     notifyLevel: "WARN",
     // The first rung is the only action on the catalog that actually frees
     // space, and the point of this rule is to run it *before* a rollout
@@ -1444,7 +1444,7 @@ const SEEDS: Seed[] = [
     config: { maxTempC: 85 },
     threshold: 3,
     cooldownSeconds: 3600,
-    notifyChannels: [...MONITOR_CHANNELS],
+    notifyChannels: [...NOTIFY_CHANNELS],
     notifyLevel: "WARN",
     // Telling you is the whole rule, and there is no honest second rung: no
     // action on the catalog cools a box down, and rebooting one does not --
@@ -1469,7 +1469,7 @@ const SEEDS: Seed[] = [
     // not announced as an outage.
     threshold: 2,
     cooldownSeconds: 1800,
-    notifyChannels: [...MONITOR_CHANNELS],
+    notifyChannels: [...NOTIFY_CHANNELS],
     // Every box on the machine is down at once, and none of them can be
     // started. There is no louder thing that can happen to a machine.
     notifyLevel: "CRITICAL",
@@ -1491,7 +1491,7 @@ const SEEDS: Seed[] = [
     // its memory in the first minute and hands some of it back afterwards.
     threshold: 3,
     cooldownSeconds: 1800,
-    notifyChannels: [...MONITOR_CHANNELS],
+    notifyChannels: [...NOTIFY_CHANNELS],
     notifyLevel: "WARN",
     // Telling you is the whole rule. The answer is fewer boxes or more swap,
     // and the OOM killer does not take the box that caused it -- so acting
@@ -1509,7 +1509,7 @@ const SEEDS: Seed[] = [
     // than a spike -- and nothing here can be fixed in a hurry anyway.
     threshold: 2,
     cooldownSeconds: 3600,
-    notifyChannels: [...MONITOR_CHANNELS],
+    notifyChannels: [...NOTIFY_CHANNELS],
     notifyLevel: "WARN",
     steps: [{ atFailure: 1, action: "NOTIFY_ONLY" }],
   },
@@ -1521,7 +1521,7 @@ const SEEDS: Seed[] = [
     config: {},
     threshold: 2,
     cooldownSeconds: 600,
-    notifyChannels: [...MONITOR_CHANNELS],
+    notifyChannels: [...NOTIFY_CHANNELS],
     notifyLevel: "WARN",
     steps: [
       { atFailure: 1, action: "NOTIFY_ONLY" },

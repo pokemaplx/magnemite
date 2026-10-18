@@ -6,8 +6,15 @@ import { cn } from "@/lib/utils";
 type TableProps = React.HTMLAttributes<HTMLTableElement> & {
   /**
    * Classes for the scroll box around the table — this is where a height cap
-   * goes (`max-h-[60vh]`), which turns on vertical scrolling with the header
-   * pinned.
+   * goes (`lg:max-h-[60vh]`), which turns on vertical scrolling with the
+   * header pinned.
+   *
+   * Cap from `lg` up, not on a phone. There a box that scrolls inside a page
+   * that scrolls is a trap — the thumb that meant to move the page moves the
+   * table — and iOS rubber-bands it in every direction, dragging the rows off
+   * into an empty box. Uncapped, a phone's table is as long as its rows and
+   * the page does the scrolling. Where the rows are unbounded and a cap has
+   * to stay, add `pointer-coarse:overscroll-y-none` to stop the bounce.
    */
   containerClassName?: string;
 };
@@ -15,8 +22,10 @@ type TableProps = React.HTMLAttributes<HTMLTableElement> & {
 const Table = React.forwardRef<HTMLTableElement, TableProps>(
   ({ className, containerClassName, ...props }, ref) => (
     // Wide fleet tables scroll inside their own box rather than the page, and
-    // with a height cap they scroll vertically here too.
-    <div className={cn("relative w-full overflow-auto", containerClassName)}>
+    // with a height cap they scroll vertically here too. Sideways there is
+    // nothing past the edge worth showing, so no bounce — and no chaining,
+    // which on a trackpad is the browser's back gesture.
+    <div className={cn("relative w-full overflow-auto overscroll-x-none", containerClassName)}>
       <table ref={ref} className={cn("w-full caption-bottom text-sm", className)} {...props} />
     </div>
   ),

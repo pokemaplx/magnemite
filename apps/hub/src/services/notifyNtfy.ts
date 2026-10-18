@@ -1,5 +1,5 @@
-import { type MonitorLevel, type MonitorSettingsValues } from "@magnemite/db";
-import { type AlertInput, alertBody, alertTitle, deviceUrl } from "./alerts.js";
+import { type MonitorLevel, type NotifySettingsValues } from "@magnemite/db";
+import { type Notice, dashboardUrl, noticeTitle } from "./alerts.js";
 import { log } from "../log.js";
 
 /**
@@ -31,25 +31,24 @@ const LEVEL_TAGS: Record<MonitorLevel, string[]> = {
   CRITICAL: ["rotating_light"],
 };
 
-export function ntfyConfigured(settings: MonitorSettingsValues): boolean {
+export function ntfyConfigured(settings: NotifySettingsValues): boolean {
   return Boolean(settings.ntfyUrl && settings.ntfyTopic);
 }
 
-export async function sendNtfy(
-  alert: AlertInput,
-  settings: MonitorSettingsValues,
-): Promise<boolean> {
+export async function sendNtfy(notice: Notice, settings: NotifySettingsValues): Promise<boolean> {
   if (!ntfyConfigured(settings)) return false;
 
+  const level = notice.quiet ? "INFO" : notice.level;
   const body = {
     topic: settings.ntfyTopic,
-    title: alertTitle(alert),
-    // ntfy renders an empty message as the topic name, which reads like a bug.
-    // A recovery with nothing else to say is the case that hits this.
-    message: alertBody(alert) || alert.message,
-    priority: alert.recovery ? LEVEL_PRIORITY.INFO : LEVEL_PRIORITY[alert.level],
-    tags: alert.recovery ? LEVEL_TAGS.INFO : LEVEL_TAGS[alert.level],
-    click: deviceUrl(alert.deviceId),
+    title: noticeTitle(notice),
+    message: notice.body,
+    priority: LEVEL_PRIORITY[level],
+    // ntfy turns a tag that names an emoji into that emoji in front of the
+    // title. A notice that brings its own icon already has one there, and two
+    // in a row reads as a glitch.
+    tags: notice.icon ? [] : LEVEL_TAGS[level],
+    click: dashboardUrl(notice.path),
   };
 
   const headers: Record<string, string> = { "Content-Type": "application/json" };
@@ -68,7 +67,7 @@ export async function sendNtfy(
     // in seconds to minutes, which is longer than the next monitor pass — so
     // waiting here would hold the pass open for an alert the next one sends
     // anyway. Discord's 429 is sub-second, which is why that one does retry.
-    log.warn({ status: res.status, topic: settings.ntfyTopic }, "ntfy refused an alert");
+    log.warn({ status: res.status, topic: settings.ntfyTopic }, "ntfy refused a notification");
     return false;
   } catch (err) {
     log.warn({ err }, "ntfy unreachable");

@@ -20,11 +20,12 @@ Both compile into the same `apps/web/.next`, and each one deletes the other's
 output. The symptom is baffling: a route logs `✓ Compiled /settings` and then
 `GET /settings 404`, with `ENOENT` on files under `.next/server/app/`.
 
-Before starting one, check nothing else is already serving the web app:
+Before starting one, check nothing else is already serving the web app (the
+docs run the same Next, so one on :3002 shows up here too — that one is fine):
 
 ```powershell
 Get-CimInstance Win32_Process -Filter "Name='node.exe'" |
-  Where-Object { $_.CommandLine -match 'next@15' } |
+  Where-Object { $_.CommandLine -match 'next@16' } |
   ForEach-Object { "$($_.ProcessId)  $((Get-NetTCPConnection -OwningProcess $_.ProcessId -State Listen -EA SilentlyContinue).LocalPort)" }
 ```
 
@@ -122,11 +123,29 @@ new timeout at once and a fleet still on the old beat would be marked offline.
 That push is what makes both feel immediate; a box that is offline picks the
 change up when it comes back.
 
-Settings are two groups in the one `Setting` table: the hub knobs are
-unprefixed, monitoring is under `monitor.`. `getHubSettings` used to keep a row
-only when `typeof row.value === "number"`, which silently dropped the first
-string setting anyone added — it now compares against the default's type, so a
-string or a boolean survives. If you add a group, go through `readGroup`.
+Settings are groups in the one `Setting` table, by key prefix: the hub knobs
+are unprefixed, then `monitor.`, `redroid.`, `notify.` (the channels and the
+repeat window) and `notify.event.` (one list of channels per fleet event).
+`getHubSettings` used to keep a row only when `typeof row.value === "number"`,
+which silently dropped the first string setting anyone added — it now compares
+against the default's type, and a list default against `Array.isArray`, so a
+string, a boolean or a list survives. If you add a group, go through
+`readGroup`.
+
+## Fleet notifications fire on transitions
+
+`apps/hub/src/services/fleetEvents.ts` announces rollouts, builds, machines and
+agent updates, and each `announceX` is called exactly where a state changes —
+never from something that re-reads a state. Two consequences that are easy to
+undo by accident:
+
+- **`recomputeRollout` writes the status with a compare-and-set**
+  (`updateMany where status = <what it read>`). Turning it back into a plain
+  `update` brings back the race where two jobs finishing together both
+  complete the rollout, announce it twice and release its waiters twice.
+- **Anything fed from a poll or a sweep keeps its own memory** — the source
+  failure streak, the agent versions already announced, the join-install
+  throttle. Hooking a new event onto a loop without one is a message per pass.
 
 ## Monitoring will reboot your fleet if you let it
 
@@ -141,7 +160,7 @@ are easy to break by accident:
   the hub and drops every socket at once. Without the grace, editing this repo
   is indistinguishable from a fleet-wide outage, and the fleet gets rebooted.
 - **`monitorRan` is what makes an empty reading readable.** An absent
-  `foregroundPackage` means the launcher is up (a fault) *and* means the agent
+  `foregroundPackage` means the launcher is up (a fault) _and_ means the agent
   never looked (leave it alone). Only the flag separates them.
 
 Seeded rules are written disabled and only when the table is empty. Keep it

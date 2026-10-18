@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState, useTransition } from "react";
-import { useRouter } from "next/navigation";
+import { useRouter } from "@bprogress/next/app";
 import {
   AlertTriangle,
   CheckCircle2,
@@ -519,7 +519,7 @@ export function ManualInstall({
           });
           setProbe(null);
           setUrl("");
-          router.refresh();
+          router.refresh({ showProgress: false });
         })
         .finally(() => setFetching(false));
     })();
@@ -575,7 +575,7 @@ export function ManualInstall({
         feed: null,
       });
       clearFile();
-      router.refresh();
+      router.refresh({ showProgress: false });
     };
 
     xhr.onerror = () => {
@@ -662,7 +662,7 @@ export function ManualInstall({
         return;
       }
       if (selected?.id === build.id) setSelected(null);
-      router.refresh();
+      router.refresh({ showProgress: false });
     });
   }
 
@@ -1244,7 +1244,7 @@ export function ManualInstall({
           </div>
 
           <div className="rounded-lg border border-border">
-            <Table containerClassName="max-h-80">
+            <Table containerClassName="max-h-80 pointer-coarse:overscroll-y-none">
               <TableHeader>
                 <TableRow>
                   <TableHead className="w-10" />

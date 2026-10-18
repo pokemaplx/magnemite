@@ -125,7 +125,7 @@ export function RolloutJobs({
 
   return (
     <div className="overflow-hidden rounded-xl border border-border bg-card">
-      <Table containerClassName="max-h-[60vh]">
+      <Table containerClassName="lg:max-h-[60vh]">
         <TableHeader>
           <TableRow>
             <TableHead className="w-8" />

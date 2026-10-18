@@ -125,8 +125,8 @@ POST /internal/uploads                     POST /internal/uploads/probe
 POST /internal/uploads/from-url            POST /internal/versions/:id/cache
 POST /internal/versions/prune              POST /internal/sources/poll
 
-# monitoring
-POST /internal/monitor/run                 POST /internal/monitor/test
+# monitoring and notifications
+POST /internal/monitor/run                 POST /internal/notify/test
 
 # called by the edge, not the dashboard
 ALL  /internal/authz                       (forward_auth, and the one route the

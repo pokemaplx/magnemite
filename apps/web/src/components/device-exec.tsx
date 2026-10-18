@@ -139,7 +139,7 @@ export function DeviceExec({
         onOpenChange(next);
       }}
     >
-      <DialogContent className="flex max-h-[85vh] w-[min(48rem,95vw)] max-w-none flex-col gap-4">
+      <DialogContent className="flex w-[min(48rem,calc(100%-2rem))] max-w-none flex-col gap-4">
         <DialogHeader>
           <DialogTitle className="flex items-center gap-2">
             {view === "config" ? (

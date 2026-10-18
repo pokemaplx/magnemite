@@ -1,20 +1,17 @@
 "use client";
 
-import { useActionState, useState, useTransition } from "react";
-import { Binoculars, MessageSquare, Send, Smartphone } from "lucide-react";
-import { sendTestAlert, updateMonitorSettings } from "@/actions/monitoring";
+import { useActionState, useState } from "react";
+import { Binoculars } from "lucide-react";
+import { updateMonitorSettings } from "@/actions/monitoring";
 import type { ActionState } from "@/actions/rollouts";
-import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
-import { Input } from "@/components/ui/input";
-import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
 import { SaveButton } from "@/components/ui/save-button";
-import { NumberField, SettingGroup } from "@/components/settings/setting-fields";
+import { NumberField, Outcome, SettingGroup } from "@/components/settings/setting-fields";
 import type { MonitorSettingsRow } from "@/components/settings/monitoring-section";
 
 /**
- * The monitoring knobs, on the Hub tab rather than beside the rules.
+ * The monitoring knobs, on the Tuning tab rather than beside the rules.
  *
  * They are tuning, not policy: ceilings, graces and intervals, all of them
  * measured against numbers that were already here — the pass runs once per
@@ -23,9 +20,11 @@ import type { MonitorSettingsRow } from "@/components/settings/monitoring-sectio
  * themselves; a tab away, each one had to be restated in a hint.
  *
  * The Monitoring tab keeps what an operator actually edits day to day: the
- * switch, and the rules.
+ * switch, and the rules. Where alerts go, and how often the same one may be
+ * repeated, is on the Notifications tab with every other message the fleet
+ * sends.
  *
- * Still their own forms, and still the `monitor.` group in the one `Setting`
+ * Still its own form, and still the `monitor.` group in the one `Setting`
  * table — same page, separate saves, so a half-typed ceiling cannot take the
  * heartbeat down with it.
  */
@@ -59,7 +58,7 @@ export function MonitorTuningCard({
         <form action={formAction} className="flex flex-col gap-6">
           {/* Only the fields below are posted. The action reads an absent field
               as "this card does not own it" and keeps what is stored, so there
-              is nothing here mirroring the master switch or the Discord card. */}
+              is nothing here mirroring the master switch. */}
 
           {/* No heartbeat or offline readout here any more: both are real
               fields on the Hub settings card directly above, and a disabled
@@ -129,16 +128,10 @@ export function MonitorTuningCard({
             />
           </SettingGroup>
 
-          <SettingGroup title="Noise and history">
-            <NumberField
-              name="alertDedupeMinutes"
-              label="Repeat an alert after"
-              value={settings.alertDedupeMinutes}
-              min={0}
-              unit="minutes"
-              disabled={disabled}
-              hint="The same signal on the same box is not announced again inside this. The action still happens; only the message is held."
-            />
+          {/* The repeat window that used to sit beside this moved to the
+              Notifications tab: it decides whether a message goes out, not
+              whether a box is touched. */}
+          <SettingGroup title="History">
             <NumberField
               name="eventRetentionDays"
               label="Keep history for"
@@ -190,221 +183,6 @@ export function MonitorTuningCard({
           <Outcome state={state} />
           {!disabled ? (
             <div className="flex justify-end">
-              <SaveButton state={state} />
-            </div>
-          ) : null}
-        </form>
-      </CardContent>
-    </Card>
-  );
-}
-
-/**
- * The one outcome a save button cannot show: saved, but the hub could not be
- * told, so it is still running on the old values.
- */
-function Outcome({ state }: { state: ActionState }) {
-  if (state.error) return <p className="text-sm text-destructive">{state.error}</p>;
-  if (state.ok && state.message && state.message !== "Saved.") {
-    return <p className="text-sm text-warning">{state.message}</p>;
-  }
-  return null;
-}
-
-// ---------------------------------------------------------------------------
-// Discord
-// ---------------------------------------------------------------------------
-
-export function MonitorDiscordCard({
-  settings,
-  disabled,
-}: {
-  settings: MonitorSettingsRow;
-  disabled: boolean;
-}) {
-  const [state, formAction] = useActionState<ActionState, FormData>(updateMonitorSettings, {});
-  const [test, setTest] = useState<ActionState>({});
-  const [pending, startTransition] = useTransition();
-
-  return (
-    <Card>
-      <CardHeader>
-        <CardTitle className="flex items-center gap-2">
-          <MessageSquare className="h-4 w-4 text-muted-foreground" />
-          Discord
-        </CardTitle>
-        <CardDescription>
-          Where alerts go, configured in the channel&rsquo;s Integrations settings. Empty turns
-          notifications off and leaves the rules running.
-        </CardDescription>
-      </CardHeader>
-
-      <CardContent>
-        {/* Only this card's fields are posted: the action keeps the timings
-            and ceilings the other card owns. This form used to mirror them in
-            hidden inputs, and one of them was missing — which is what made
-            saving a webhook fail over a number that is not on this card. */}
-        <form action={formAction} className="flex flex-col gap-4">
-          <div className="flex flex-col gap-1.5">
-            <Label htmlFor="discordWebhookUrl">Webhook URL</Label>
-            <Input
-              id="discordWebhookUrl"
-              name="discordWebhookUrl"
-              type="url"
-              placeholder="https://discord.com/api/webhooks/…"
-              defaultValue={settings.discordWebhookUrl}
-              disabled={disabled}
-              className="font-mono text-xs"
-            />
-            <p className="text-xs text-muted-foreground">
-              From the channel&rsquo;s Integrations settings. Empty turns notifications off and
-              leaves the rules running.
-            </p>
-          </div>
-
-          {/* No minimum severity here any more. Which rules reach Discord is
-              the rules' own answer, on each rule — two filters in series meant
-              a rule set to announce could silently not, with nothing on it to
-              say why. */}
-          <div className="flex flex-col gap-1.5 sm:max-w-xs">
-            <Label htmlFor="discordMentionRoleId">Role to ping (optional)</Label>
-            <Input
-              id="discordMentionRoleId"
-              name="discordMentionRoleId"
-              placeholder="123456789012345678"
-              defaultValue={settings.discordMentionRoleId}
-              disabled={disabled}
-              className="font-mono text-xs"
-            />
-            <p className="text-xs text-muted-foreground">Pinged on critical alerts only.</p>
-          </div>
-
-          <Outcome state={state} />
-          {test.error ? <p className="text-sm text-destructive">{test.error}</p> : null}
-          {test.ok ? <p className="text-sm text-success">{test.message}</p> : null}
-
-          {!disabled ? (
-            <div className="flex flex-wrap justify-end gap-2">
-              <Button
-                type="button"
-                variant="outline"
-                disabled={pending}
-                onClick={() => {
-                  startTransition(async () => setTest(await sendTestAlert()));
-                }}
-              >
-                <Send className="h-4 w-4" />
-                Send test alert
-              </Button>
-              <SaveButton state={state} />
-            </div>
-          ) : null}
-        </form>
-      </CardContent>
-    </Card>
-  );
-}
-
-// ---------------------------------------------------------------------------
-// ntfy
-// ---------------------------------------------------------------------------
-
-export function MonitorNtfyCard({
-  settings,
-  disabled,
-}: {
-  settings: MonitorSettingsRow;
-  disabled: boolean;
-}) {
-  const [state, formAction] = useActionState<ActionState, FormData>(updateMonitorSettings, {});
-  const [test, setTest] = useState<ActionState>({});
-  const [pending, startTransition] = useTransition();
-
-  return (
-    <Card>
-      <CardHeader>
-        <CardTitle className="flex items-center gap-2">
-          <Smartphone className="h-4 w-4 text-muted-foreground" />
-          ntfy
-        </CardTitle>
-        <CardDescription>
-          A push notification on a phone, without an account anywhere. Empty topic turns it off and
-          leaves the rules running.
-        </CardDescription>
-      </CardHeader>
-
-      <CardContent>
-        {/* Only this card's four fields are posted, and the action keeps
-            everything it does not see — the same contract the Discord card
-            relies on. */}
-        <form action={formAction} className="flex flex-col gap-4">
-          <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
-            <div className="flex flex-col gap-1.5">
-              <Label htmlFor="ntfyUrl">Server</Label>
-              <Input
-                id="ntfyUrl"
-                name="ntfyUrl"
-                type="url"
-                placeholder="https://ntfy.sh"
-                defaultValue={settings.ntfyUrl}
-                disabled={disabled}
-                className="font-mono text-xs"
-              />
-              <p className="text-xs text-muted-foreground">
-                The public ntfy.sh, or your own. Install the ntfy app and subscribe to the topic.
-              </p>
-            </div>
-
-            <div className="flex flex-col gap-1.5">
-              <Label htmlFor="ntfyTopic">Topic</Label>
-              <Input
-                id="ntfyTopic"
-                name="ntfyTopic"
-                placeholder="magnemite-3f9a2c"
-                defaultValue={settings.ntfyTopic}
-                disabled={disabled}
-                className="font-mono text-xs"
-              />
-              <p className="text-xs text-muted-foreground">
-                On ntfy.sh anyone who guesses the topic reads your alerts, so pick a name nobody
-                would.
-              </p>
-            </div>
-          </div>
-
-          <div className="flex flex-col gap-1.5 sm:max-w-xs">
-            <Label htmlFor="ntfyToken">Access token (optional)</Label>
-            <Input
-              id="ntfyToken"
-              name="ntfyToken"
-              type="password"
-              placeholder="tk_…"
-              defaultValue={settings.ntfyToken}
-              disabled={disabled}
-              className="font-mono text-xs"
-            />
-            <p className="text-xs text-muted-foreground">
-              Only for a protected or reserved topic. Empty publishes anonymously.
-            </p>
-          </div>
-
-          <Outcome state={state} />
-          {test.error ? <p className="text-sm text-destructive">{test.error}</p> : null}
-          {test.ok ? <p className="text-sm text-success">{test.message}</p> : null}
-
-          {!disabled ? (
-            <div className="flex flex-wrap justify-end gap-2">
-              <Button
-                type="button"
-                variant="outline"
-                disabled={pending}
-                onClick={() => {
-                  startTransition(async () => setTest(await sendTestAlert()));
-                }}
-              >
-                <Send className="h-4 w-4" />
-                Send test alert
-              </Button>
               <SaveButton state={state} />
             </div>
           ) : null}

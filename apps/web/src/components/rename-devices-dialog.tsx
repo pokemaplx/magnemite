@@ -306,7 +306,7 @@ export function RenameDevicesDialog({
 
             {plan && !plan.error ? (
               <div className="overflow-hidden rounded-xl border border-border">
-                <Table containerClassName="max-h-64">
+                <Table containerClassName="lg:max-h-64">
                   <TableHeader>
                     <TableRow>
                       <TableHead>Device</TableHead>

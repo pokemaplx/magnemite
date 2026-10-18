@@ -19,7 +19,7 @@ resource's **Environment** tab.
 | ------------------------- | ------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `EDGE_PORT`               | `8090`                    | Host port the edge publishes, plain HTTP. Your proxy terminates TLS and forwards here. Compose only.                                                                                                                |
 | `MAGNEMITE_PUBLIC_URL`    | —                         | Base URL handed to agents. **Artifact URLs are built from it**, so it must be what the boxes can reach. On Coolify it defaults to the edge's generated domain (`SERVICE_URL_EDGE`); set it to override a stale one. |
-| `MAGNEMITE_DASHBOARD_URL` | `MAGNEMITE_PUBLIC_URL`    | The dashboard's own origin — auth callbacks and alert links. On Coolify it defaults to the web service's generated domain (`SERVICE_URL_WEB`), which is a different host from the agents' one.                      |
+| `MAGNEMITE_DASHBOARD_URL` | `MAGNEMITE_PUBLIC_URL`    | The dashboard's own origin — auth callbacks and notification links. On Coolify it defaults to the web service's generated domain (`SERVICE_URL_WEB`), which is a different host from the agents' one.               |
 | `BETTER_AUTH_URL`         | `MAGNEMITE_DASHBOARD_URL` | Only when neither of the above is the right origin for auth callbacks. A bare host with no scheme is accepted.                                                                                                      |
 | `HUB_URL`                 | `http://hub:3001`         | Where the dashboard reaches the hub's internal API, over the compose network.                                                                                                                                       |
 
@@ -59,9 +59,9 @@ resource's **Environment** tab.
 
 ## Web push
 
-Optional; see [Monitoring](/docs/fleet/monitoring#web-push). Without a keypair
-web push is simply unavailable, and the Monitoring tab says so rather than
-offering a button that cannot work.
+Optional; see [Notifications](/docs/fleet/notifications#web-push). Without a
+keypair web push is simply unavailable, and the Notifications tab says so rather
+than offering a button that cannot work.
 
 | Variable            | Default                    | What it is                                                                               |
 | ------------------- | -------------------------- | ---------------------------------------------------------------------------------------- |
@@ -81,9 +81,9 @@ npx web-push generate-vapid-keys
   `AUTH_SECRET`, and change it only when you mean to start over.
 </Callout>
 
-The Discord webhook, the ntfy topic and each channel's minimum severity are
-**not** here — those are pasted into **Settings → Monitoring**, because they
-are changed while running rather than at boot.
+The Discord webhook, the ntfy topic and which events go where are **not** here
+— those are set on **Settings → Notifications**, because they are changed while
+running rather than at boot.
 
 ## Rotom
 
@@ -119,5 +119,6 @@ Version sources are rows in the database (**Settings → Version sources**).
 Automatic rollouts, canary, soak, attempts, backoff, cooldown and the rollout
 window are per app target (**Settings → Apps**). Everything fleet-wide and
 numeric — concurrency, stall timeout, heartbeat, offline timeout, sample
-interval, retention, monitoring graces and ceilings, the Discord webhook — is
-in **Settings → Tuning**.
+interval, retention, monitoring graces and ceilings — is in **Settings →
+Tuning**. The Discord webhook, the ntfy topic and the rest of where
+notifications go are in **Settings → Notifications**.

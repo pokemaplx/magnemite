@@ -7,6 +7,7 @@ import { log } from "../log.js";
 import { getConnection, sendTo } from "../registry.js";
 import { composeServiceName, renderCompose } from "./redroidCompose.js";
 import { execOnDevice } from "./deviceCommands.js";
+import { announceConvergeFailed } from "./fleetEvents.js";
 import { REDROID_IMAGE } from "../version.js";
 
 /**
@@ -703,6 +704,9 @@ export async function recordConvergeResult(
   bus.publish({ kind: "device", deviceId });
 
   log.info({ deviceId, requestId: result.requestId, ok: result.ok }, "converge reported");
+  // Every failure, with no memory of the last one: each converge the hub
+  // sends is answered once, and nothing sends the same one again by itself.
+  if (failed) announceConvergeFailed(deviceId, convergeError(result));
 }
 
 /** The error plus docker's own output, which is usually where the reason is. */

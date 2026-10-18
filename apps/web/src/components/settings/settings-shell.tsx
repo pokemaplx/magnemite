@@ -118,8 +118,8 @@ export function SettingsShell({ sections }: { sections: SettingsSection[] }) {
       >
         <h1 className="font-display text-xl font-semibold tracking-tight">Settings</h1>
         <p className="mt-1 text-sm text-muted-foreground">
-          Auto-update policy, where versions are discovered, per-group install hooks, and the tokens
-          new boxes enroll with.
+          Auto-update policy, where versions are discovered, where notifications go, per-group
+          install hooks, and the tokens new boxes enroll with.
         </p>
       </header>
 
