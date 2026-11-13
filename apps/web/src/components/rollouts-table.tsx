@@ -33,6 +33,8 @@ export type RolloutRow = {
   version: string;
   source: VersionSource;
   status: RolloutStatus;
+  /** What a PENDING rollout is waiting on, as "Pokémon GO 0.433.0". */
+  waitingFor: string | null;
   mode: string;
   forceClean: boolean;
   startedBy: string;
@@ -123,6 +125,7 @@ export function RolloutsTable({ rows }: { rows: RolloutRow[] }) {
           value={query}
           onChange={setQuery}
           placeholder="Search app, version, status, who started it…"
+          shortcut
         />
         <Select
           aria-label="Filter by status"
@@ -157,7 +160,7 @@ export function RolloutsTable({ rows }: { rows: RolloutRow[] }) {
       </div>
 
       <div className="overflow-hidden rounded-xl border border-border bg-card">
-        <Table containerClassName="max-h-[62vh]">
+        <Table containerClassName="lg:max-h-[62vh]">
           <TableHeader>
             <TableRow>
               <TableSortHead {...headProps("version")}>Version</TableSortHead>
@@ -209,6 +212,11 @@ export function RolloutsTable({ rows }: { rows: RolloutRow[] }) {
 
                     <TableCell>
                       <RolloutStatusBadge status={rollout.status} />
+                      {rollout.waitingFor ? (
+                        <div className="mt-1 text-xs text-muted-foreground">
+                          after {rollout.waitingFor}
+                        </div>
+                      ) : null}
                     </TableCell>
                     <TableCell>
                       <div className="flex flex-col gap-1">

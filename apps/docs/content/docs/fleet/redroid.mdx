@@ -1,0 +1,356 @@
+---
+title: Boxes in containers
+description: Run boxes as Redroid containers instead of hardware. The image is the install, so there is no zip to flash...
+icon: Container
+---
+
+[Redroid](https://github.com/remote-android/redroid-doc) is Android running as a
+Docker container on a Linux host. Magnemite treats one container as one box: it
+enrolls, heartbeats, takes rollouts and installs real APKs, all through the same
+agent and the same protocol as a TV box on a shelf.
+
+This is not the [fake fleet](/docs/development/fake-fleet). A fake box is a Go
+process on your laptop wearing an Android costume, with `pm` and `dumpsys`
+stubbed out. A Redroid box is Android — `pm install-create` genuinely installs.
+
+This page is the **image and the container**: what to build, what to pass it,
+and what a box can and cannot see from inside one. The Linux machine underneath
+is itself a device in Magnemite — see
+[The machines that run them](/docs/fleet/redroid-hosts) for what it reports,
+what the Machines screens say, and the traps that belong to the host rather than
+to the box.
+
+## What Magisk was actually for
+
+Nothing in the agent binary needs Magisk. It never shells out to `su` and never
+checks whether it is root; it assumes it was started as root and would fail at
+the first `pm` call if it were not. Magisk supplies exactly three things, all of
+them in `service.sh`: start the agent as root, wait for `sys.boot_completed`,
+restart it when it exits.
+
+Android's own `init` does all three. So the container equivalent of the module
+zip is an init service — `agent/redroid/magnemite.rc` — and a start script that
+does what `customize.sh` did at flash time.
+
+## Host requirements
+
+- **arm64.** The fleet's bundles carry an `arm64-v8a` split and the agent
+  matches the ABI exactly, refusing to install the wrong native libraries. An
+  x86_64 Redroid needs ARM translation and a different split policy; it is not
+  a supported target.
+- **The binder kernel module**, with the device names Android expects — **and
+  the devices openable by somebody other than root**:
+
+```sh
+sudo modprobe binder_linux devices="binder,hwbinder,vndbinder"
+sudo chmod 0666 /dev/binder /dev/hwbinder /dev/vndbinder
+# kernels older than 5.18 also want:
+sudo modprobe ashmem_linux
+```
+
+<Callout type="warn" title="The chmod is not optional, and skipping it looks like something else">
+  modprobe creates these `0600 root:root`, and Android runs its services as uid 1000, 1013 and
+  friends — a privileged container inherits the mode, so every one of them aborts on the open with
+  `Binder driver could not be opened. Terminating.` What you see is a container that docker reports
+  as **Up**, with empty `docker logs` (Android logs to logcat, not stdout), idling at a few percent
+  CPU and never reaching `sys.boot_completed` — which from the dashboard is a box that is running
+  and never enrols. It survives neither a reboot nor a module reload, so it wants a udev rule; a
+  [hub-provisioned machine](/docs/deployment/redroid-bootstrap) is given one.
+</Callout>
+
+## Build the image
+
+```sh
+make redroid
+# → magnemite/redroid:5
+```
+
+Unlike `make module`, this takes no `SERVER` and no `TOKEN`. **The image holds
+no secret**, so one image serves every fleet — the hub URL and the enrollment
+token are properties passed to each container at run time.
+
+### What the image fixes that a container cannot fix for itself
+
+Three of them, and all three were found the hard way: each one leaves a scanner
+that is **running, reported healthy, and doing nothing at all**. They are
+listed in the order they bite, and the third hides behind the second — a
+granted root that the app can never ask for looks exactly like no grant.
+
+- **A `su` an app can reach.** `--setup-sbin` puts Magisk's applets in `/sbin`,
+  and `/sbin` is **not** on the PATH the zygote gives apps. What _is_ on it is
+  the base image's own stub at `/system/xbin/su`, mode `-rwsr-x--- root shell`
+  — executable by uid 0 and the `shell` group, and by no app. So
+  `exec("su")` dies with `EACCES` before Magisk is involved: **magiskd logs no
+  request and SELinux logs no denial**, and the scanner falls back to an
+  unprivileged shell that cannot traverse `/data/adb` (0700, root). The image
+  ships `/system/bin/su` as a symlink to the binary, and `/system/bin` comes
+  before `/system/xbin`, so it wins the lookup without replacing the base's
+  file. The prerooted base this replaced had Magisk inside `/system` already,
+  which is why this only appeared once the injection became ours.
+
+- **Magisk's busybox.** The scanner's injector calls
+  `/data/adb/magisk/busybox` by absolute path, and this base image gives root
+  without ever putting one there — that directory is empty on a fresh box. The
+  image carries Magisk's own build and the start script seeds it into `/data`,
+  which is a volume and therefore survives nothing the image does. It is
+  checked by **applet**, not by existence, because the two obvious substitutes
+  both exist and neither works: a symlink to Android's `toybox` answers
+  `Unknown command busybox`, and Debian's `busybox-static` is built without
+  `pgrep`.
+- **The root grant.** Magisk keys its su policy on the **uid**, Android gives a
+  package a new uid when it is installed fresh rather than updated, and a
+  request nobody answers times out as a _deny_ that is then written down. On
+  hardware a person taps Grant; a container has no screen. So **every rollout
+  that reinstalls the scanner revokes its root**, and the agent reconciles the
+  policy after each install — only where the image ships
+  `/system/bin/magnemite-root-grant`, which is nowhere else.
+
+  The same uid change happens on **hardware**, and nothing here fixes it: an
+  install that falls back to uninstall-and-reinstall is just as unattended
+  there, and a Magisk module ships no helper to reconcile with. The difference
+  is only that a box with a screen _can_ be answered — by somebody who knows
+  to.
+
+<Callout type="warn" title="An existing machine needs to be told">
+  The image tag moves when what is *in* the image changes — `redroid=` in `VERSION` — so a machine
+  provisioned from now on builds the new one. A machine that already exists does **not** rebuild by
+  itself: the bootstrap's image step skips a tag it already has. **Re-run setup** is what builds the
+  new one — the script and the files that build the image travel with that request, so it is the
+  current image rather than the one from the day the machine was provisioned.
+
+Two steps, not one. Building the image does not move the containers onto it, because the compose
+file did not change: **Re-apply** afterwards is what recreates them.
+
+Both are on the machine's page, in the menu beside **Save** on the Containers card — not beside it
+as buttons, because they ignore the two fields there and Save is the only thing that reads them.
+
+</Callout>
+
+<Callout type="warn" title="What both failures look like">
+  Not a crash, not a restart loop, not an OOM. The injector shells out, the shell fails, and the
+  failure text is substituted into the injector's command line as a parameter — so the scanner
+  reports `Cannot parse integer value for -p` and carries on relaunching the game. Nothing says
+  "no root" and nothing says "no busybox". `docker exec <container> logcat -b crash -d` and the
+  `Injecting:` lines are where it is legible.
+</Callout>
+
+The tag comes from the `redroid=` line of `VERSION`, and deliberately **not**
+from the agent's. The agent inside is only a seed that each box's own
+self-update replaces, so a tag that moved with every agent release would change
+the `image:` line and have Docker recreate every container on the machine — a
+full Android cold boot each, to deliver a binary the boxes would have swapped
+in seconds on their own. Bump `redroid=` when the base image, the start script
+or the init service changes.
+
+The base image is `redroid/redroid:12.0.0_64only-latest` — the official
+image, and **64-bit only**. Magisk is not inherited from it; the build injects
+it, pinned to one version.
+
+Both values live as `ARG` defaults **in the Dockerfile** and nowhere else,
+which is also how you change them. The bootstrap builds this image on each
+machine with a plain `docker build` and no `--build-arg`, so the Dockerfile's
+defaults are what the whole fleet gets; a second default in the `Makefile`
+could drift from it and give one tag two meanings depending on who ran the
+build. `make redroid REDROID_BASE=… MAGISK_VERSION=…` still overrides either
+one for an experiment.
+
+### Why 64-bit only
+
+An arm64 Android normally ships two zygotes, and the 32-bit one needs AArch32,
+which Arm has been removing generation by generation. Neoverse N1 and V1
+(Ampere Altra, Graviton 2 and 3) still have it at EL0; **Neoverse V2 and V3
+(Graviton 4 and 5, Google Axion, NVIDIA Grace) and every Apple Silicon do
+not.** There the 32-bit zygote cannot start, and the symptom is a container
+that runs with an Android that never finishes booting — an instance left
+`running, not enrolled`, which reads like a network fault and is not one.
+
+Nothing is lost by dropping it. The fleet's `.apkm` bundles carry an
+`arm64-v8a` split and the agent picks a split by exact ABI match, so no 32-bit
+runtime was ever used by anything here. The `_64only` variants begin at Android
+12, which is why the base is 12 and not 11.
+
+### Why Magisk is injected rather than inherited
+
+The base used to be `abing7k/redroid:a11_magisk_arm`, prerooted, and that was a
+dead end: it carries Magisk Delta 25206 canary from a 2023 androidfilehost
+mirror, Delta's own repositories are gone from GitHub, and the repo that built
+it says it is no longer maintained. **Nobody can rebuild that image**, its
+author included.
+
+So the injection is ours, and it is the same one
+[`ayasa520/redroid-script`](https://github.com/ayasa520/redroid-script)
+performs — the script `abing7k` forked, still maintained, and the source of
+every line of the init block in the Dockerfile. Bootless Magisk is a handful of
+binaries under `/system/etc/init/magisk` plus a hook appended to `bootanim.rc`,
+so doing it in the image keeps provisioning to one `docker build` on the
+machine: no Python, no `lzip`, nothing fetched from a third party while a
+machine is being set up.
+
+The apk comes from
+[`ayasa520/Magisk`](https://github.com/ayasa520/Magisk) — the script's own
+source for it, and **not** `topjohnwu/Magisk`. That is load-bearing rather than
+incidental, and it is the one thing to understand before bumping `MAGISK`.
+
+<Callout type="error" title="The init block needs the fork's Magisk, and upstream's fails silently">
+  `--setup-sbin` and `--auto-selinux` appear on every line of the hook, and **neither flag is a
+  Magisk feature**. They are patches carried by the fork, whose branch is named
+  `direct-system-install`; upstream has never had them.
+
+Point `MAGISK_REPO` at `topjohnwu` and nothing visibly breaks: the tag resolves, the apk unpacks,
+the binaries are named what the hook calls, and the image builds clean. Then every box boots with
+**no root at all** — `init` runs `--setup-sbin`, Magisk answers `Unrecognized argument`,
+`/sbin/magisk` is never created, and each later line of the hook calls a binary that does not
+exist. There is no daemon left to complain to, so nothing in `logcat` mentions root; what an
+operator sees is a scanner that installs, launches the game, reports healthy and injects nothing —
+the same silence as the two failures above, and reached a different way.
+
+`make redroid` now refuses this: the build greps the binary for both flags and fails naming the
+repo. The `test -x` asserts never caught it, because upstream's binary is called `magisk` too.
+
+</Callout>
+
+<Callout type="warn" title="Hiding is Zygisk and the DenyList now, not MagiskHide">
+  This is not Delta. Delta's `hide=1` does not exist here and cannot be put back — there is nowhere
+  left to download Delta from. Hiding root from a scanner's worker processes is `zygisk=1` plus a
+  DenyList, which is the mechanism Magisk has had since v24. Anything that was configured against
+  MagiskHide has to be configured again.
+</Callout>
+
+The apk's md5 is pinned beside the version, so a release that moves or an owner
+changed by hand fails the build instead of the fleet. Trying another version
+means moving both, or `MAGISK_MD5=` empty to skip the check.
+
+## Run the boxes
+
+Set two values in `.env`:
+
+```sh title=".env"
+REDROID_HUB_URL=https://magnemite.example.com
+REDROID_ENROLL_TOKEN=…
+```
+
+```sh
+docker compose --env-file .env -f deploy/redroid.compose.yml up -d
+```
+
+<Callout type="warn">
+  `REDROID_HUB_URL` is the **hub** URL, never the dashboard's — the same rule, and the same failure,
+  as `SERVER` when [flashing a module](/docs/fleet/agent#build-the-module).
+</Callout>
+
+Each box is one service. The shipped file has two; a third is that block copied
+with a new name, a new volume and a new serial.
+
+<Callout type="info" title="That file is an example, maintained by hand">
+  `deploy/redroid.compose.yml` is yours: you edit it, you run `up -d`, and Magnemite never touches
+  it. A machine Magnemite [manages](/docs/fleet/redroid-hosts) keeps its own rendered file under its
+  own compose project instead, and bringing an existing hand-written one under that is what adoption
+  is for. Do not point both at the same containers.
+</Callout>
+
+| Property                    | What it does                                             |
+| --------------------------- | -------------------------------------------------------- |
+| `ro.serialno`               | The box's identity. **Must differ per box** — see below. |
+| `ro.magnemite.server`       | The hub URL.                                             |
+| `ro.magnemite.enroll_token` | Traded once for a device token, then dropped.            |
+| `ro.magnemite.reboot_cmd`   | What a reboot from the hub runs.                         |
+| `ro.magnemite.serial`       | Overrides the serial without touching `ro.serialno`.     |
+
+## The serial is the whole identity
+
+The hub keys a device on its serial string and nothing else. A box that reports
+a new serial is a new box, with a new row, a new name and no history.
+
+A container has no `ro.serialno` of its own, and the agent's fallback is the
+first MAC it finds — which Docker reassigns every time the container is
+recreated. Left alone, every `docker compose up --force-recreate` would fill
+the Devices table with duplicates.
+
+<Callout type="warn">
+  Give every box an explicit `ro.serialno`, unique across the fleet. Two boxes sharing one serial
+  are one box as far as the hub is concerned, and they will fight over it.
+</Callout>
+
+## Reboot means something different
+
+A container has no kernel of its own to restart — it shares the host's, and the
+kernel refuses `reboot(2)` without `CAP_SYS_BOOT`. Killing pid 1 from inside
+does not work either: the kernel ignores signals a process in its own PID
+namespace sends to its pid 1.
+
+So `ro.magnemite.reboot_cmd=stop && start` restarts the **framework** instead:
+zygote and every app come back, `init` and the kernel do not move. That is what
+a monitoring rule with a `REBOOT` action actually wants — the scanner and the
+game running again.
+
+The hub's reboot button and every `REBOOT` rule run this command. It is a
+property, so a fleet whose image handles reboots differently changes it without
+rebuilding anything.
+
+## Which metrics are real
+
+| Reading      | In a container                                                                                                                                               |
+| ------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Storage      | The box's own. `/data` is its volume.                                                                                                                        |
+| Uptime       | The box's own — how long _this_ Android has been up, not the host.                                                                                           |
+| Memory       | The box's own **if you set `mem_limit`**, from its cgroup. Without a limit it reads the host's total, and every box on the machine reports the same RAM.     |
+| CPU count    | Respects `cpuset`, not the `cpus` quota.                                                                                                                     |
+| CPU percent  | The box's own, from its cgroup — a share of one core, so 250 is two and a half cores. This is the reading to use, precisely because the load average is not. |
+| Load average | **The host's.** Linux has no per-container load average.                                                                                                     |
+| Temperature  | **The host's.** A container has no thermal sensor.                                                                                                           |
+
+Boxes sharing a host therefore show identical load and temperature. That is
+correct, not a bug — but do not write a monitoring rule that reads either as one
+box's own state. A probe that greps `/proc/loadavg` fails on every box on the
+machine at once, for one cause;
+[the host page explains why that is unfixable in code](/docs/fleet/redroid-hosts#what-is-the-machines-and-what-is-the-boxs).
+
+## Self-updates still work
+
+Exactly as on hardware: the hub sends `agent_update`, the box downloads with its
+own device token, verifies the sha256, keeps `.old` and re-execs.
+
+The agent runs from `/data/adb/magnemite/magnemite-agent`, not from
+`/system/bin` — `/system` is read-only at runtime, so an agent running from
+there could never replace itself. The image ships a seed copy in `/system/bin`,
+and `magnemite-start.sh` copies it across on first boot.
+
+A version marker keeps the two from fighting: an over-the-air update survives a
+`docker restart`, and rebuilding the image raises the floor for every box.
+
+<Callout type="info">
+  Rebuilding the image is only needed for a new agent floor, or when `magnemite.rc` or
+  `magnemite-start.sh` themselves change — the container equivalent of [when the module is needed
+  again](/docs/fleet/agent#when-the-module-is-needed-again).
+</Callout>
+
+## When a box does not appear
+
+Everything here is `docker`, not `adb`. The compose file publishes **no port at
+all** — no `5555`, nothing — so `adb connect <host>:5555` cannot work and never
+could; it connects to nothing and tells you the host is unreachable, which is
+not what is wrong. `docker exec` needs no port and no daemon inside the box.
+
+1. **Is the container even up?** `docker compose -f deploy/redroid.compose.yml ps`.
+   A container that is restarting is a boot failure, not an agent failure, and
+   the next step is where it says why.
+2. **What did Android say on the way up?**
+   `docker logs magnemite-box-01` — the container's stdout is `init`'s, which is
+   where a missing binder device or a failed mount shows up.
+3. **Did the service start?**
+   `docker exec magnemite-box-01 sh -c 'ps -A | grep magnemite-agent'`. It should
+   be there, as root.
+4. **What did the agent say?**
+   `docker exec magnemite-box-01 logcat -b all -d | grep -i magnemite`, and
+   `docker exec magnemite-box-01 cat /data/adb/magnemite/agent.log`.
+5. **SELinux.** Redroid normally runs permissive, and `magnemite.rc` sets no
+   `seclabel` for that reason. An image that enforces will deny the service; the
+   denial is in `logcat`.
+6. **A duplicate row per restart** is the serial. See above.
+
+<Callout type="info" title="A box's first boot is slow, and that is Magisk">
+  Magisk installs its own ~11 MB APK from a blocking `exec` in `bootanim.rc`, which `init` parses
+  before `magnemite.rc`. So the agent on a **brand new** container does not start until that
+  finishes, and a minute or two of nothing on a first boot is normal. A recreated container that
+  keeps its volume does not pay it again.
+</Callout>

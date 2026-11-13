@@ -1,14 +1,19 @@
 import type { ReactNode } from "react";
 import Link from "next/link";
-import { notFound } from "next/navigation";
-import { ArrowLeft, RadioTower } from "lucide-react";
+import { notFound, redirect } from "next/navigation";
+import { ArrowLeft, RadioTower, History } from "lucide-react";
+import { CAPABILITY_SCREENSHOT, hasCapability } from "@magnemite/protocol";
 import { prisma } from "@magnemite/db";
 import { requireUser } from "@/lib/session";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { ConnectivityBands } from "@/components/device-connectivity-bands";
+import { loadConnectivityTrend } from "@/lib/connectivity";
+import { actionPastLabel } from "@/lib/monitor-vocabulary";
 import { OnlineDot } from "@/components/status";
 import { DeviceControls } from "@/components/device-controls";
+import { DeviceShortcuts } from "@/components/device-shortcuts";
 import {
   DeviceHistory,
   type DeviceAgentUpdateRow,
@@ -19,6 +24,7 @@ import { DeviceHeartbeat, DeviceLastSeen } from "@/components/device-last-seen";
 import { DeviceLoadCard } from "@/components/device-load-card";
 import { RelativeTime } from "@/components/relative-time";
 import { loadRecentTrend } from "@/lib/metrics";
+import { execMitm } from "@/lib/mitm-columns";
 import { formatDuration, formatRelative } from "@/lib/format";
 
 export const dynamic = "force-dynamic";
@@ -27,11 +33,14 @@ export default async function DevicePage({ params }: { params: Promise<{ id: str
   const user = await requireUser();
   const { id } = await params;
 
-  const [device, groups, targets, trend] = await Promise.all([
+  const [device, groups, targets, trend, connectivity] = await Promise.all([
     prisma.device.findUnique({
       where: { id },
       include: {
         group: true,
+        // Set when the box is a Redroid container, which changes what removing
+        // it means: the container is the machine's to destroy, not this row's.
+        redroidInstance: { select: { id: true, hostId: true, index: true, present: true } },
         packages: { orderBy: { packageName: "asc" } },
         agentUpdates: {
           orderBy: { sentAt: "desc" },
@@ -68,11 +77,20 @@ export default async function DevicePage({ params }: { params: Promise<{ id: str
     prisma.appTarget.findMany({ where: { enabled: true }, select: { packageName: true } }),
     // The last hour behind each meter on the Load card.
     loadRecentTrend(id),
+    // Two bands of the same hour: was the socket up, and were beats landing.
+    loadConnectivityTrend(id),
   ]);
 
   if (!device) notFound();
+  // A machine is a Device, so this page would render for one -- with a MITM
+  // column, a scanner card and install controls that mean nothing on a VPS.
+  // It has its own page; send it there rather than showing a box-shaped one.
+  if (device.kind === "HOST") redirect(`/hosts/${device.id}`);
 
   const online = device.status === "ONLINE";
+  // An expired window reads as not parked, before the hub's sweep has cleared
+  // the column — the window is what the field means, not the row.
+  const parked = device.maintenanceUntil !== null && device.maintenanceUntil.getTime() > Date.now();
 
   const jobRows: DeviceJobRow[] = device.jobs.map((job) => ({
     id: job.id,
@@ -129,6 +147,24 @@ export default async function DevicePage({ params }: { params: Promise<{ id: str
             <p className="mt-1 font-mono text-xs text-muted-foreground">{device.serial}</p>
           </div>
           {!device.approved ? <Badge variant="warning">pending approval</Badge> : null}
+          {/* The dot is green because the socket is genuinely there. This is
+              the rest of the sentence: it is connected and has stopped saying
+              anything, which the two-value status has no room for. */}
+          {device.beatStaleSince ? (
+            <Badge
+              variant="warning"
+              title={`Connected, but nothing since ${device.beatStaleSince.toLocaleString()}`}
+            >
+              not reporting
+            </Badge>
+          ) : null}
+          {/* Next to the name rather than in a card, because it changes what
+              every other control on this page will do. */}
+          {parked ? (
+            <Badge variant="info" title={`Until ${device.maintenanceUntil!.toLocaleString()}`}>
+              in maintenance
+            </Badge>
+          ) : null}
         </div>
 
         {user.role !== "VIEWER" ? (
@@ -139,9 +175,15 @@ export default async function DevicePage({ params }: { params: Promise<{ id: str
             online={online}
             groupId={device.groupId}
             groups={groups.map((g) => ({ id: g.id, name: g.name }))}
+            maintenanceUntil={device.maintenanceUntil?.toISOString() ?? null}
+            canScreenshot={hasCapability(device.capabilities, CAPABILITY_SCREENSHOT)}
+            mitm={device.group ? execMitm(device.group) : null}
+            instance={device.redroidInstance}
           />
         ) : null}
       </header>
+
+      <DeviceShortcuts deviceId={device.id} current="overview" hasRotom={!!device.rotomDeviceId} />
 
       <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-4">
         <Card>
@@ -160,8 +202,21 @@ export default async function DevicePage({ params }: { params: Promise<{ id: str
         </Card>
 
         <Card>
-          <CardHeader>
+          {/* Same shape as the Agent and Load cards: the one control lives in
+              the header, so the body stays entirely readings. */}
+          <CardHeader className="flex-row items-center justify-between gap-2 space-y-0">
             <CardTitle className="text-sm">State</CardTitle>
+            <Button
+              asChild
+              variant="ghost"
+              size="icon"
+              className="-my-1 -mr-2 h-7 w-7"
+              title="Connectivity history"
+            >
+              <Link href={`/devices/${device.id}/connectivity`} aria-label="Connectivity history">
+                <History />
+              </Link>
+            </Button>
           </CardHeader>
           <CardContent className="flex flex-col gap-1 text-sm">
             <Field label="Group" value={device.group?.name ?? "—"} />
@@ -190,6 +245,7 @@ export default async function DevicePage({ params }: { params: Promise<{ id: str
               label="Last heartbeat"
               value={<DeviceHeartbeat lastSeenAt={device.lastSeenAt?.toISOString() ?? null} />}
             />
+            <ConnectivityBands trend={connectivity} beatStaleSince={device.beatStaleSince} />
           </CardContent>
         </Card>
 
@@ -277,7 +333,7 @@ export default async function DevicePage({ params }: { params: Promise<{ id: str
                     <span>{event.message}</span>
                     {event.action ? (
                       <Badge variant={event.actionOk === false ? "danger" : "secondary"}>
-                        {event.action}
+                        {actionPastLabel(event.action)}
                         {event.actionOk === false ? " failed" : ""}
                       </Badge>
                     ) : null}

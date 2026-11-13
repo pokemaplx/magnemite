@@ -3,49 +3,17 @@
 import { useEffect, useState } from "react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import {
-  Activity,
-  LayoutGrid,
-  Menu,
-  Package,
-  PanelLeft,
-  Rocket,
-  Settings,
-  Binoculars,
-  Upload,
-  X,
-} from "lucide-react";
+import { Keyboard, Menu, PanelLeft, Search, X } from "lucide-react";
+import { useHotkey, useShortcuts } from "@/components/shortcuts/hotkeys";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { Kbd, useIsMac } from "@/components/ui/kbd";
 import { Progress } from "@/components/ui/progress";
 import { Tooltip, TooltipProvider } from "@/components/ui/tooltip";
 import { ThemeToggle } from "@/components/theme-toggle";
+import { NAV_SECTIONS, isActiveLink } from "@/lib/nav";
+import { primaryKey } from "@/lib/shortcuts";
 import { cn } from "@/lib/utils";
-
-type NavLink = { href: string; label: string; icon: typeof LayoutGrid };
-
-/** Grouped the way the work is: look at the fleet, ship to it, then configure it. */
-const SECTIONS: { label?: string; links: NavLink[] }[] = [
-  {
-    links: [{ href: "/", label: "Fleet", icon: LayoutGrid }],
-  },
-  {
-    label: "Deployment",
-    links: [
-      { href: "/rollouts", label: "Rollouts", icon: Rocket },
-      { href: "/versions", label: "Versions", icon: Package },
-      { href: "/manual", label: "Manual deploy", icon: Upload },
-    ],
-  },
-  {
-    label: "System",
-    links: [
-      { href: "/monitoring", label: "Monitoring", icon: Binoculars },
-      { href: "/status", label: "Status", icon: Activity },
-      { href: "/settings", label: "Settings", icon: Settings },
-    ],
-  },
-];
 
 const COLLAPSED_KEY = "magnemite:sidebar-collapsed";
 
@@ -59,6 +27,8 @@ export function Nav({
   activeRollouts: number;
 }) {
   const pathname = usePathname();
+  const { setPaletteOpen, setHelpOpen } = useShortcuts();
+  const mac = useIsMac();
 
   // A fleet with one box away is normal and must not sit there looking like an
   // alarm; a fleet with none is the thing worth colouring. Everything between
@@ -83,7 +53,8 @@ export function Nav({
     setCollapsed(window.localStorage.getItem(COLLAPSED_KEY) === "1");
   }, []);
 
-  // A tap on a link should leave the drawer behind, not on top of the page.
+  // A link closes the drawer itself, on the tap (below). This is for every
+  // other way of getting somewhere — the palette, a hotkey, the back button.
   useEffect(() => setDrawerOpen(false), [pathname]);
 
   useEffect(() => {
@@ -94,16 +65,11 @@ export function Nav({
   }, [drawerOpen]);
 
   // The page behind the drawer must not scroll under a thumb aimed at the
-  // menu. Restored on close rather than cleared, so a page that had its own
-  // overflow set keeps it.
-  useEffect(() => {
-    if (!drawerOpen) return;
-    const previous = document.body.style.overflow;
-    document.body.style.overflow = "hidden";
-    return () => {
-      document.body.style.overflow = previous;
-    };
-  }, [drawerOpen]);
+  // menu — and that is done with `touch-action` on the backdrop and the
+  // drawer, not `overflow: hidden` on <body>. Chrome on Android brings its URL
+  // bar back the moment the page stops being scrollable, so locking <body>
+  // resized the viewport halfway through the slide: the page jumped, the
+  // drawer's `dvh` height jumped with it, and the open read as a flicker.
 
   function toggleCollapsed() {
     setCollapsed((prev) => {
@@ -113,10 +79,12 @@ export function Nav({
     });
   }
 
+  useHotkey("sidebar", () => toggleCollapsed());
+
   return (
     <TooltipProvider delayDuration={150}>
       {/* Phones get a bar of their own; the sidebar itself is off-canvas there. */}
-      <header className="fixed inset-x-0 top-0 z-30 flex h-14 items-center gap-2 border-b border-border bg-background px-3 lg:hidden">
+      <header className="fixed inset-x-0 top-0 z-30 flex h-14 items-center gap-2 border-b border-border bg-background px-3 [-webkit-tap-highlight-color:transparent] lg:hidden">
         <Button
           variant="ghost"
           size="icon"
@@ -128,19 +96,40 @@ export function Nav({
         </Button>
         <img src="/magnemite.png" alt="" className="h-6 w-6 shrink-0 rounded-md" />
         <span className="font-display text-sm font-semibold tracking-tight">Magnemite</span>
+        {/* No keyboard to press Ctrl K on, so the palette gets a button here. */}
+        <Button
+          variant="ghost"
+          size="icon"
+          aria-label="Search"
+          className="ml-auto"
+          onClick={() => setPaletteOpen(true)}
+        >
+          <Search />
+        </Button>
       </header>
 
-      {drawerOpen ? (
-        <div
-          className="fixed inset-0 z-40 bg-black/40 lg:hidden"
-          onClick={() => setDrawerOpen(false)}
-          aria-hidden
-        />
-      ) : null}
+      {/* Always mounted, so it can fade with the slide. Mounted only while
+          open, it landed at full strength on the first frame and vanished the
+          same way on close, with the drawer still mid-slide over it — the
+          flash that made the menu feel like it blinked. */}
+      <div
+        className={cn(
+          "fixed inset-0 z-40 touch-none bg-black/40 lg:hidden",
+          "transition-opacity duration-300 ease-out motion-reduce:transition-none",
+          drawerOpen ? "opacity-100" : "pointer-events-none opacity-0",
+        )}
+        onClick={() => setDrawerOpen(false)}
+        aria-hidden
+      />
 
       <aside
         className={cn(
           "fixed inset-y-0 left-0 z-50 flex shrink-0 flex-col border-r border-border bg-subtle",
+          "[-webkit-tap-highlight-color:transparent]",
+          // Only the list scrolls; the rest of the drawer takes no pan at all,
+          // so a drag on it cannot reach the page underneath. The list
+          // re-enables panning for itself by being a scroller.
+          "max-lg:touch-none",
           // `h-screen` is 100vh, which on a phone is taller than what the
           // browser actually shows — the theme toggle at the bottom ended up
           // under the URL bar. `dvh` is the visible height.
@@ -152,7 +141,13 @@ export function Nav({
           // transitioning it means the slide-out still plays before it goes.
           // Not `aria-hidden`: that cannot be undone per breakpoint, and on a
           // desktop the sidebar is on screen with `drawerOpen` false.
-          "transition-[width,transform,visibility] duration-200 ease-out",
+          // The slide is the drawer curve — fast off the mark, long settle —
+          // on a layer of its own, so the page committing underneath it when
+          // a link is tapped cannot stall it. The desktop rail only ever
+          // animates its width.
+          "transition-[transform,visibility] duration-300 ease-[cubic-bezier(0.32,0.72,0,1)]",
+          "max-lg:will-change-transform motion-reduce:transition-none",
+          "lg:transition-[width] lg:duration-200 lg:ease-out",
           drawerOpen ? "translate-x-0 visible" : "invisible -translate-x-full",
           "lg:visible lg:sticky lg:top-0 lg:h-screen lg:translate-x-0",
           collapsed ? "lg:w-[68px]" : "lg:w-60",
@@ -212,8 +207,36 @@ export function Nav({
           </Tooltip>
         </div>
 
-        <nav className="flex flex-1 flex-col gap-5 overflow-y-auto px-2 py-2">
-          {SECTIONS.map((section, i) => (
+        {/* Where the palette is, for anyone who has not met Ctrl K yet — and
+            the way in on a phone, where there is no key to press. */}
+        <div className={cn("px-2 pt-1", collapsed && "lg:px-0")}>
+          <Tooltip label={`Search (${mac ? "⌘" : "Ctrl"} K)`} disabled={!collapsed}>
+            <button
+              type="button"
+              // On a phone the palette is the next screen, not a layer over
+              // the menu — left open, the drawer was still there on Escape.
+              onClick={() => {
+                setDrawerOpen(false);
+                setPaletteOpen(true);
+              }}
+              className={cn(
+                "flex w-full items-center gap-2.5 rounded-lg border border-border bg-card px-3 py-1.5 text-sm",
+                "text-muted-foreground transition-colors hover:border-border-emphasis hover:text-foreground",
+                collapsed && "lg:mx-auto lg:h-9 lg:w-9 lg:justify-center lg:p-0",
+              )}
+            >
+              <Search className="h-4 w-4 shrink-0" />
+              <span className={cn("flex-1 text-left", collapsed && "lg:hidden")}>Search…</span>
+              <Kbd
+                keys={primaryKey("palette")}
+                className={cn("max-lg:hidden", collapsed && "lg:hidden")}
+              />
+            </button>
+          </Tooltip>
+        </div>
+
+        <nav className="flex flex-1 flex-col gap-5 overflow-y-auto overscroll-contain px-2 py-2">
+          {NAV_SECTIONS.map((section, i) => (
             <div key={section.label ?? i} className="flex flex-col gap-0.5">
               {section.label ? (
                 <>
@@ -233,12 +256,17 @@ export function Nav({
               ) : null}
 
               {section.links.map(({ href, label, icon: Icon }) => {
-                const active = href === "/" ? pathname === "/" : pathname.startsWith(href);
+                const active = isActiveLink(href, pathname);
                 return (
                   <Tooltip key={href} label={label} disabled={!collapsed}>
                     <Link
                       href={href}
                       aria-current={active ? "page" : undefined}
+                      // Closed on the tap rather than when the new path
+                      // arrives: that is a server round trip later, and until
+                      // then the menu sat there as if the tap had missed. The
+                      // bar along the top is what says the page is coming.
+                      onClick={() => setDrawerOpen(false)}
                       className={cn(
                         "group flex items-center gap-2.5 rounded-lg px-3 py-2 text-sm font-medium leading-5",
                         "transition-colors",
@@ -249,7 +277,7 @@ export function Nav({
                         collapsed && "lg:mx-auto lg:h-9 lg:w-9 lg:justify-center lg:p-0",
                         active
                           ? "bg-primary/15 text-foreground"
-                          : "text-muted-foreground hover:bg-emphasis/60 hover:text-foreground",
+                          : "text-muted-foreground hover:bg-emphasis/60 hover:text-foreground active:bg-emphasis",
                       )}
                     >
                       <Icon
@@ -289,7 +317,9 @@ export function Nav({
           ))}
         </nav>
 
-        <div className="flex flex-col gap-3 border-t border-border p-3">
+        {/* Raised on a phone: at the very bottom of the drawer the theme
+            toggle sat on the home indicator, where a tap is a swipe home. */}
+        <div className="flex flex-col gap-3 border-t border-border p-3 max-lg:pb-[max(2rem,env(safe-area-inset-bottom))]">
           <Tooltip label={`${online} of ${total} devices online`} disabled={!collapsed}>
             {/* `12/40` in a monospace font was a fraction, and read like one —
                 a ratio to work out rather than a fleet to glance at. A dot for
@@ -320,6 +350,24 @@ export function Nav({
                 className="h-1"
               />
             </div>
+          </Tooltip>
+
+          {/* Desktop only: a phone has no keys to list. */}
+          <Tooltip label="Keyboard shortcuts (?)" disabled={!collapsed}>
+            <button
+              type="button"
+              onClick={() => setHelpOpen(true)}
+              className={cn(
+                "hidden items-center gap-2 rounded-lg px-1 py-0.5 text-xs text-muted-foreground transition-colors hover:text-foreground lg:flex",
+                collapsed && "lg:mx-auto lg:h-8 lg:w-8 lg:justify-center lg:px-0",
+              )}
+            >
+              <Keyboard className="h-3.5 w-3.5 shrink-0" />
+              <span className={cn("flex-1 text-left", collapsed && "lg:hidden")}>
+                Keyboard shortcuts
+              </span>
+              <Kbd keys={primaryKey("help")} className={cn(collapsed && "lg:hidden")} />
+            </button>
           </Tooltip>
 
           <ThemeToggle compact={collapsed} />

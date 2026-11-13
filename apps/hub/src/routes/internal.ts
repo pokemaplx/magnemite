@@ -2,7 +2,7 @@ import { createReadStream } from "node:fs";
 import fsp from "node:fs/promises";
 import type { FastifyInstance } from "fastify";
 import { z } from "zod";
-import { prisma, serialize } from "@magnemite/db";
+import { NOTIFY_CHANNELS, prisma, serialize } from "@magnemite/db";
 import {
   getHubSettings,
   invalidateHubSettingsCache,
@@ -11,14 +11,24 @@ import {
 import { env } from "../env.js";
 import { log } from "../log.js";
 import { connectionCount, onlineDeviceIds, sendTo } from "../registry.js";
+import { adbKeysFile } from "../services/adbIdentity.js";
 import { cacheVersion, pruneArtifacts } from "../services/artifacts.js";
+import { getScan, startBoxEnroll, startScan } from "../services/boxEnroll.js";
+import { previewConfig, pushConfig } from "../services/configPush.js";
 import { execOnDevice } from "../services/deviceCommands.js";
 import { broadcastWelcome } from "../services/devices.js";
 import { normaliseLogPath, requestBundle, subscribeToLogs } from "../services/deviceLogs.js";
+import { requestScreenshot } from "../services/deviceScreenshots.js";
 import { collectHealth } from "../services/health.js";
 import { cancelJob, retryFailedJobs, retryJob } from "../services/jobs.js";
+import { queueJoinInstalls } from "../services/joinInstalls.js";
+import {
+  MAX_MAINTENANCE_MINUTES,
+  enterMaintenance,
+  releaseMaintenance,
+} from "../services/maintenance.js";
 import { evaluate } from "../services/monitor.js";
-import { sendTestAlert } from "../services/notify.js";
+import { sendTestNotification } from "../services/notify.js";
 import { cancelRollout, createRollout, resumeRollout } from "../services/rollouts.js";
 import {
   type RotomAction,
@@ -27,6 +37,15 @@ import {
   rotomEnabled,
   syncDevices,
 } from "../services/rotom.js";
+import { rerunBootstrap, startBootstrap } from "../services/hostBootstrap.js";
+import {
+  addInstances,
+  adoptHost,
+  convergeHost,
+  setHostMemLimit,
+  setHostWorkers,
+  setInstanceCount,
+} from "../services/redroid.js";
 import { nudge } from "../services/scheduler.js";
 import { probeRemote, storeFromUrl, storeUpload } from "../services/uploads.js";
 import { pollAllSources } from "../services/sources/poller.js";
@@ -39,6 +58,8 @@ const createRolloutBody = z.object({
   postInstallHook: z.string().nullable().optional(),
   hookMode: z.enum(["NORMAL", "POST_ONLY", "NONE"]).optional(),
   writeConfig: z.boolean().optional(),
+  /** This rollout's own MITM config, standing in for the group's. */
+  mitmConfig: z.string().nullable().optional(),
   canaryCount: z.number().int().min(0).optional(),
   soakMinutes: z.number().int().min(0).optional(),
   maxConcurrency: z.number().int().positive().nullable().optional(),
@@ -267,14 +288,25 @@ export async function internalRoutes(app: FastifyInstance) {
     sent: await broadcastWelcome(),
   }));
 
-  // --- monitoring ----------------------------------------------------------
+  // --- notifications -------------------------------------------------------
 
   /**
-   * Prove the Discord webhook before anyone trusts it. Bypasses the level
-   * filter and the dedupe window: somebody pressing "Send test alert" wants to
-   * see a message, not to find out later that one was suppressed.
+   * Prove a channel before anyone trusts it — the one named, or every channel
+   * that is set up. Bypasses routing and the dedupe window: somebody pressing
+   * "Send test" wants to see a message, not to find out later that one was
+   * suppressed.
    */
-  app.post("/internal/monitor/test", async () => sendTestAlert());
+  app.post("/internal/notify/test", async (request, reply) => {
+    const parsed = z
+      .object({ channel: z.enum(NOTIFY_CHANNELS).optional() })
+      .safeParse(request.body ?? {});
+    if (!parsed.success) {
+      return reply.status(400).send({ error: "invalid body", issues: parsed.error.issues });
+    }
+    return sendTestNotification(parsed.data.channel);
+  });
+
+  // --- monitoring ----------------------------------------------------------
 
   /** Force an evaluation pass, for the dashboard's "Run now" and for testing. */
   app.post("/internal/monitor/run", async () => {
@@ -331,6 +363,43 @@ export async function internalRoutes(app: FastifyInstance) {
   );
 
   /**
+   * What rewriting this box's MITM config would write, rendered for the box,
+   * and what would stop and start the MITM around it. Operators only, on the
+   * dashboard's side: the content is the MITM's credentials.
+   */
+  app.get<{ Params: { id: string } }>("/internal/devices/:id/config", async (request, reply) => {
+    try {
+      return await previewConfig(request.params.id);
+    } catch (err) {
+      return reply.status(404).send({ error: err instanceof Error ? err.message : String(err) });
+    }
+  });
+
+  /**
+   * Rewrite this box's MITM config and restart the MITM -- no install. The
+   * body's `content` is an edited version, rendered again here; absent, the
+   * group's own template is written. Waits for the box to answer.
+   */
+  app.post<{ Params: { id: string } }>("/internal/devices/:id/config", async (request, reply) => {
+    const body = z
+      .object({
+        content: z
+          .string()
+          .max(256 * 1024)
+          .nullish(),
+      })
+      .safeParse(request.body ?? {});
+    if (!body.success) return reply.status(400).send({ error: "invalid body" });
+
+    try {
+      return await pushConfig(request.params.id, body.data.content ?? null);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      return reply.status(message === "device is offline" ? 409 : 400).send({ error: message });
+    }
+  });
+
+  /**
    * Ask a box for its logs and wait for the zip to land. The dashboard hands
    * the browser a download URL straight afterwards, so there is nothing here
    * to poll — the wait is the point.
@@ -371,6 +440,101 @@ export async function internalRoutes(app: FastifyInstance) {
       reply.header("Content-Length", String(stat.size));
       reply.header("X-Magnemite-Serial", bundle.device.serial);
       return reply.send(createReadStream(bundle.path));
+    },
+  );
+
+  /**
+   * Ask a box what is on its screen, and wait for the PNG.
+   *
+   * The log bundle route's shape, and the wait is the point for the same
+   * reason: the dashboard renders the image straight afterwards, so there is
+   * nothing to poll.
+   */
+  app.post<{ Params: { id: string }; Body: { requestedById?: string | null } }>(
+    "/internal/devices/:id/screenshot",
+    async (request, reply) => {
+      const body = (request.body ?? {}) as { requestedById?: string | null };
+      try {
+        return await requestScreenshot(request.params.id, body.requestedById ?? null);
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        return reply.status(message === "device is offline" ? 409 : 504).send({ error: message });
+      }
+    },
+  );
+
+  app.get<{ Params: { id: string; screenshotId: string } }>(
+    "/internal/devices/:id/screenshot/:screenshotId",
+    async (request, reply) => {
+      const shot = await prisma.deviceScreenshot.findUnique({
+        where: { id: request.params.screenshotId },
+        select: { deviceId: true, state: true, path: true },
+      });
+      if (!shot || shot.deviceId !== request.params.id) {
+        return reply.status(404).send({ error: "no such screenshot" });
+      }
+      if (shot.state !== "READY" || !shot.path) {
+        return reply.status(409).send({ error: `screenshot is ${shot.state.toLowerCase()}` });
+      }
+
+      const stat = await fsp.stat(shot.path).catch(() => null);
+      // The row outliving the file means the volume was wiped, or the prune ran
+      // between the capture and the click. Captures are kept for a day, so this
+      // is a good deal more likely here than it is for a log bundle.
+      if (!stat?.isFile()) return reply.status(410).send({ error: "the screenshot is gone" });
+
+      reply.header("Content-Type", "image/png");
+      reply.header("Content-Length", String(stat.size));
+      // A capture is immutable once it has landed, and the id is in the path,
+      // so the browser may keep it for as long as it likes.
+      reply.header("Cache-Control", "private, max-age=86400, immutable");
+      return reply.send(createReadStream(shot.path));
+    },
+  );
+
+  /**
+   * Park a box, or put it back.
+   *
+   * `minutes` of zero or less is the release — one route rather than two,
+   * because both halves have to run the group's matching hook and neither is
+   * meaningful without the other.
+   *
+   * The hub does this rather than the dashboard writing the column directly,
+   * for the one reason the dashboard cannot: the hooks that stop and start the
+   * scanner need the box's live socket.
+   */
+  app.post<{ Params: { id: string }; Body: { minutes?: number; byEmail?: string | null } }>(
+    "/internal/devices/:id/maintenance",
+    async (request, reply) => {
+      const body = z
+        .object({
+          minutes: z.number().int().min(0).max(MAX_MAINTENANCE_MINUTES),
+          byEmail: z.string().nullish(),
+        })
+        .safeParse(request.body);
+      if (!body.success) return reply.status(400).send({ error: "invalid body" });
+
+      try {
+        const outcome =
+          body.data.minutes > 0
+            ? await enterMaintenance(
+                request.params.id,
+                body.data.minutes,
+                body.data.byEmail ?? null,
+              )
+            : await releaseMaintenance(request.params.id, body.data.byEmail ?? null);
+        // A released box may have a job that has been waiting for it, and the
+        // next tick is five seconds away for no reason.
+        if (body.data.minutes <= 0) nudge();
+        return {
+          deviceName: outcome.deviceName,
+          until: outcome.until?.toISOString() ?? null,
+          hook: outcome.hook,
+        };
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        return reply.status(message === "device not found" ? 404 : 400).send({ error: message });
+      }
     },
   );
 
@@ -503,6 +667,372 @@ export async function internalRoutes(app: FastifyInstance) {
       return await pollAllSources();
     } catch (err) {
       log.error({ err }, "manual poll failed");
+      return reply.status(500).send({ error: err instanceof Error ? err.message : String(err) });
+    }
+  });
+
+  // --- Redroid machines ----------------------------------------------------
+  //
+  // These are here rather than as server actions for the usual reason: they
+  // need a live socket. The rows a scale writes are the desired state and the
+  // dashboard could write them itself, but nothing would reach the machine.
+
+  /**
+   * Bring a machine to N instances, then converge it.
+   *
+   * The scale and the converge are one call because an operator pressing Save
+   * means both, and leaving them separate would make "I changed the number and
+   * nothing happened" the normal experience.
+   */
+  /**
+   * Give a box what its group hands every new box.
+   *
+   * Enrolment does this by itself; this exists for the other door. A token
+   * without auto-approve leaves a box pending, `createRollout` skips an
+   * unapproved device, and the box only becomes a rollout target when somebody
+   * approves it -- at which point nothing would have queued anything, because
+   * the enrolment that would have is long over.
+   *
+   * Idempotent, because `queueJoinInstalls` asks what the box already has: an
+   * approve, unapprove and approve again queues nothing the second time.
+   */
+  app.post("/internal/devices/:id/join-installs", async (request) => {
+    const { id } = request.params as { id: string };
+    return { queued: await queueJoinInstalls(id) };
+  });
+
+  app.post("/internal/hosts/:id/scale", async (request, reply) => {
+    const { id } = request.params as { id: string };
+    const parsed = z
+      .object({
+        // Zero is valid and is how a machine is drained — not a mistake to
+        // refuse. The upper bound is a sanity rail, not a capacity limit;
+        // capacity is advice the form gives, and the operator may know better.
+        count: z.number().int().min(0).max(64),
+        // The machine's own worker count, which every container on it without
+        // one of its own inherits. Undefined leaves it alone and null goes back
+        // to following Settings -- the same pair `memLimitBytes` below is.
+        workers: z.number().int().min(1).max(50).nullable().optional(),
+        // The per-machine memory ceiling. **Undefined leaves it alone and null
+        // clears it**, and the difference matters: a caller that does not know
+        // about this field must not wipe an override by omitting it.
+        //
+        // The floor is a real one -- Android 12 with a scanner in less than
+        // 512 MB does not boot, it OOMs in a loop that looks like a container
+        // that will not start.
+        memLimitBytes: z
+          .number()
+          .int()
+          .min(512 * 1024 * 1024)
+          .max(64 * 1024 * 1024 * 1024)
+          .nullable()
+          .optional(),
+      })
+      .safeParse(request.body);
+    if (!parsed.success) {
+      return reply.status(400).send({ error: "invalid body", issues: parsed.error.issues });
+    }
+
+    try {
+      // Before the converge, so the file that gets rendered below is the one
+      // that carries the new ceiling. After it, the machine would be converged
+      // onto the old number and the change would wait for the next one.
+      if (parsed.data.memLimitBytes !== undefined) {
+        await setHostMemLimit(
+          id,
+          parsed.data.memLimitBytes === null ? null : BigInt(parsed.data.memLimitBytes),
+        );
+      }
+      if (parsed.data.workers !== undefined) {
+        await setHostWorkers(id, parsed.data.workers);
+      }
+      const changed = await setInstanceCount(id, parsed.data.count);
+      const converge = await convergeHost(id);
+      return { ...changed, ...converge };
+    } catch (err) {
+      log.error({ err, hostId: id }, "scale failed");
+      return reply.status(500).send({ error: err instanceof Error ? err.message : String(err) });
+    }
+  });
+
+  /**
+   * Add containers configured for their own number of workers, and converge.
+   *
+   * Beside the scale rather than folded into it, because the two say different
+   * things: the scale is "this machine runs N like this", and this is "and two
+   * more that are not". Null workers inherits, so it is also a plain "one more".
+   */
+  app.post("/internal/hosts/:id/instances", async (request, reply) => {
+    const { id } = request.params as { id: string };
+    const parsed = z
+      .object({
+        count: z.number().int().min(1).max(64),
+        workers: z.number().int().min(1).max(50).nullable(),
+      })
+      .safeParse(request.body);
+    if (!parsed.success) {
+      return reply.status(400).send({ error: "invalid body", issues: parsed.error.issues });
+    }
+
+    const host = await prisma.redroidHost.findUnique({
+      where: { deviceId: id },
+      select: { adoptedAt: true, _count: { select: { instances: { where: { present: true } } } } },
+    });
+    if (!host) return reply.status(404).send({ error: "that machine has not enrolled yet" });
+    // Refused before any row is written, unlike a converge that would refuse
+    // after: an instance row on an unadopted machine claims an index that
+    // adoption may need for a container already running there.
+    if (!host.adoptedAt) {
+      return reply.status(400).send({ error: "adopt this machine first" });
+    }
+    // The scale's own ceiling, counted the same way, so the two doors cannot
+    // be combined to get past it.
+    if (host._count.instances + parsed.data.count > 64) {
+      return reply
+        .status(400)
+        .send({ error: "64 containers on one machine is past anything sensible." });
+    }
+
+    try {
+      const changed = await addInstances(id, parsed.data.count, parsed.data.workers);
+      const converge = await convergeHost(id);
+      return { ...changed, ...converge };
+    } catch (err) {
+      log.error({ err, hostId: id }, "adding instances failed");
+      return reply.status(500).send({ error: err instanceof Error ? err.message : String(err) });
+    }
+  });
+
+  /**
+   * Provision a machine over SSH, from the moment its provider handed over
+   * access.
+   *
+   * Returns as soon as the run starts. The SSH half is minutes -- apt, Docker,
+   * kernel modules, possibly a reboot -- so the row carries the progress and
+   * the dashboard renders that rather than holding a connection open for it.
+   *
+   * The credential is used once and never stored, which is why it travels in
+   * the body of this call and appears in no row, no log and no audit entry.
+   */
+  app.post("/internal/hosts/bootstrap", async (request, reply) => {
+    const parsed = z
+      .object({
+        // Trimmed here, at the boundary every caller crosses: a pasted
+        // address carries a leading space often enough, and `.min(1)` is
+        // happy with it -- the failure then arrives from getaddrinfo as
+        // `ENOTFOUND  1.2.3.4`, where the only clue is a double space.
+        //
+        // The credentials below are deliberately *not* trimmed. A password
+        // may legitimately begin or end with a space, and a private key is
+        // passed to a parser that cares about its own bytes.
+        name: z.string().trim().min(1).max(64),
+        host: z.string().trim().min(1),
+        port: z.number().int().min(1).max(65535).optional(),
+        username: z.string().trim().min(1),
+        password: z.string().min(1).optional(),
+        privateKey: z.string().min(1).optional(),
+        passphrase: z.string().optional(),
+        desiredInstances: z.number().int().min(0).max(64).default(0),
+        desiredWorkers: z.number().int().min(1).max(50).nullable().optional(),
+        // Validated as a shape only. Whether the group still exists is the
+        // database's answer, and the foreign key is SET NULL, so a group
+        // deleted between opening the dialog and submitting it costs the
+        // default group rather than the provisioning run.
+        desiredGroupId: z.string().min(1).nullable().optional(),
+        desiredNameTemplate: z.string().trim().min(1).max(64).nullable().optional(),
+      })
+      // One or the other. Neither means there is no way in, and without this
+      // the failure would be a timeout twenty minutes later.
+      .refine((body) => Boolean(body.password || body.privateKey), {
+        message: "a password or a private key is required",
+      })
+      .safeParse(request.body);
+    if (!parsed.success) {
+      return reply.status(400).send({ error: "invalid body", issues: parsed.error.issues });
+    }
+
+    const { name, host, port, username, password, privateKey, passphrase } = parsed.data;
+    try {
+      return await startBootstrap({
+        name,
+        access: { host, port, username, password, privateKey, passphrase },
+        desiredInstances: parsed.data.desiredInstances,
+        desiredWorkers: parsed.data.desiredWorkers ?? null,
+        desiredGroupId: parsed.data.desiredGroupId ?? null,
+        desiredNameTemplate: parsed.data.desiredNameTemplate ?? null,
+      });
+    } catch (err) {
+      // Deliberately not logging the error object: the credential is in the
+      // call that produced it, and an exception can carry its own input.
+      log.error({ name, host }, "could not start the bootstrap");
+      return reply.status(500).send({ error: err instanceof Error ? err.message : "failed" });
+    }
+  });
+
+  /** Import the containers a machine already has, so a first converge is safe. */
+  app.post("/internal/hosts/:id/adopt", async (request, reply) => {
+    const { id } = request.params as { id: string };
+    try {
+      return await adoptHost(id);
+    } catch (err) {
+      // A 400 rather than a 500: every failure here is a precondition the
+      // operator can act on — offline, already adopted, no report yet.
+      return reply.status(400).send({ error: err instanceof Error ? err.message : String(err) });
+    }
+  });
+
+  /**
+   * Converge without changing anything, which is the "re-apply" button.
+   *
+   * `force` sends the file even when its hash already matches, for the case
+   * where the machine and the hub agree on paper and the containers still are
+   * not what they should be.
+   */
+  /**
+   * Run the provisioning script again on a machine that is already up.
+   *
+   * The files travel with the request, so this is how a *fixed* image reaches
+   * a machine that already exists — the copies on the machine are the ones
+   * being replaced. It returns as soon as the request is sent: the run itself
+   * is minutes, and what it did lands on the machine's row when it reports.
+   */
+  app.post("/internal/hosts/:id/bootstrap", async (request, reply) => {
+    const { id } = request.params as { id: string };
+    try {
+      return await rerunBootstrap(id);
+    } catch (err) {
+      log.error({ err, hostId: id }, "bootstrap re-run failed");
+      return reply.status(500).send({ error: err instanceof Error ? err.message : String(err) });
+    }
+  });
+
+  app.post("/internal/hosts/:id/converge", async (request, reply) => {
+    const { id } = request.params as { id: string };
+    const force = (request.body as { force?: boolean } | undefined)?.force === true;
+    try {
+      return await convergeHost(id, { force });
+    } catch (err) {
+      log.error({ err, hostId: id }, "converge failed");
+      return reply.status(500).send({ error: err instanceof Error ? err.message : String(err) });
+    }
+  });
+
+  // --- Hardware boxes, over adb --------------------------------------------
+  //
+  // Here rather than as server actions for the same reason the machine routes
+  // are: this needs adb, which lives in the hub's image, and a socket to the
+  // machine when the hub cannot reach the boxes itself.
+
+  /**
+   * Sweep for boxes, and report what answered.
+   *
+   * Returns an id immediately rather than the result. A /22 is minutes, a
+   * relay adds the socket round trip, and the adb runs are serialised -- so a
+   * synchronous call could block for an unbounded time behind an enrollment,
+   * and `hub.ts`'s fetch has no timeout to catch it with.
+   */
+  app.post("/internal/boxes/scan", async (request, reply) => {
+    const parsed = z
+      .object({
+        /** Free text: addresses one per line, or CIDR blocks, or both. */
+        addresses: z.string().min(1),
+        /** The machine to run adb from, or null for the hub itself. */
+        relayDeviceId: z.string().min(1).nullable().optional(),
+      })
+      .safeParse(request.body);
+    if (!parsed.success) {
+      return reply.status(400).send({ error: "invalid body", issues: parsed.error.issues });
+    }
+
+    try {
+      return startScan({
+        addresses: parsed.data.addresses,
+        relayDeviceId: parsed.data.relayDeviceId ?? null,
+      });
+    } catch (err) {
+      // 400, not 500: everything that throws synchronously here is the
+      // operator's input -- a range too wide, or nothing parseable in it.
+      return reply.status(400).send({ error: err instanceof Error ? err.message : String(err) });
+    }
+  });
+
+  app.get("/internal/boxes/scan/:id", async (request, reply) => {
+    const { id } = request.params as { id: string };
+    const scan = getScan(id);
+    // Gone rather than never existed, most likely: scans are held in memory
+    // and a hub restart drops them. Saying so is better than an empty result
+    // that looks like "found nothing".
+    if (!scan) return reply.status(404).send({ error: "that scan is no longer held" });
+    return scan;
+  });
+
+  /**
+   * Enrol the boxes the operator picked.
+   *
+   * Returns as soon as the rows exist: the run itself is a push and an
+   * install per box, and what it did lands on those rows as it happens.
+   */
+  app.post("/internal/boxes/enroll", async (request, reply) => {
+    const parsed = z
+      .object({
+        targets: z
+          .array(
+            z.object({
+              address: z.string().trim().min(1),
+              /** Empty lets the box keep its own `ro.serialno`. */
+              serial: z.string().trim().default(""),
+              serialSource: z.enum(["REPORTED", "MINTED"]).default("REPORTED"),
+              /** What the row is keyed on, which is what the claim matches. */
+              expectedSerial: z.string().trim().min(1),
+              name: z.string().trim().min(1).max(64).nullable().optional(),
+            }),
+          )
+          .min(1)
+          .max(64),
+        // Validated as a shape only, for the reason the machine bootstrap
+        // gives: whether the group still exists is the database's answer, and
+        // the foreign key is SET NULL.
+        desiredGroupId: z.string().min(1).nullable().optional(),
+        relayDeviceId: z.string().min(1).nullable().optional(),
+        reboot: z.boolean().default(true),
+        reprovision: z.boolean().default(false),
+      })
+      .safeParse(request.body);
+    if (!parsed.success) {
+      return reply.status(400).send({ error: "invalid body", issues: parsed.error.issues });
+    }
+
+    try {
+      return await startBoxEnroll({
+        targets: parsed.data.targets.map((t) => ({
+          address: t.address,
+          serial: t.serial,
+          serialSource: t.serialSource,
+          expectedSerial: t.expectedSerial,
+          name: t.name ?? null,
+        })),
+        desiredGroupId: parsed.data.desiredGroupId ?? null,
+        relayDeviceId: parsed.data.relayDeviceId ?? null,
+        reboot: parsed.data.reboot,
+        reprovision: parsed.data.reprovision,
+      });
+    } catch (err) {
+      log.error({ err }, "could not start the adb enrollment");
+      return reply.status(500).send({ error: err instanceof Error ? err.message : String(err) });
+    }
+  });
+
+  /**
+   * Every adb public key the fleet uses, as an `adb_keys` file.
+   *
+   * Preseeded into a golden image, this is what turns enrollment from "tap
+   * Allow on every TV" into something unattended.
+   */
+  app.get("/internal/boxes/adb-keys", async (_request, reply) => {
+    try {
+      return { keys: await adbKeysFile() };
+    } catch (err) {
+      log.error({ err }, "could not read the adb keys");
       return reply.status(500).send({ error: err instanceof Error ? err.message : String(err) });
     }
   });

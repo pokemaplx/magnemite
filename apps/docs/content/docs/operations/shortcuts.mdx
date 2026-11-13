@@ -1,0 +1,70 @@
+---
+title: Keyboard shortcuts
+description: Driving the dashboard without the mouse, and the palette that reaches any box.
+icon: Keyboard
+---
+
+Press <kbd>?</kbd> anywhere in the dashboard for the list. That dialog is drawn
+from the same table that binds the keys, so it is the one that is always right;
+this page is the tour.
+
+## The palette
+
+The palette is <kbd>Ctrl</kbd> <kbd>K</kbd> (<kbd>⌘</kbd> <kbd>K</kbd> on a Mac): one search over
+every box, machine, page and Settings section. It also opens from the **Search…** button at the top
+of the sidebar, and from the magnifier in the phone header.
+
+- **A box is a menu of its own.** Pick one and the list becomes its pages —
+  overview, scanner (Rotom), load history, connectivity — and what can be done
+  to it. <kbd>Backspace</kbd> on an empty search or <kbd>Esc</kbd> steps back
+  out.
+- **Or name the page straight away.** `box-12 rotom` offers box-12's scanner
+  page directly; `box-12 reboot` its reboot. The last word names the page or
+  the action, the rest finds the box.
+- **Actions open where they belong.** Picking Execute for a box opens that
+  box's page with the Execute dialog already up — or just opens the dialog, when
+  that page is the one on screen.
+- **"On this page"** lists what the page has bound keys for, so the palette is
+  also where to find a key you have forgotten.
+
+Typing is matched against name, serial, model and group; every word has to
+match somewhere, and a name that starts with what was typed comes first.
+
+## Single keys
+
+They work anywhere outside a text field, and never while a dialog or menu is
+open — Escape belongs to the dialog, letters to its fields.
+
+| Where            | Keys                                                                                                                                                                                                       |
+| ---------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Everywhere       | <kbd>/</kbd> search the page · <kbd>?</kbd> this list · <kbd>[</kbd> collapse the sidebar                                                                                                                  |
+| Go to            | <kbd>g</kbd> then <kbd>f</kbd> Fleet, <kbd>m</kbd> Machines, <kbd>r</kbd> Rollouts, <kbd>v</kbd> Versions, <kbd>d</kbd> Manual deploy, <kbd>o</kbd> Monitoring, <kbd>s</kbd> Status, <kbd>,</kbd> Settings |
+| A device's pages | <kbd>1</kbd> overview · <kbd>2</kbd> scanner · <kbd>3</kbd> load history · <kbd>4</kbd> connectivity                                                                                                       |
+| Device actions   | <kbd>e</kbd> execute · <kbd>l</kbd> live logs · <kbd>s</kbd> screenshot · <kbd>Shift</kbd> <kbd>L</kbd> logcat · <kbd>r</kbd> rename · <kbd>m</kbd> maintenance · <kbd>Shift</kbd> <kbd>R</kbd> reboot     |
+
+### In the Fleet
+
+The table has a cursor: <kbd>j</kbd> and <kbd>k</kbd> move it, turning the page at either end, and
+once a row has it the arrow keys move it too. The device actions then act on that row, and:
+
+- <kbd>Enter</kbd> or <kbd>o</kbd> opens it, <kbd>x</kbd> ticks it,
+  <kbd>Shift</kbd> <kbd>A</kbd> ticks the whole page.
+- **Rename and Reboot take the selection** when there is one, so
+  <kbd>Shift</kbd> <kbd>R</kbd> with twelve boxes ticked reboots twelve boxes.
+- <kbd>u</kbd> starts a rollout for the selection.
+- <kbd>Esc</kbd> drops the cursor first and the selection only on the second press.
+
+<Callout type="warn" title="Reboot always asks">
+  From a key, a row's menu, the device page or the Rotom page, a reboot opens a confirmation first,
+  naming the boxes and marking the offline ones that will be skipped. Nothing reboots on a single
+  key press.
+</Callout>
+
+## Turning them off
+
+Single-letter shortcuts get in the way of screen readers and voice control, where a stray letter is
+a stray command. The switch at the bottom of the `?` dialog turns them off for that browser, and
+`Ctrl K` keeps working.
+
+A viewer account gets the navigation and the palette, and none of the keys that
+change the fleet.

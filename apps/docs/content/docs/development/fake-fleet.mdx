@@ -48,6 +48,32 @@ read back — so a [MITM config](/docs/fleet/configs) written by a deploy can be
 verified end to end, placeholder substitution included, without a box in the
 room.
 
+## Testing adb enrollment without a box
+
+[Adding boxes over adb](/docs/fleet/box-enrollment) splits into three pieces,
+and two of them need no hardware at all.
+
+**The probe** runs against a Redroid container, which is a real adb target: it
+runs `adbd` on 5555 and this project's image ships `su`. Connecting,
+`getprop`, the `device`/`unauthorized` distinction and the root check are all
+genuine against one.
+
+**The back half** runs against a fake agent. Enrol a box, take the token out of
+the enrollment row's config step, and start a fake with the serial the hub
+expects:
+
+```powershell
+./scripts/fake-fleet.ps1 -Count 1 -Token <the box's token>
+```
+
+It enrols, the `BoxEnroll` row goes `WAITING → DONE`, and the box lands in the
+group and under the name the dialog asked for — which is the whole loop.
+
+**What still needs one real box** is `magisk --install-module` and the reboot.
+On an x86_64 development machine a Redroid container is x86_64 Android, so
+`customize.sh` aborts on the ABI — the module zip carries `arm64` and `arm`
+only — and a container has no kernel to restart.
+
 ## What this is good for
 
 - **Scheduler behaviour under load.** 200 devices against a max concurrent

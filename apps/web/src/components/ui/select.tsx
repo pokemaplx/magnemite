@@ -25,7 +25,12 @@ type SelectProps = {
   "aria-label"?: string;
 };
 
-const FIELD =
+/**
+ * The closed field, exported for the controls that have to sit beside a Select
+ * and look like one -- a menu of checkboxes is not a Select, and should not
+ * look like something else.
+ */
+export const SELECT_FIELD =
   "flex h-9 w-full items-center justify-between gap-2 rounded-lg border border-input bg-card px-3 py-1 text-sm " +
   "transition-colors hover:border-border-emphasis focus-visible:border-border-emphasis focus-visible:outline-none " +
   "focus-visible:ring-2 focus-visible:ring-ring/15 disabled:cursor-not-allowed disabled:opacity-40";
@@ -76,7 +81,7 @@ export function Select({
         aria-label={ariaLabel}
         {...(value !== undefined ? { value } : { defaultValue })}
         onChange={(e) => onValueChange?.(e.target.value)}
-        className={cn(FIELD, className)}
+        className={cn(SELECT_FIELD, className)}
       >
         {options.map((option) => (
           <option key={option.value} value={option.value} disabled={option.disabled}>
@@ -99,7 +104,7 @@ export function Select({
       <SelectPrimitive.Trigger
         id={id}
         aria-label={ariaLabel}
-        className={cn(FIELD, "[&>span]:truncate", className)}
+        className={cn(SELECT_FIELD, "[&>span]:truncate", className)}
       >
         <SelectPrimitive.Value placeholder={placeholder} />
         <SelectPrimitive.Icon asChild>

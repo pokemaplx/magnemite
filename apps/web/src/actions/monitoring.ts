@@ -2,9 +2,10 @@
 
 import { revalidatePath } from "next/cache";
 import {
-  MONITOR_CHANNELS,
+  type DeviceKind,
+  NOTIFY_CHANNELS,
   type MonitorAction,
-  type MonitorChannel,
+  type NotifyChannel,
   type MonitorLevel,
   type MonitorSettingsValues,
   type MonitorSignal,
@@ -29,6 +30,10 @@ const SIGNALS = new Set<string>([
   "ROTOM_DISCONNECTED",
   "ROTOM_NOT_SCANNING",
   "ROTOM_IDLE",
+  "HOST_DOCKER_DOWN",
+  "HOST_MEMORY_LOW",
+  "HOST_DISK_LOW",
+  "REDROID_INSTANCE_DOWN",
 ]);
 
 const ACTIONS = new Set<string>([
@@ -43,7 +48,56 @@ const ACTIONS = new Set<string>([
   "ROTOM_RESTART",
   "ROTOM_DISCONNECT",
   "ROTOM_REBOOT",
+  "RESTART_INSTANCE",
 ]);
+
+const KINDS = new Set<string>(["BOX", "HOST"]);
+
+/**
+ * The signals that are about a machine rather than about a box.
+ *
+ * The same fact as `kinds` in the monitoring vocabulary, which is what keeps
+ * the picker from offering the wrong pair in the first place. It is restated
+ * here rather than imported for the reason the two lists above are: this
+ * module runs on the server and that one pulls in an icon per label.
+ *
+ * `AGENT_OFFLINE` is in neither list, because it is the one signal that means
+ * the same thing on both — something dialled out, heartbeat, and stopped.
+ */
+const HOST_SIGNALS = new Set<string>([
+  "HOST_DOCKER_DOWN",
+  "HOST_MEMORY_LOW",
+  "HOST_DISK_LOW",
+  "REDROID_INSTANCE_DOWN",
+]);
+
+/** The two that compare what is free against a floor in `config`. */
+const FLOOR_SIGNALS = new Set<string>([
+  "HOST_MEMORY_LOW",
+  "HOST_DISK_LOW",
+  "DEVICE_MEMORY_LOW",
+  "DEVICE_STORAGE_LOW",
+]);
+
+/**
+ * The signals that compare a reading against an absolute rather than a share.
+ *
+ * One, today. It is its own set rather than a flag on the floor because the
+ * two read in opposite directions, and a single field that sometimes meant
+ * "under" and sometimes "over" is the kind of control somebody sets backwards
+ * once and reboots a fleet with.
+ */
+const CEILING_SIGNALS = new Set<string>(["DEVICE_TEMP_HIGH"]);
+
+/**
+ * What a machine can be told to do.
+ *
+ * Everything else in the catalog is an `am` or `pm` command, which a VPS has
+ * no framework to run, or a Rotom call about a scanner it never had. A reboot
+ * is missing on purpose: on a machine it would mean taking every box on it
+ * down for one box's fault, which is what RESTART_INSTANCE exists to avoid.
+ */
+const HOST_ACTIONS = new Set<string>(["NOTIFY_ONLY", "SHELL", "RESTART_INSTANCE"]);
 
 const LEVELS = new Set<string>(["INFO", "WARN", "CRITICAL"]);
 
@@ -77,22 +131,25 @@ function savedMessage(told: boolean): string {
 // Settings
 // ---------------------------------------------------------------------------
 
-/** The master switch, the timings, the ceilings, and all three channels. */
+/**
+ * The timings and the ceilings. Where alerts go is Settings → Notifications
+ * now, saved by `updateNotificationSettings`.
+ */
 export async function updateMonitorSettings(
   _prev: ActionState,
   formData: FormData,
 ): Promise<ActionState> {
   const user = await requireOperator();
 
-  // Both monitoring cards save through this one action, and each posts only
-  // the fields it shows. So a field that is absent means "this card does not
-  // own it" — not zero, not empty — and keeps whatever is stored.
+  // A field that is absent means "this form does not own it" — not zero, not
+  // empty — and keeps whatever is stored.
   //
-  // The cards used to mirror each other's values in hidden inputs instead,
-  // which failed twice: one was missing the Rotom sync interval, so saving a
-  // webhook was rejected over a number that form does not have; the other
-  // posted no Discord fields at all, so saving a timing silently wiped the
-  // webhook. Reading absence here is what makes both impossible.
+  // The cards that shared this action used to mirror each other's values in
+  // hidden inputs instead, which failed twice: one was missing the Rotom sync
+  // interval, so saving a webhook was rejected over a number that form does not
+  // have; the other posted no Discord fields at all, so saving a timing
+  // silently wiped the webhook. Reading absence here is what makes both
+  // impossible.
   const stored = await readMonitorSettings();
   const submitted = (name: string) => formData.get(name) !== null;
 
@@ -116,8 +173,13 @@ export async function updateMonitorSettings(
   const startupGraceSeconds = int("startupGraceSeconds", 0, stored.startupGraceSeconds);
   const maxActionsPerDeviceHour = int("maxActionsPerDeviceHour", 1, stored.maxActionsPerDeviceHour);
   const maxRebootsPerDeviceDay = int("maxRebootsPerDeviceDay", 1, stored.maxRebootsPerDeviceDay);
-  const alertDedupeMinutes = int("alertDedupeMinutes", 0, stored.alertDedupeMinutes);
   const eventRetentionDays = int("eventRetentionDays", 0, stored.eventRetentionDays);
+  const autoCollectMinIntervalMinutes = int(
+    "autoCollectMinIntervalMinutes",
+    1,
+    stored.autoCollectMinIntervalMinutes,
+  );
+  const autoCollectMaxPerHour = int("autoCollectMaxPerHour", 1, stored.autoCollectMaxPerHour);
 
   if (
     rotomSyncSeconds === null ||
@@ -126,29 +188,13 @@ export async function updateMonitorSettings(
     startupGraceSeconds === null ||
     maxActionsPerDeviceHour === null ||
     maxRebootsPerDeviceDay === null ||
-    alertDedupeMinutes === null ||
-    eventRetentionDays === null
+    eventRetentionDays === null ||
+    autoCollectMinIntervalMinutes === null ||
+    autoCollectMaxPerHour === null
   ) {
     return {
       error:
         "Every field needs a whole number. The Rotom sync starts at 5 seconds, the reboot grace at 60, and the two ceilings at 1.",
-    };
-  }
-
-  // The shape is checked only when it was typed. A stored value that predates
-  // this rule must not block a save from the other card, which never shows the
-  // webhook at all.
-  const webhook = submitted("discordWebhookUrl")
-    ? String(formData.get("discordWebhookUrl")).trim()
-    : stored.discordWebhookUrl;
-  if (
-    submitted("discordWebhookUrl") &&
-    webhook &&
-    !/^https:\/\/(discord|discordapp)\.com\/api\/webhooks\//.test(webhook)
-  ) {
-    return {
-      error:
-        "That does not look like a Discord webhook. Copy it from the channel's Integrations settings — it starts with https://discord.com/api/webhooks/.",
     };
   }
 
@@ -163,32 +209,6 @@ export async function updateMonitorSettings(
     };
   }
 
-  // ntfy. The topic is what decides whether the channel is on, so a server
-  // URL alone is not an error -- it is the default sitting there unused.
-  const ntfyUrl = submitted("ntfyUrl") ? String(formData.get("ntfyUrl")).trim() : stored.ntfyUrl;
-  if (submitted("ntfyUrl") && ntfyUrl && !/^https?:\/\//.test(ntfyUrl)) {
-    return {
-      error:
-        "The ntfy server needs to be a URL, starting with https:// — or http:// for one on your own network.",
-    };
-  }
-
-  const ntfyTopic = submitted("ntfyTopic")
-    ? String(formData.get("ntfyTopic")).trim()
-    : stored.ntfyTopic;
-  // ntfy's own rule for a topic, and worth enforcing here rather than
-  // discovering as a 400 during an incident: a slash would silently address a
-  // different path on the server entirely.
-  if (submitted("ntfyTopic") && ntfyTopic && !/^[A-Za-z0-9_-]{1,64}$/.test(ntfyTopic)) {
-    return {
-      error:
-        "An ntfy topic is letters, digits, dashes and underscores — no slashes, and no spaces. Put the server in the field beside it.",
-    };
-  }
-  if (ntfyTopic && !ntfyUrl) {
-    return { error: "A topic needs a server. https://ntfy.sh is the public one." };
-  }
-
   const patch: Partial<MonitorSettingsValues> = {
     // Absent is "keep it", not "off": a card that does not show the master
     // switch posts nothing for it, and the switch itself saves through
@@ -200,21 +220,14 @@ export async function updateMonitorSettings(
     startupGraceSeconds,
     maxActionsPerDeviceHour,
     maxRebootsPerDeviceDay,
-    alertDedupeMinutes,
     eventRetentionDays,
-    discordWebhookUrl: webhook,
-    discordMentionRoleId: submitted("discordMentionRoleId")
-      ? String(formData.get("discordMentionRoleId")).trim()
-      : stored.discordMentionRoleId,
-    ntfyUrl,
-    ntfyTopic,
-    ntfyToken: submitted("ntfyToken") ? String(formData.get("ntfyToken")).trim() : stored.ntfyToken,
-    // The web push card posts this as an explicit "on"/"off" rather than
-    // leaving an unchecked switch to post nothing, which would be
-    // indistinguishable from a save that came from another card.
-    webPushEnabled: submitted("webPushEnabled")
-      ? formData.get("webPushEnabled") === "on"
-      : stored.webPushEnabled,
+    // Same shape as `enabled` above: only read when this form actually carried
+    // it, so a save from another form cannot silently switch it off.
+    autoCollectLogsOnRecovery: submitted("autoCollectLogsOnRecovery")
+      ? formData.get("autoCollectLogsOnRecovery") === "on"
+      : stored.autoCollectLogsOnRecovery,
+    autoCollectMinIntervalMinutes,
+    autoCollectMaxPerHour,
   };
   await updateMonitorSettingsInDb(patch);
 
@@ -224,14 +237,7 @@ export async function updateMonitorSettings(
       userId: user.id,
       userEmail: user.email,
       action: "settings.monitoring",
-      // The webhook is a credential — anyone who has it can post to the
-      // channel — so the audit log records that it changed, not what to.
-      meta: {
-        ...patch,
-        discordWebhookUrl: webhook ? "set" : "",
-        ntfyToken: patch.ntfyToken ? "set" : "",
-        hubNotified: told,
-      },
+      meta: { ...patch, hubNotified: told },
     },
   });
 
@@ -266,23 +272,6 @@ export async function setMonitorEnabled(enabled: boolean): Promise<ActionState> 
   return { ok: true, message: savedMessage(told) };
 }
 
-/** Prove the webhook, so nobody finds out it was wrong during an incident. */
-export async function sendTestAlert(): Promise<ActionState> {
-  await requireOperator();
-  try {
-    const result = await hub.testAlert();
-    if (!result.ok) return { error: result.error ?? "Nothing accepted the message." };
-    // Which channels took it, because "sent" is useless when the question is
-    // which of three is misconfigured.
-    return {
-      ok: true,
-      message: result.detail ? `Sent — ${result.detail}.` : "Sent — check the channel.",
-    };
-  } catch (err) {
-    return { error: err instanceof Error ? err.message : String(err) };
-  }
-}
-
 /** Run a pass now rather than waiting for the next tick. */
 export async function runMonitorNow(): Promise<ActionState> {
   await requireOperator();
@@ -302,6 +291,7 @@ export async function runMonitorNow(): Promise<ActionState> {
 type ParsedRule = {
   name: string;
   signal: MonitorSignal;
+  appliesTo: DeviceKind;
   packageName: string | null;
   groupId: string | null;
   config: Prisma.InputJsonValue;
@@ -310,7 +300,7 @@ type ParsedRule = {
   windowStart: string | null;
   windowEnd: string | null;
   notifyLevel: MonitorLevel;
-  notifyChannels: MonitorChannel[];
+  notifyChannels: NotifyChannel[];
   notifyRecovery: boolean;
   enabled: boolean;
   steps: { atFailure: number; action: MonitorAction; command: string | null }[];
@@ -329,6 +319,40 @@ function parseRule(formData: FormData): ParsedRule | string {
   const signal = String(formData.get("signal") ?? "");
   if (!SIGNALS.has(signal)) return "Pick what the rule watches for.";
 
+  // Boxes or the machines that host them. Absent reads as BOX, which is both
+  // the column's default and what every rule written before hosts existed is.
+  const appliesTo = String(formData.get("appliesTo") ?? "BOX");
+  if (!KINDS.has(appliesTo)) return "Pick whether the rule watches boxes or machines.";
+
+  // The pair is what the hub filters on: `rulesFor` drops a rule whose kind
+  // does not match the machine in front of it before it reads a single
+  // reading. So a mismatch here is not cosmetic -- it is a rule that saves
+  // cleanly, shows as enabled, and can never fire.
+  if (signal !== "AGENT_OFFLINE" && HOST_SIGNALS.has(signal) !== (appliesTo === "HOST")) {
+    return appliesTo === "HOST"
+      ? "That signal is about a box, not about the machine hosting it."
+      : "That signal is about a machine. Switch what the rule watches, or pick a signal about the box.";
+  }
+
+  // The floor the four share-shaped signals compare against. Without it the
+  // hub's `underFloor` reads *unknown*, which neither counts nor resets, so
+  // the rule would sit there enabled and silent.
+  const floor = Number(formData.get("minFreePercent"));
+  const minFreePercent = Number.isFinite(floor) && floor > 0 && floor < 100 ? floor : null;
+  if (FLOOR_SIGNALS.has(signal) && minFreePercent === null) {
+    return "That signal compares what is free against a floor — give it a percentage between 1 and 99.";
+  }
+
+  // The same refusal for the same reason, one direction up. The range is wide
+  // on purpose: these sensors report nonsense on some ROMs, and a form that
+  // argued about plausible temperatures would be arguing with hardware it
+  // cannot see.
+  const ceiling = Number(formData.get("maxTempC"));
+  const maxTempC = Number.isFinite(ceiling) && ceiling > 0 && ceiling < 150 ? ceiling : null;
+  if (CEILING_SIGNALS.has(signal) && maxTempC === null) {
+    return "That signal compares a temperature against a ceiling — give it a number between 1 and 149.";
+  }
+
   const notifyLevel = String(formData.get("notifyLevel") ?? "WARN");
   if (!LEVELS.has(notifyLevel)) return "Pick a severity.";
 
@@ -346,6 +370,8 @@ function parseRule(formData: FormData): ParsedRule | string {
     return "A window needs both a start and an end, or neither.";
   }
 
+  // Absent for a machine rule: the form does not show the field, because
+  // nothing on a VPS could act on a package name.
   const packageName = String(formData.get("packageName") ?? "").trim() || null;
   // Three of the signals are about a specific app, and a rule that does not
   // name one would have nothing to force-stop.
@@ -353,15 +379,16 @@ function parseRule(formData: FormData): ParsedRule | string {
     return "That signal is about a particular app — give it a package name.";
   }
 
-  const steps = parseSteps(formData);
+  const steps = parseSteps(formData, appliesTo as DeviceKind);
   if (typeof steps === "string") return steps;
 
   return {
     name,
     signal: signal as MonitorSignal,
+    appliesTo: appliesTo as DeviceKind,
     packageName,
     groupId: String(formData.get("groupId") ?? "").trim() || null,
-    config: parseConfig(formData),
+    config: parseConfig(formData, minFreePercent, maxTempC),
     threshold: int("threshold", 1, 1),
     cooldownSeconds: int("cooldownSeconds", 0, 300),
     windowStart,
@@ -375,8 +402,8 @@ function parseRule(formData: FormData): ParsedRule | string {
     // find that out.
     notifyChannels: String(formData.get("notifyChannels") ?? "")
       .split(",")
-      .filter((entry): entry is MonitorChannel =>
-        (MONITOR_CHANNELS as readonly string[]).includes(entry),
+      .filter((entry): entry is NotifyChannel =>
+        (NOTIFY_CHANNELS as readonly string[]).includes(entry),
       ),
     // Only meaningful for a rule that announces somewhere, and the dialog
     // hides the switch when it does not — a hidden checkbox posts nothing, so
@@ -395,11 +422,23 @@ function parseRule(formData: FormData): ParsedRule | string {
  * patterns and a ratio, and modelling all of that as nullable columns would be
  * a table nobody could read.
  */
-function parseConfig(formData: FormData): Prisma.InputJsonValue {
+function parseConfig(
+  formData: FormData,
+  minFreePercent: number | null,
+  maxTempC: number | null,
+): Prisma.InputJsonValue {
+  // Both thresholds sit at the top of `config` rather than inside `probe`,
+  // because nothing runs anywhere to answer them: the hub compares the columns
+  // a box or a machine already reports on every heartbeat.
+  const floor = {
+    ...(minFreePercent === null ? {} : { minFreePercent }),
+    ...(maxTempC === null ? {} : { maxTempC }),
+  };
+
   const kind = String(formData.get("probeKind") ?? "").trim();
   const target = String(formData.get("probeTarget") ?? "").trim();
   // "none" is the form's way of saying the hub answers this signal by itself.
-  if (!kind || kind === "none" || !target) return {};
+  if (!kind || kind === "none" || !target) return floor;
 
   const num = (field: string) => {
     const parsed = Number(formData.get(field));
@@ -407,6 +446,7 @@ function parseConfig(formData: FormData): Prisma.InputJsonValue {
   };
 
   return {
+    ...floor,
     probe: {
       kind,
       target,
@@ -428,7 +468,7 @@ function parseConfig(formData: FormData): Prisma.InputJsonValue {
  * count would both fire, which is how a box gets restarted and rebooted for
  * one fault.
  */
-function parseSteps(formData: FormData): ParsedRule["steps"] | string {
+function parseSteps(formData: FormData, appliesTo: DeviceKind): ParsedRule["steps"] | string {
   const failures = formData.getAll("stepAtFailure").map(String);
   const actions = formData.getAll("stepAction").map(String);
   const commands = formData.getAll("stepCommand").map(String);
@@ -438,7 +478,16 @@ function parseSteps(formData: FormData): ParsedRule["steps"] | string {
 
   for (const [index, raw] of failures.entries()) {
     const action = actions[index];
+    // An unknown action can only be a newer dialog against an older server, so
+    // it is dropped rather than refused. A *known* action on the wrong kind of
+    // machine is the opposite: it saves, and then reports "the rule has no
+    // command to run" at the one moment it mattered. That is worth a sentence.
     if (!action || !ACTIONS.has(action)) continue;
+    if (appliesTo === "HOST" ? !HOST_ACTIONS.has(action) : action === "RESTART_INSTANCE") {
+      return appliesTo === "HOST"
+        ? "A machine can only be told to notify, run a command, or restart one of its containers."
+        : "Only a machine can restart a container — it is the one that runs them.";
+    }
 
     const atFailure = Number(raw);
     if (!Number.isInteger(atFailure) || atFailure < 1) {
@@ -482,7 +531,12 @@ export async function createMonitorRule(
       action: "monitorRule.create",
       targetType: "MonitorRule",
       targetId: created.id,
-      meta: { name: rule.name, signal: rule.signal, enabled: rule.enabled },
+      meta: {
+        name: rule.name,
+        signal: rule.signal,
+        appliesTo: rule.appliesTo,
+        enabled: rule.enabled,
+      },
     },
   });
 
@@ -524,7 +578,12 @@ export async function updateMonitorRule(
       action: "monitorRule.update",
       targetType: "MonitorRule",
       targetId: id,
-      meta: { name: rule.name, signal: rule.signal, enabled: rule.enabled },
+      meta: {
+        name: rule.name,
+        signal: rule.signal,
+        appliesTo: rule.appliesTo,
+        enabled: rule.enabled,
+      },
     },
   });
 

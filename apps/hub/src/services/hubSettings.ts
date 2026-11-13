@@ -1,8 +1,12 @@
 import {
   getHubSettings as readHubSettings,
   getMonitorSettings as readMonitorSettings,
+  getNotifyRoutes as readNotifyRoutes,
+  getNotifySettings as readNotifySettings,
   type HubSettingsValues,
   type MonitorSettingsValues,
+  type NotifyRoutes,
+  type NotifySettingsValues,
 } from "@magnemite/db";
 import { log } from "../log.js";
 
@@ -29,6 +33,8 @@ import { log } from "../log.js";
  */
 let cache: HubSettingsValues | null = null;
 let monitorCache: MonitorSettingsValues | null = null;
+let notifyCache: NotifySettingsValues | null = null;
+let routesCache: NotifyRoutes | null = null;
 
 export async function getHubSettings(): Promise<HubSettingsValues> {
   if (cache) return { ...cache };
@@ -50,14 +56,38 @@ export async function getMonitorSettings(): Promise<MonitorSettingsValues> {
 }
 
 /**
- * Drop both copies, so the next read goes to the database.
+ * The channels, and which fleet event goes to which of them.
  *
- * One bell for both groups: the dashboard rings it after any save, and a
+ * Cached because they are asked on every job that finishes: a rollout's last
+ * job is the moment it is announced, and the question "does anything want to
+ * hear about this" comes before any of the queries that would build the
+ * message.
+ */
+export async function getNotifySettings(): Promise<NotifySettingsValues> {
+  if (notifyCache) return { ...notifyCache };
+  const values = await readNotifySettings();
+  notifyCache = values;
+  return { ...values };
+}
+
+export async function getNotifyRoutes(): Promise<NotifyRoutes> {
+  if (routesCache) return { ...routesCache };
+  const values = await readNotifyRoutes();
+  routesCache = values;
+  return { ...values };
+}
+
+/**
+ * Drop every copy, so the next read goes to the database.
+ *
+ * One bell for all the groups: the dashboard rings it after any save, and a
  * cache that is dropped when it did not need to be costs one query.
  */
 export function invalidateHubSettingsCache(): void {
   cache = null;
   monitorCache = null;
+  notifyCache = null;
+  routesCache = null;
   log.info("hub settings cache dropped");
 }
 

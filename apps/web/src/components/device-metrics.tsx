@@ -211,7 +211,7 @@ function ChartTable({ chart, times }: { chart: Chart; times: number[] }) {
     .filter((row) => row.values.some((value) => value !== null));
 
   return (
-    <Table containerClassName="max-h-80 rounded-lg border border-border">
+    <Table containerClassName="max-h-80 pointer-coarse:overscroll-y-none rounded-lg border border-border">
       <TableHeader>
         <TableRow>
           <TableHead>Time</TableHead>

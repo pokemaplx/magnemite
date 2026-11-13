@@ -22,7 +22,7 @@ async function fallbackHealth(error: string): Promise<HubHealth> {
   let database: HubHealth["checks"][number];
 
   try {
-    const devices = await prisma.device.count();
+    const devices = await prisma.device.count({ where: { kind: "BOX" } });
     database = {
       key: "database",
       label: "Database",

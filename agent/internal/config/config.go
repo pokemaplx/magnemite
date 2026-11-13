@@ -18,6 +18,15 @@ type Config struct {
 	Name            string `json:"name,omitempty"`
 	// Scratch space for bundles and extracted splits.
 	WorkDir string `json:"workDir,omitempty"`
+	// Serial to report instead of the one the box knows about. The hub keys a
+	// device on its serial alone, and a container has no stable ro.serialno —
+	// without this it would fall back to a MAC that changes on every recreate
+	// and earn a new row in the Devices table each time.
+	Serial string `json:"serial,omitempty"`
+	// What a reboot from the hub actually runs. Empty means `reboot`, which is
+	// what a box with its own kernel wants. A container has no kernel of its
+	// own to restart, so it points this at a framework restart instead.
+	RebootCommand string `json:"rebootCommand,omitempty"`
 }
 
 const DefaultPath = "/data/adb/magnemite/config.json"

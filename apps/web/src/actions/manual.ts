@@ -12,6 +12,15 @@ export type ManualInstallInput = {
   postInstallHook: string | null;
   hookMode: HookMode;
   writeConfig: boolean;
+  /**
+   * The MITM config these installs write, instead of each box's group one.
+   *
+   * Null is the normal case and means the group's. It exists because a deploy
+   * often needs one value different for one set of boxes, and the alternative
+   * was editing the group -- which changes every box in it, including the ones
+   * the deploy is not touching.
+   */
+  mitmConfig: string | null;
   forceClean: boolean;
   /** Boxes reporting this exact version get a SKIPPED job instead of an install. */
   skipUpToDate: boolean;
@@ -47,6 +56,7 @@ export async function startManualInstall(input: ManualInstallInput): Promise<Man
       postInstallHook: input.postInstallHook,
       hookMode: input.hookMode,
       writeConfig: input.writeConfig,
+      mitmConfig: input.mitmConfig,
       maxConcurrency: input.maxConcurrency,
       createdById: user.id,
       note: input.note,

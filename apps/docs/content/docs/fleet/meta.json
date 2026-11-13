@@ -3,13 +3,19 @@
   "icon": "Smartphone",
   "pages": [
     "agent",
+    "redroid",
+    "redroid-hosts",
     "enrollment",
+    "box-enrollment",
     "rollouts",
     "update",
     "manual",
     "configs",
     "health",
     "monitoring",
+    "notifications",
+    "connectivity",
+    "maintenance",
     "logs",
     "rotom"
   ]

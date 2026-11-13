@@ -1,17 +1,19 @@
 "use server";
 
 import { revalidatePath } from "next/cache";
-import type { Prisma } from "@prisma/client";
-import { CONFIG_PLACEHOLDERS } from "@/lib/config-placeholders";
+import { checkConfigTemplate, CONFIG_PLACEHOLDERS } from "@/lib/config-placeholders";
 import {
   generateToken,
   getHubSettings as readHubSettings,
   getMonitorSettings as readMonitorSettings,
   hashToken,
   type HubSettingsValues,
+  type Prisma,
   prisma,
+  type RedroidSettingsValues,
   tokenPrefix,
   updateHubSettings as updateHubSettingsInDb,
+  updateRedroidSettings as updateRedroidSettingsInDb,
 } from "@magnemite/db";
 import { requireOperator } from "@/lib/session";
 import { hub } from "@/lib/hub";
@@ -63,8 +65,11 @@ export async function updateHubSettings(
 
   const maxConcurrentJobs = int("maxConcurrentJobs", 1);
   const jobStallTimeoutSeconds = int("jobStallTimeoutSeconds", 1);
+  // Zero is a real answer: install the moment the box enrols.
+  const joinInstallDelaySeconds = int("joinInstallDelaySeconds", 0);
   const heartbeatSeconds = int("heartbeatSeconds", 5);
   const agentUpdateConcurrency = int("agentUpdateConcurrency", 1);
+  const configRewriteConcurrency = int("configRewriteConcurrency", 1);
   // Three missed 20-second heartbeats is the floor that stops a box flapping
   // offline on one dropped beat.
   const deviceOfflineTimeoutSeconds = int("deviceOfflineTimeoutSeconds", 30);
@@ -72,13 +77,15 @@ export async function updateHubSettings(
   if (
     maxConcurrentJobs === null ||
     jobStallTimeoutSeconds === null ||
+    joinInstallDelaySeconds === null ||
     agentUpdateConcurrency === null ||
+    configRewriteConcurrency === null ||
     deviceOfflineTimeoutSeconds === null ||
     heartbeatSeconds === null
   ) {
     return {
       error:
-        "Every field needs a whole number — 1 or more. The heartbeat starts at 5 and the offline timeout at 30.",
+        "Every field needs a whole number — 1 or more, or 0 for the join install wait. The heartbeat starts at 5 and the offline timeout at 30.",
     };
   }
 
@@ -94,8 +101,10 @@ export async function updateHubSettings(
   const patch: Partial<HubSettingsValues> = {
     maxConcurrentJobs,
     jobStallTimeoutSeconds,
+    joinInstallDelaySeconds,
     heartbeatSeconds,
     agentUpdateConcurrency,
+    configRewriteConcurrency,
     deviceOfflineTimeoutSeconds,
   };
   await updateHubSettingsInDb(patch);
@@ -131,6 +140,101 @@ export async function updateHubSettings(
     message: told
       ? "Saved."
       : "Saved, but the hub could not be told, it is still running on the old values. Restart it, or save again once it is back.",
+  };
+}
+
+const GB = 1024 ** 3;
+
+/**
+ * The knobs behind the containers: how big one is, how many a machine holds,
+ * and how many start at once.
+ *
+ * Its own card and its own save, apart from the hub knobs, because nothing
+ * here is measured against the heartbeat and because these reach the fleet by
+ * a completely different road. The hub keeps no copy of them -- `readGroup`
+ * goes to the table on every read -- so there is no cache to drop and no
+ * `refreshSettings` call below.
+ *
+ * What there is instead is a delay nobody should have to discover: two of
+ * these are rendered into each machine's compose file, and docker applies them
+ * when a container is **created**. Saving changes the plan immediately and the
+ * running containers not at all, until each machine is re-applied. That is
+ * deliberately not done here -- recreating every container on every machine is
+ * not a thing a Save button should do without being asked.
+ */
+export async function updateRedroidSettings(
+  _prev: ActionState,
+  formData: FormData,
+): Promise<ActionState> {
+  const user = await requireOperator();
+
+  const num = (name: string) => {
+    const parsed = Number(formData.get(name));
+    return Number.isFinite(parsed) ? parsed : null;
+  };
+
+  const memLimitGb = num("memLimitGb");
+  const hostReserveGb = num("hostReserveGb");
+  const workersPerInstance = num("workersPerInstance");
+  const workersPerVCpu = num("workersPerVCpu");
+  const startBatchSize = num("startBatchSize");
+  const gpuMode = String(formData.get("gpuMode") ?? "").trim();
+
+  if (
+    memLimitGb === null ||
+    hostReserveGb === null ||
+    workersPerInstance === null ||
+    workersPerVCpu === null ||
+    startBatchSize === null
+  ) {
+    return { error: "Every field needs a number." };
+  }
+  // The floor is where Android stops booting rather than where it gets slow:
+  // Android 12 and a scanner in less than half a gigabyte OOMs in a loop that
+  // reads as a container that will not start.
+  if (memLimitGb < 0.5 || memLimitGb > 64) {
+    return { error: "Memory per container must be between 0.5 and 64 GB." };
+  }
+  // Zero is allowed and means hold nothing back, which is a real answer on a
+  // machine that runs nothing else.
+  if (hostReserveGb < 0 || hostReserveGb > 64) {
+    return { error: "Reserved for the machine must be between 0 and 64 GB." };
+  }
+  if (!Number.isInteger(workersPerInstance) || workersPerInstance < 1 || workersPerInstance > 50) {
+    // 50 is where the scanners stop being happy, and on some licences it is
+    // also the contractual ceiling.
+    return { error: "Workers per container must be a whole number between 1 and 50." };
+  }
+  if (!Number.isInteger(workersPerVCpu) || workersPerVCpu < 1 || workersPerVCpu > 200) {
+    return { error: "Workers per vCPU must be a whole number between 1 and 200." };
+  }
+  if (!Number.isInteger(startBatchSize) || startBatchSize < 1 || startBatchSize > 32) {
+    return { error: "Containers started at once must be a whole number between 1 and 32." };
+  }
+  if (!gpuMode) return { error: "Pick a GPU mode." };
+
+  const patch: Partial<RedroidSettingsValues> = {
+    memLimitBytes: Math.round(memLimitGb * GB),
+    hostReserveBytes: Math.round(hostReserveGb * GB),
+    workersPerInstance,
+    workersPerVCpu,
+    startBatchSize,
+    gpuMode,
+  };
+  await updateRedroidSettingsInDb(patch);
+
+  await prisma.auditLog.create({
+    data: { userId: user.id, userEmail: user.email, action: "settings.redroid", meta: patch },
+  });
+
+  revalidatePath("/settings");
+  // The capacity figure on every machine's page is computed from these, so it
+  // is stale the moment they move.
+  revalidatePath("/hosts");
+  return {
+    ok: true,
+    message:
+      "Saved. The memory ceiling reaches a machine's containers when it is next re-applied — docker sets it as they are created.",
   };
 }
 
@@ -170,12 +274,14 @@ export async function updateMetricHistory(
   // already stored on the next prune.
   const metricsRetentionDays = int("metricsRetentionDays", 0);
   const rotomRetentionDays = int("rotomRetentionDays", 0);
+  const connectionRetentionDays = int("connectionRetentionDays", 0);
 
   if (
     metricsSampleSeconds === null ||
     rotomSampleSeconds === null ||
     metricsRetentionDays === null ||
-    rotomRetentionDays === null
+    rotomRetentionDays === null ||
+    connectionRetentionDays === null
   ) {
     return {
       error: "Every field needs a whole number — 1 or more for the intervals, 0 or more for days.",
@@ -203,6 +309,7 @@ export async function updateMetricHistory(
     metricsRetentionDays,
     rotomSampleSeconds,
     rotomRetentionDays,
+    connectionRetentionDays,
   };
   await updateHubSettingsInDb(patch);
 
@@ -354,40 +461,6 @@ function normalisePath(p: string): string {
   return `/${segments.join("/")}`;
 }
 
-/**
- * One regex, matching anything between the braces and judging it by name
- * afterwards.
- *
- * Scanning for `[a-zA-Z0-9_.]` and substituting `[^}]*` was two different
- * ideas of what a placeholder is, and a token with a character in neither —
- * `{{device-name}}` — fell through both: never reported as unknown here, never
- * matched by the hub, and written to every box in the group verbatim. The hub's
- * `TOKEN` is now this same shape.
- */
-const TEMPLATE_TOKEN = /\{\{([^{}]*)\}\}/g;
-
-function checkConfigTemplate(template: string): string | null {
-  const known: readonly string[] = CONFIG_PLACEHOLDERS;
-  const unknown = [...template.matchAll(TEMPLATE_TOKEN)]
-    .map((match) => (match[1] as string).trim())
-    .filter((name) => !known.includes(name));
-  if (unknown.length > 0) {
-    return `Unknown placeholder ${[...new Set(unknown)].map((n) => `{{${n}}}`).join(", ")}. Known: ${CONFIG_PLACEHOLDERS.join(", ")}.`;
-  }
-
-  // A placeholder always stands in for a JSON string, and the hub escapes what
-  // it substitutes so it stays one. Checking with a quoted stand-in is what
-  // makes that the rule rather than an accident: `"workers": {{device.name}}`
-  // is refused here, which is what lets the hub escape without having to ask
-  // whether the token sat inside quotes.
-  try {
-    JSON.parse(template.replace(TEMPLATE_TOKEN, "PLACEHOLDER"));
-  } catch (err) {
-    return `The config is not valid JSON: ${err instanceof Error ? err.message : String(err)}`;
-  }
-  return null;
-}
-
 export async function createGroup(_prev: ActionState, formData: FormData): Promise<ActionState> {
   await requireOperator();
   const name = String(formData.get("name") ?? "").trim();
@@ -425,6 +498,101 @@ export async function deleteGroup(id: string): Promise<ActionState> {
 
   revalidatePath("/settings");
   return { ok: true, message: `Removed "${group.name}".` };
+}
+
+/**
+ * Add a build to what a group hands every box that joins it.
+ *
+ * One row per build per group, so pressing Add twice on the same build is the
+ * same instruction rather than two. A build that is not cached is refused
+ * here, because the alternative is discovering it at the one moment nobody is
+ * watching -- a container coming up at four in the morning.
+ */
+export async function addJoinInstall(groupId: string, appVersionId: string): Promise<ActionState> {
+  const user = await requireOperator();
+
+  const [group, version] = await Promise.all([
+    prisma.deviceGroup.findUnique({ where: { id: groupId }, select: { name: true } }),
+    prisma.appVersion.findUnique({
+      where: { id: appVersionId },
+      select: { version: true, status: true, appTarget: { select: { packageName: true } } },
+    }),
+  ]);
+  if (!group) return { error: "That group is already gone." };
+  if (!version) return { error: "That build is already gone." };
+  if (version.status !== "READY") {
+    return { error: `${version.version} is not cached yet — cache it before adding it here.` };
+  }
+
+  // One build per package, because two would mean a new box installing one
+  // over the other in whichever order the scheduler happened to pick.
+  const clash = await prisma.groupJoinInstall.findFirst({
+    where: { groupId, appVersion: { appTarget: { packageName: version.appTarget.packageName } } },
+    select: { id: true, appVersion: { select: { version: true } } },
+  });
+  if (clash) {
+    return {
+      error: `This group already gives new boxes ${version.appTarget.packageName} ${clash.appVersion.version}. Remove that one first.`,
+    };
+  }
+
+  await prisma.groupJoinInstall.create({ data: { groupId, appVersionId } });
+
+  await prisma.auditLog.create({
+    data: {
+      userId: user.id,
+      userEmail: user.email,
+      action: "groupJoinInstall.add",
+      targetType: "DeviceGroup",
+      targetId: groupId,
+      meta: {
+        group: group.name,
+        packageName: version.appTarget.packageName,
+        version: version.version,
+      },
+    },
+  });
+
+  revalidatePath("/settings");
+  return { ok: true, message: `New boxes in "${group.name}" will get ${version.version}.` };
+}
+
+/**
+ * Stop handing a build to new boxes.
+ *
+ * Nothing is uninstalled. The boxes that already got it keep it, which is the
+ * only sane reading of removing an instruction about the future.
+ */
+export async function removeJoinInstall(id: string): Promise<ActionState> {
+  const user = await requireOperator();
+  const row = await prisma.groupJoinInstall.findUnique({
+    where: { id },
+    select: {
+      group: { select: { name: true } },
+      appVersion: { select: { version: true, appTarget: { select: { packageName: true } } } },
+    },
+  });
+  if (!row) return { error: "That is already gone." };
+
+  await prisma.groupJoinInstall.delete({ where: { id } });
+
+  await prisma.auditLog.create({
+    data: {
+      userId: user.id,
+      userEmail: user.email,
+      action: "groupJoinInstall.remove",
+      targetType: "DeviceGroup",
+      targetId: id,
+      meta: {
+        group: row.group.name,
+        packageName: row.appVersion.appTarget.packageName,
+        version: row.appVersion.version,
+      },
+    },
+  });
+
+  revalidatePath("/settings");
+  return { ok: true, message: "New boxes will no longer get it." };
 }
 
 /** Same shape the hub validates uploads against. */
@@ -815,13 +983,19 @@ export async function deleteSourceFeed(id: string): Promise<ActionState> {
  * only its hash goes in the database.
  */
 export async function createEnrollmentToken(
-  _prev: ActionState & { token?: string },
+  _prev: ActionState & { token?: string; kind?: "BOX" | "HOST" },
   formData: FormData,
-): Promise<ActionState & { token?: string }> {
+): Promise<ActionState & { token?: string; kind?: "BOX" | "HOST" }> {
   const user = await requireOperator();
   const label = String(formData.get("label") ?? "").trim() || "untitled";
   const rawMaxUses = String(formData.get("maxUses") ?? "").trim();
   const parsedUses = Number(rawMaxUses);
+  // A machine token, for provisioning a host by hand. The one click mints its
+  // own per machine and nobody ever sees it, so this exists for the manual
+  // path -- which the bootstrap docs describe and which, without this, had
+  // nowhere to get a token from: a BOX token enrols a machine as a *box*, and
+  // the only sign is a device that never grows a Machines page.
+  const kind = formData.get("kind") === "HOST" ? ("HOST" as const) : ("BOX" as const);
 
   const token = generateToken();
   await prisma.enrollmentToken.create({
@@ -829,7 +1003,12 @@ export async function createEnrollmentToken(
       label,
       tokenHash: hashToken(token),
       prefix: tokenPrefix(token),
-      autoApprove: formData.get("autoApprove") === "on",
+      kind,
+      // Forced for HOST, which is why the form offers no switch for it:
+      // `/internal/authz` refuses an unapproved device, so a machine that
+      // enrolled pending would get a bare 401 from the edge on its first
+      // self-update with nothing anywhere to say why.
+      autoApprove: kind === "HOST" ? true : formData.get("autoApprove") === "on",
       maxUses: rawMaxUses === "" ? null : Number.isFinite(parsedUses) ? parsedUses : null,
     },
   });
@@ -839,12 +1018,15 @@ export async function createEnrollmentToken(
       userId: user.id,
       userEmail: user.email,
       action: "enrollmentToken.create",
-      meta: { label },
+      meta: { label, kind },
     },
   });
 
   revalidatePath("/settings");
-  return { ok: true, token, message: "Copy this now — it is not shown again." };
+  // The kind comes back so the panel can show what to *do* with the token it
+  // just printed. Pasting a machine token into a box's config.json, or into
+  // `make module`, is a plausible mistake that nothing downstream catches.
+  return { ok: true, token, kind, message: "Copy this now — it is not shown again." };
 }
 
 export async function revokeEnrollmentToken(id: string): Promise<ActionState> {

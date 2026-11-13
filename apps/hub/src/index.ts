@@ -9,6 +9,7 @@ import { eventRoutes } from "./routes/events.js";
 import { fileRoutes } from "./routes/files.js";
 import { internalRoutes } from "./routes/internal.js";
 import { logRoutes } from "./routes/logs.js";
+import { screenshotRoutes } from "./routes/screenshots.js";
 import { connectionCount } from "./registry.js";
 import {
   loadAgentRelease,
@@ -17,6 +18,9 @@ import {
 } from "./services/agentRelease.js";
 import { ensureArtifactDir } from "./services/artifacts.js";
 import { sweepOffline } from "./services/devices.js";
+import { reapOrphanedBoxEnrolls } from "./services/boxEnroll.js";
+import { reapOrphanedBootstraps } from "./services/hostBootstrap.js";
+import { loadOpenEpisodes } from "./services/connectivity.js";
 import { markMonitorStart, seedDefaultMonitorRules } from "./services/monitor.js";
 import { startRotomSync, stopRotomSync } from "./services/rotom.js";
 import { startScheduler, stopScheduler } from "./services/scheduler.js";
@@ -35,6 +39,14 @@ async function main() {
   // upgrading into a running watchdog would start rebooting boxes before
   // anyone had read the settings.
   await seedDefaultMonitorRules();
+  // Episodes the last process left open are still the truth — those boxes
+  // really were out of contact — so they are adopted rather than closed, and
+  // each box's own next beat is what ends its one.
+  await loadOpenEpisodes();
+  // Anything still RUNNING cannot be ours -- ours had not started yet -- so it
+  // belongs to a hub that is gone, and nothing else will ever move it.
+  await reapOrphanedBootstraps();
+  await reapOrphanedBoxEnrolls();
   // Publishes the agent binaries this image was built with, so boxes on an
   // older build are updated as they reconnect.
   await loadAgentRelease();
@@ -64,6 +76,7 @@ async function main() {
   await app.register(eventRoutes);
   await app.register(fileRoutes);
   await app.register(logRoutes);
+  await app.register(screenshotRoutes);
 
   await app.listen({ port: env.HUB_PORT, host: env.HUB_HOST });
   attachDeviceSocket(app.server);

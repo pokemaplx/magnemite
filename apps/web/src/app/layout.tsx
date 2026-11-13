@@ -2,6 +2,7 @@ import type { Metadata, Viewport } from "next";
 import { CalSansGeo } from "@calcom/cal-sans-ui/geo";
 import { CalSansText } from "@calcom/cal-sans-ui/text";
 import { CalSansUI } from "@calcom/cal-sans-ui/ui";
+import { NavigationProgress } from "@/components/navigation-progress";
 import { ThemeProvider } from "@/components/theme-provider";
 import { ToastProvider } from "@/components/ui/toast";
 import "./globals.css";
@@ -34,7 +35,9 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
           {/* Inside the theme provider so a toast is painted in the theme that
               is actually on, and at the root so the login page can raise one
               too. */}
-          <ToastProvider>{children}</ToastProvider>
+          <ToastProvider>
+            <NavigationProgress>{children}</NavigationProgress>
+          </ToastProvider>
         </ThemeProvider>
       </body>
     </html>

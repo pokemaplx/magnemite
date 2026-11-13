@@ -40,6 +40,7 @@ type Fake struct {
 	sessions   map[string]bool
 	nextID     int
 	pending    string
+	pendingPkg string
 	commitFail int
 	started    time.Time
 }
@@ -62,13 +63,18 @@ func NewFake(serial, statePath string) *Fake {
 	return f
 }
 
-// SetPendingVersion tells the fake what an install-commit should end up
-// reporting. Only the fake needs this; on a real box the version comes out of
-// the APKs themselves.
-func (f *Fake) SetPendingVersion(v string) {
+// SetPending tells the fake what an install-commit should end up reporting:
+// which package, at which version. Only the fake needs this; on a real box both
+// come out of the APKs themselves.
+//
+// The package used to be fixed to Pokémon GO, so every other install -- a MITM
+// above all -- committed and then failed its verify, and the config write that
+// comes after the verify could not be exercised on a fake box at all.
+func (f *Fake) SetPending(pkg, version string) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	f.pending = v
+	f.pendingPkg = pkg
+	f.pending = version
 }
 
 func (f *Fake) load() {
@@ -246,7 +252,10 @@ func (f *Fake) pm(ctx context.Context, args []string) (string, error) {
 			}
 		}
 
-		pkg := "com.nianticlabs.pokemongo"
+		pkg := f.pendingPkg
+		if pkg == "" {
+			pkg = "com.nianticlabs.pokemongo"
+		}
 		f.packages[pkg] = proto.PackageInfo{
 			PackageName: pkg,
 			VersionName: f.pending,
@@ -336,6 +345,34 @@ func (f *Fake) Memory() (uint64, uint64) {
 }
 
 func (f *Fake) CPUCount() int { return 4 }
+
+// Tracks the fake load average, so the CPU chart and the load chart have the
+// same shape and a wrongly-scaled axis is obvious during a load test -- the
+// same reason Temperatures() below follows it.
+//
+// Percent of a single core, so a 4-core fake box reads up to ~400 and the
+// dashboard's "divide by cpuCount" path gets exercised rather than being
+// assumed. Deliberately never nil: a fake box always has two readings, and the
+// nil-until-a-rate-exists path is the real agent's to prove.
+func (f *Fake) CPUPercent() *float64 {
+	// A load average of 1.0 is one core busy, which is 100 in this convention.
+	one, _, _ := f.LoadAvg()
+	percent := round2(one * 100)
+	return &percent
+}
+
+// Half the fake box's RAM, mostly free. A fake box reports swap at all so the
+// host-shaped fields have something to draw; the interesting case -- a machine
+// with none, which answers a genuine zero -- is reachable with
+// MAGNEMITE_FAKE_NO_SWAP.
+func (f *Fake) Swap() (uint64, uint64, bool) {
+	if os.Getenv("MAGNEMITE_FAKE_NO_SWAP") != "" {
+		return 0, 0, true
+	}
+	const total = 1 * 1024 * 1024 * 1024
+	free := uint64(float64(total) * (0.6 + math.Abs(math.Sin(float64(time.Since(f.started).Seconds())/120))*0.3))
+	return total, free, true
+}
 
 // A warm box that tracks its own load, so the temperature chart in the
 // dashboard shows something with the same shape as the CPU one — which is what

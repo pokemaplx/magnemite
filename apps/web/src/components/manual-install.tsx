@@ -1,13 +1,14 @@
 "use client";
 
-import { useMemo, useRef, useState, useTransition } from "react";
-import { useRouter } from "next/navigation";
+import { useEffect, useMemo, useRef, useState, useTransition } from "react";
+import { useRouter } from "@bprogress/next/app";
 import {
   AlertTriangle,
   CheckCircle2,
   FileJson,
   Link2,
   Package,
+  Rss,
   Trash2,
   Upload,
   Wand2,
@@ -27,6 +28,7 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/com
 import { Checkbox } from "@/components/ui/checkbox";
 import { ConfirmDialog } from "@/components/ui/confirm-dialog";
 import { Input, Textarea } from "@/components/ui/input";
+import { checkConfigTemplate } from "@/lib/config-placeholders";
 import { Label } from "@/components/ui/label";
 import { Progress } from "@/components/ui/progress";
 import { SearchInput } from "@/components/ui/search-input";
@@ -98,6 +100,15 @@ export type ManualBuild = {
   sizeBytes: number;
   sha256: string | null;
   uploadedAt: string;
+  /**
+   * The version source that listed it, or null for an upload.
+   *
+   * One type for both, because downstream they are the same thing: an
+   * `appVersionId` and an ordinary rollout. It only changes what the row says
+   * and whether it can be deleted here -- a feed's build is managed in
+   * Settings, and forgetting one would just have the feed list it again.
+   */
+  feed: string | null;
 };
 
 type Group = {
@@ -106,6 +117,9 @@ type Group = {
   preInstallHook: string | null;
   postInstallHook: string | null;
   mitmPackageName: string | null;
+  mitmConfigPath: string | null;
+  /** Null for a viewer, who has no override to seed — see the manual page. */
+  mitmConfig: string | null;
 };
 
 const CUSTOM = "__custom__";
@@ -129,6 +143,8 @@ export function ManualInstall({
   devices,
   groups,
   builds,
+  feedBuilds,
+  uncachedByPackage,
   mitmColumns,
   canOperate,
 }: {
@@ -136,6 +152,10 @@ export function ManualInstall({
   devices: ManualDevice[];
   groups: Group[];
   builds: ManualBuild[];
+  /** What the version sources have listed and cached. */
+  feedBuilds: ManualBuild[];
+  /** Per package, how many a source listed but has not cached yet. */
+  uncachedByPackage: Record<string, number>;
   mitmColumns: MitmColumn[];
   canOperate: boolean;
 }) {
@@ -179,13 +199,36 @@ export function ManualInstall({
   // On by default: writing the config is the point of deploying a MITM, and
   // there is no other way for an edited one to reach the boxes.
   const [writeConfig, setWriteConfig] = useState(true);
+  /**
+   * The config this deploy writes instead of each box's group one.
+   *
+   * `null` is "the group's", which is what every deploy did before this
+   * existed and what almost every deploy still wants. A string means this
+   * rollout carries its own — stored on the rollout, so a retry hours later
+   * writes the same thing rather than whatever the group says by then.
+   */
+  const [configOverride, setConfigOverride] = useState<string | null>(null);
+  const [configError, setConfigError] = useState<string | null>(null);
+  /**
+   * Exactly what was last seeded in, so the box can keep following the device
+   * selection until somebody types.
+   *
+   * It has to: this card sits above the three steps, so the override is opened
+   * before any box is picked — and which group's config to start from is a
+   * question only the picked boxes can answer. Without this it would seed from
+   * the tie-break and never look again.
+   *
+   * The comparison against the text is what makes it safe. The first keystroke
+   * makes them differ, and from then on nothing overwrites what was typed.
+   */
+  const [seededText, setSeededText] = useState<string | null>(null);
   const [note, setNote] = useState("");
 
   // --- from a link ---------------------------------------------------------
   // The second way a build arrives. An upload has to fit through the browser
   // and every proxy in front of the dashboard; a link is fetched by the hub,
   // which is what gets a 250 MB bundle past a 100 MB body limit.
-  const [source, setSource] = useState<"file" | "url">("file");
+  const [source, setSource] = useState<"file" | "url" | "feed">("file");
   const [url, setUrl] = useState("");
   const [checking, setChecking] = useState(false);
   const [fetching, setFetching] = useState(false);
@@ -207,6 +250,11 @@ export function ManualInstall({
     () => (packageName ? builds.filter((b) => b.packageName === packageName) : builds),
     [builds, packageName],
   );
+  const feedForPackage = useMemo(
+    () => (packageName ? feedBuilds.filter((b) => b.packageName === packageName) : feedBuilds),
+    [feedBuilds, packageName],
+  );
+  const uncachedHere = packageName ? (uncachedByPackage[packageName] ?? 0) : 0;
 
   // The MITM columns, minus one that would duplicate the "currently on" column
   // when the thing being installed is itself a MITM.
@@ -280,6 +328,47 @@ export function ManualInstall({
     () => (packageName ? groups.filter((g) => g.mitmPackageName === packageName) : []),
     [groups, packageName],
   );
+
+  /** Where the override lands, which is still each group's own path. */
+  const configPaths = useMemo(() => {
+    const paths = [...new Set(configuredGroups.map((g) => g.mitmConfigPath).filter(Boolean))];
+    return paths.length > 0 ? paths.join(", ") : "the group's config path";
+  }, [configuredGroups]);
+
+  /**
+   * What an override starts from, which is always a real config when there is
+   * one to start from.
+   *
+   * Editing is the point: an operator opening this wants the group's file with
+   * one value different, not an empty box and a JSON document to retype. So
+   * the only question is *whose*, and that is only a question when the deploy
+   * spans groups whose configs differ — then it seeds from the one covering
+   * the most of the picked boxes, and says so underneath, rather than leaving
+   * the work to be done from scratch over a difference that is usually a line.
+   */
+  const overrideSeed = useMemo(() => {
+    const withConfig = configuredGroups.filter((group) => Boolean(group.mitmConfig));
+    if (withConfig.length === 0) return { text: "", from: null as string | null, others: 0 };
+
+    const counted = withConfig.map((group) => ({
+      group,
+      boxes: devices.filter((d) => picked.has(d.id) && d.groupId === group.id).length,
+    }));
+    // Most boxes first, and by name after that so the same deploy always
+    // starts from the same place rather than on whichever order a query
+    // happened to return.
+    counted.sort((a, b) => b.boxes - a.boxes || a.group.name.localeCompare(b.group.name));
+    const winner = counted[0]!.group;
+    const distinct = new Set(withConfig.map((group) => group.mitmConfig)).size;
+    return { text: winner.mitmConfig!, from: winner.name, others: distinct - 1 };
+  }, [configuredGroups, devices, picked]);
+
+  useEffect(() => {
+    if (configOverride === null || configOverride !== seededText) return;
+    if (overrideSeed.text === seededText) return;
+    setConfigOverride(overrideSeed.text);
+    setSeededText(overrideSeed.text);
+  }, [overrideSeed.text, configOverride, seededText]);
 
   /**
    * How many of the picked boxes actually have a config written, which is not
@@ -424,10 +513,13 @@ export function ManualInstall({
             sizeBytes: result.build.sizeBytes,
             sha256: result.build.sha256,
             uploadedAt: new Date().toISOString(),
+            // Fetched by the hub from a link, which is still an upload as far
+            // as this form is concerned: it is ours to forget.
+            feed: null,
           });
           setProbe(null);
           setUrl("");
-          router.refresh();
+          router.refresh({ showProgress: false });
         })
         .finally(() => setFetching(false));
     })();
@@ -480,9 +572,10 @@ export function ManualInstall({
         sizeBytes: Number(payload.sizeBytes ?? 0),
         sha256: (payload.sha256 as string) ?? null,
         uploadedAt: new Date().toISOString(),
+        feed: null,
       });
       clearFile();
-      router.refresh();
+      router.refresh({ showProgress: false });
     };
 
     xhr.onerror = () => {
@@ -501,6 +594,19 @@ export function ManualInstall({
   async function runInstall(): Promise<string | null> {
     if (!selected) return null;
 
+    // Checked here and not only on the server, because the server's answer
+    // arrives after the rollout would have started — and because this is the
+    // same check the group's own config goes through, from the same function.
+    if (configOverride !== null) {
+      const bad = configOverride.trim()
+        ? checkConfigTemplate(configOverride)
+        : "Write the config, or switch back to the group's — an empty one would write nothing.";
+      if (bad) {
+        setConfigError(bad);
+        return bad;
+      }
+    }
+
     const result = await startManualInstall({
       appVersionId: selected.id,
       deviceIds: [...picked],
@@ -508,6 +614,7 @@ export function ManualInstall({
       postInstallHook: postHook.trim() || null,
       hookMode: effectiveHookMode,
       writeConfig,
+      mitmConfig: configOverride,
       forceClean,
       skipUpToDate,
       maxConcurrency: null,
@@ -555,7 +662,7 @@ export function ManualInstall({
         return;
       }
       if (selected?.id === build.id) setSelected(null);
-      router.refresh();
+      router.refresh({ showProgress: false });
     });
   }
 
@@ -625,6 +732,80 @@ export function ManualInstall({
               on the box by hand.
             </p>
           ) : null}
+
+          {/* The override. Behind one click rather than always open, because
+              the group's config is the right answer almost every time and a
+              textarea full of JSON invites being edited when nothing needed
+              changing. */}
+          {writeConfig && canOperate ? (
+            configOverride === null ? (
+              <button
+                type="button"
+                onClick={() => {
+                  setConfigOverride(overrideSeed.text);
+                  setSeededText(overrideSeed.text);
+                }}
+                className="self-start text-xs text-muted-foreground underline underline-offset-4 hover:text-foreground"
+              >
+                Use a different config for this deploy…
+              </button>
+            ) : (
+              <div className="flex flex-col gap-2">
+                <div className="flex items-center justify-between gap-3">
+                  <span className="text-xs font-medium">This deploy&apos;s config</span>
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="sm"
+                    onClick={() => {
+                      setConfigOverride(null);
+                      setSeededText(null);
+                      setConfigError(null);
+                    }}
+                  >
+                    Back to the group&apos;s
+                  </Button>
+                </div>
+                <Textarea
+                  value={configOverride}
+                  onChange={(event) => {
+                    setConfigOverride(event.target.value);
+                    setConfigError(null);
+                  }}
+                  rows={12}
+                  spellCheck={false}
+                  className="font-mono text-xs"
+                  aria-label="The MITM config this deploy writes"
+                  placeholder={
+                    overrideSeed.from
+                      ? undefined
+                      : "No group here has a config yet, so there was nothing to start from."
+                  }
+                />
+                {overrideSeed.from && overrideSeed.others > 0 ? (
+                  <p className="text-xs text-warning">
+                    Started from <span className="font-medium">{overrideSeed.from}</span>&apos;s
+                    config, the one covering most of the picked boxes.{" "}
+                    {overrideSeed.others === 1
+                      ? "One other group"
+                      : `${overrideSeed.others} other groups`}{" "}
+                    here {overrideSeed.others === 1 ? "has" : "have"} a different one, and what you
+                    write replaces {overrideSeed.others === 1 ? "it" : "them"} too.
+                  </p>
+                ) : null}
+                <p className="text-xs text-muted-foreground">
+                  Written to <span className="font-mono">{configPaths}</span> on{" "}
+                  <span className="text-foreground">{configWriteCount}</span> box
+                  {configWriteCount === 1 ? "" : "es"}, instead of{" "}
+                  {configuredGroups.length === 1 ? "the group's" : "each group's"}. The path is
+                  still the group&apos;s — only what goes in the file changes. Placeholders work the
+                  same way, and this is kept on the rollout, so a retry hours from now writes this
+                  and not whatever the group says by then.
+                </p>
+                {configError ? <p className="text-xs text-destructive">{configError}</p> : null}
+              </div>
+            )
+          ) : null}
         </div>
       ) : null}
 
@@ -686,16 +867,20 @@ export function ManualInstall({
           </CardDescription>
         </CardHeader>
         <CardContent className="flex flex-col gap-4">
-          {/* Two ways in, and the second one exists because of a limit that
-              has nothing to do with this app: an upload travels through the
-              browser and every proxy in front of the dashboard, and one of
-              them stops a body well below the size of a bundle of splits. A
-              link is fetched by the hub instead. */}
+          {/* Three ways in. The link exists because of a limit that has nothing
+              to do with this app: an upload travels through the browser and
+              every proxy in front of the dashboard, and one of them stops a
+              body well below the size of a bundle of splits -- a link is
+              fetched by the hub instead. The third is for the common case
+              neither covered: the build is already here, because a version
+              source listed it and cached it, and the only thing missing was a
+              way to pick it without a rollout. */}
           <div className="flex w-fit rounded-lg border border-border bg-subtle p-0.5">
             {(
               [
                 { key: "file", label: "Upload a file", icon: Upload },
                 { key: "url", label: "From a link", icon: Link2 },
+                { key: "feed", label: "Version sources", icon: Rss },
               ] as const
             ).map((option) => (
               <button
@@ -776,6 +961,63 @@ export function ManualInstall({
                   the browser, so no proxy body limit applies. The link is checked before anything
                   is downloaded, and a big bundle then takes as long as the download does.
                 </p>
+              )}
+            </div>
+          ) : source === "feed" ? (
+            <div className="flex flex-col gap-2">
+              {feedForPackage.length === 0 ? (
+                <p className="rounded-lg border border-border bg-subtle px-3 py-2 text-xs text-muted-foreground">
+                  {uncachedHere > 0
+                    ? `A source has listed ${uncachedHere} build${uncachedHere === 1 ? "" : "s"} for this package and cached none of them. Cache one in Settings → Version sources and it appears here.`
+                    : packageName
+                      ? "No source has a cached build for this package. Check Settings → Version sources, or use a link or an upload."
+                      : "Pick a package above to see what the sources have for it."}
+                </p>
+              ) : (
+                <>
+                  <p className="text-xs font-medium text-muted-foreground">
+                    Cached by a version source
+                  </p>
+                  <ul className="flex max-h-64 flex-col gap-1 overflow-y-auto">
+                    {feedForPackage.map((build) => (
+                      <li
+                        key={build.id}
+                        className={cn(
+                          "flex flex-wrap items-center gap-2 rounded-lg border px-3 py-2 text-sm",
+                          selected?.id === build.id
+                            ? "border-primary/40 bg-primary/5"
+                            : "border-border",
+                        )}
+                      >
+                        <Rss className="h-4 w-4 shrink-0 text-muted-foreground" />
+                        <span className="font-mono">{build.version}</span>
+                        <span className="truncate text-xs text-muted-foreground">
+                          {build.feed} · {formatBytes(build.sizeBytes)} ·{" "}
+                          <RelativeTime value={build.uploadedAt} />
+                        </span>
+                        {/* No delete here, unlike an upload: this row belongs
+                            to a feed, and forgetting it would only have the
+                            next poll list it again. */}
+                        <Button
+                          variant="outline"
+                          size="sm"
+                          className="ml-auto"
+                          disabled={!canOperate || pending}
+                          onClick={() => setSelected(build)}
+                        >
+                          Use this
+                        </Button>
+                      </li>
+                    ))}
+                  </ul>
+                  {uncachedHere > 0 ? (
+                    <p className="text-xs text-muted-foreground">
+                      {uncachedHere} more listed and not cached. A build stored once is attributed
+                      to the feed with the lowest priority, so a feed showing nothing here may
+                      simply have lost every build to another one.
+                    </p>
+                  ) : null}
+                </>
               )}
             </div>
           ) : (
@@ -902,7 +1144,7 @@ export function ManualInstall({
             </div>
           ) : null}
 
-          {buildsForPackage.length > 0 ? (
+          {source !== "feed" && buildsForPackage.length > 0 ? (
             <div className="flex flex-col gap-2 border-t border-border pt-4">
               <p className="text-xs font-medium text-muted-foreground">
                 Already uploaded{packageName ? ` for ${packageName}` : ""}
@@ -963,7 +1205,12 @@ export function ManualInstall({
         </CardHeader>
         <CardContent className="flex flex-col gap-3">
           <div className="flex flex-wrap items-center gap-2">
-            <SearchInput value={query} onChange={setQuery} placeholder="Search name, serial…" />
+            <SearchInput
+              value={query}
+              onChange={setQuery}
+              placeholder="Search name, serial…"
+              shortcut
+            />
             <Select
               aria-label="Filter by group"
               placeholder="Select group…"
@@ -997,7 +1244,7 @@ export function ManualInstall({
           </div>
 
           <div className="rounded-lg border border-border">
-            <Table containerClassName="max-h-80">
+            <Table containerClassName="max-h-80 pointer-coarse:overscroll-y-none">
               <TableHeader>
                 <TableRow>
                   <TableHead className="w-10" />
@@ -1313,7 +1560,12 @@ export function ManualInstall({
             on <span className="text-foreground">{split.total}</span> box
             {split.total === 1 ? "" : "es"} and overwrites the config on{" "}
             <span className="text-foreground">{configWriteCount}</span> of them with{" "}
-            {configuredGroups.length === 1 ? "the group's" : "their group's"} current one.
+            {configOverride !== null
+              ? "the one written on this page"
+              : configuredGroups.length === 1
+                ? "the group's current one"
+                : "their group's current one"}
+            .
           </>
         }
         confirmLabel="Install and write"
@@ -1329,7 +1581,10 @@ export function ManualInstall({
             </span>{" "}
             {configuredGroups.length === 1 ? "has" : "have"} this app as their MITM. Whatever is on
             those boxes now, including anything edited on the box by hand, is replaced, and there is
-            no copy of it anywhere else.
+            no copy of it anywhere else.{" "}
+            {configOverride !== null
+              ? "This deploy carries its own config, so the group's is not what lands — and the group's is left exactly as it is."
+              : ""}
           </p>
           {forceClean ? (
             <p className="text-destructive">

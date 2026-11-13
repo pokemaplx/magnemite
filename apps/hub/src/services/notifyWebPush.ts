@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
-import { type MonitorSettingsValues, prisma } from "@magnemite/db";
+import { type NotifySettingsValues, prisma } from "@magnemite/db";
 import webpush, { WebPushError } from "web-push";
-import { type AlertInput, alertBody, alertTitle, deviceUrl } from "./alerts.js";
+import { type Notice, clamp, dashboardUrl, noticeTitle } from "./alerts.js";
 import { env } from "../env.js";
 import { log } from "../log.js";
 
@@ -29,7 +29,7 @@ export function webPushAvailable(): boolean {
   return Boolean(env.VAPID_PUBLIC_KEY && env.VAPID_PRIVATE_KEY);
 }
 
-export function webPushConfigured(settings: MonitorSettingsValues): boolean {
+export function webPushConfigured(settings: NotifySettingsValues): boolean {
   return settings.webPushEnabled && webPushAvailable();
 }
 
@@ -47,8 +47,8 @@ function ensureConfigured(): boolean {
 }
 
 export async function sendWebPush(
-  alert: AlertInput,
-  settings: MonitorSettingsValues,
+  notice: Notice,
+  settings: NotifySettingsValues,
 ): Promise<boolean> {
   if (!webPushConfigured(settings) || !ensureConfigured()) return false;
 
@@ -58,18 +58,19 @@ export async function sendWebPush(
   if (subscriptions.length === 0) return false;
 
   const payload = JSON.stringify({
-    title: alertTitle(alert),
-    body: alertBody(alert) || alert.message,
-    url: deviceUrl(alert.deviceId),
-    // Two alerts about the same box and the same signal replace each other in
-    // the tray rather than stacking. A box that flaps would otherwise bury
-    // everything else under a column of itself.
-    tag: `${alert.deviceId}:${alert.signal}`,
-    level: alert.level,
-    // A fault gets to interrupt; an all-clear does not. Notifications the
+    title: noticeTitle(notice),
+    // Push services cap a payload at about 4 KB once encrypted, and refuse
+    // rather than truncate. A tray shows a few lines at most anyway.
+    body: clamp(notice.body, 1000),
+    url: dashboardUrl(notice.path),
+    // The same tag replaces rather than stacks: a box that flaps would
+    // otherwise bury everything else under a column of itself.
+    tag: notice.tag,
+    level: notice.level,
+    // A fault gets to interrupt; good news does not. Notifications the
     // operating system shows silently are the reason recoveries are worth
     // having on at all.
-    silent: alert.recovery,
+    silent: Boolean(notice.quiet),
   });
 
   const dead: string[] = [];
@@ -93,7 +94,7 @@ export async function sendWebPush(
         if (err instanceof WebPushError && (err.statusCode === 404 || err.statusCode === 410)) {
           dead.push(subscription.id);
         } else {
-          log.warn({ err }, "web push endpoint refused an alert");
+          log.warn({ err }, "web push endpoint refused a notification");
         }
         return null;
       }
@@ -113,9 +114,4 @@ export async function sendWebPush(
   }
 
   return sent.length > 0;
-}
-
-/** How many browsers are subscribed, for the dashboard to show. */
-export async function countPushSubscriptions(): Promise<number> {
-  return prisma.pushSubscription.count();
 }

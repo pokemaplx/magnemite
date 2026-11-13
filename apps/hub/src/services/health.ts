@@ -144,7 +144,9 @@ async function checkDatabase(): Promise<IntegrationCheck> {
   try {
     const { ms } = await timed(() => prisma.$queryRaw`SELECT 1`);
     const [devices, versions, jobs, server] = await Promise.all([
-      prisma.device.count(),
+      // Boxes. A VPS is a Device too, and counting it here would inflate the
+      // only number on this page that is meant to be "the size of the fleet".
+      prisma.device.count({ where: { kind: "BOX" } }),
       prisma.appVersion.count(),
       prisma.job.count(),
       databaseVersion(),
@@ -391,7 +393,9 @@ async function checkRotom(): Promise<IntegrationCheck> {
   try {
     const { ms, value: devices } = await timed(() => listDevices());
     const connected = devices.filter((d) => d.is_connected).length;
-    const matched = await prisma.device.count({ where: { rotomDeviceId: { not: null } } });
+    const matched = await prisma.device.count({
+      where: { kind: "BOX", rotomDeviceId: { not: null } },
+    });
     // Rotom listing boxes that never match one of ours means the origins do
     // not line up, and the install lifecycle then silently does nothing.
     const unmatched = devices.length > 0 && matched === 0;

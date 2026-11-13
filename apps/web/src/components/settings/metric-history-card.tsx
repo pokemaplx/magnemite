@@ -13,6 +13,7 @@ export type MetricHistoryRow = {
   metricsRetentionDays: number;
   rotomSampleSeconds: number;
   rotomRetentionDays: number;
+  connectionRetentionDays: number;
   /** The floors, from the two cards that own them. Shown, never posted. */
   heartbeatSeconds: number;
   rotomSyncSeconds: number;
@@ -91,6 +92,21 @@ export function MetricHistoryCard({
               unit="days"
               disabled={disabled}
               hint="0 turns scanner recording off. The Scanner column and the monitoring rules are unaffected, they read the live state, not the history."
+            />
+          </SettingGroup>
+
+          {/* No sampling pair here, deliberately: an episode is written when
+              one happens rather than on a clock, so "how often" has no
+              meaning for it. Only how long to keep it. */}
+          <SettingGroup title="Connectivity">
+            <NumberField
+              name="connectionRetentionDays"
+              label="Keep for"
+              value={settings.connectionRetentionDays}
+              min={0}
+              unit="days"
+              disabled={disabled}
+              hint="Every stretch where a box was out of contact, and what it was — the history behind an unreachable alert. One row per episode rather than one per beat, so months of it costs almost nothing. 0 turns it off and drops what is stored."
             />
           </SettingGroup>
 

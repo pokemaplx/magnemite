@@ -3,7 +3,13 @@
 import { revalidatePath } from "next/cache";
 import { prisma } from "@magnemite/db";
 import { requireOperator } from "@/lib/session";
-import { type RotomDeviceAction, hub } from "@/lib/hub";
+import {
+  type DeviceConfigPreview,
+  type DeviceConfigPush,
+  type MaintenanceResult,
+  type RotomDeviceAction,
+  hub,
+} from "@/lib/hub";
 import {
   planFromNames,
   planRename,
@@ -28,6 +34,20 @@ export async function setDeviceApproval(deviceId: string, approved: boolean): Pr
       targetId: deviceId,
     },
   });
+
+  // The other door into a group's join installs.
+  //
+  // A box that enrolled on a token without auto-approve was pending at the
+  // time, so enrolment queued nothing -- a rollout skips an unapproved device.
+  // This is the moment it becomes a target, and the only one left.
+  //
+  // Swallowed on purpose: the approval is done and recorded, and failing the
+  // whole action because an install could not be queued would leave the
+  // operator pressing a button that already worked.
+  if (approved) {
+    await hub.queueJoinInstalls(deviceId).catch(() => undefined);
+  }
+
   revalidatePath("/");
   revalidatePath(`/devices/${deviceId}`);
   return { ok: true };
@@ -188,6 +208,99 @@ export async function rebootDevice(deviceId: string): Promise<ActionState> {
   return { ok: true, message: "Reboot sent." };
 }
 
+/** How many reboots are in flight at the hub at once. */
+const REBOOT_CONCURRENCY = 8;
+
+/**
+ * Reboot a selection of boxes — the Fleet's bulk bar, and Shift+R on it.
+ *
+ * The hub only hands the message to a socket and answers, so each one is
+ * quick; the cap is there so that three hundred picked boxes are not three
+ * hundred requests landing on the hub in the same millisecond. A box with no
+ * socket is counted rather than failing the rest — the selection is allowed to
+ * hold boxes that went away while it was being made.
+ *
+ * Boxes only, and approved ones: the same boxes the selection can hold. A
+ * machine is a Device too, and rebooting the VPS under twenty containers is not
+ * something a list of TV boxes should be able to do by accident.
+ */
+export async function rebootDevices(deviceIds: string[]): Promise<ActionState & { sent?: number }> {
+  const user = await requireOperator();
+  if (deviceIds.length === 0) return { error: "No boxes picked." };
+
+  const devices = await prisma.device.findMany({
+    where: { id: { in: deviceIds }, kind: "BOX", approved: true },
+    select: { id: true, serial: true, name: true },
+  });
+  if (devices.length === 0)
+    return { error: "None of those boxes are here any more. Reload the page." };
+
+  const outcomes = new Map<string, string>();
+  let next = 0;
+  async function worker() {
+    while (next < devices.length) {
+      const device = devices[next++]!;
+      try {
+        await hub.rebootDevice(device.id);
+        outcomes.set(device.id, "sent");
+      } catch (err) {
+        const message = toMessage(err);
+        // The hub's 409 for a box with no socket, which is a box that is
+        // offline rather than a reboot that went wrong.
+        outcomes.set(device.id, message === "device is offline" ? "offline" : message);
+      }
+    }
+  }
+  await Promise.all(
+    Array.from({ length: Math.min(REBOOT_CONCURRENCY, devices.length) }, () => worker()),
+  );
+
+  const sent = devices.filter((device) => outcomes.get(device.id) === "sent");
+  const offline = devices.filter((device) => outcomes.get(device.id) === "offline").length;
+  const failed = devices.filter(
+    (device) => !["sent", "offline"].includes(outcomes.get(device.id) ?? ""),
+  );
+
+  if (sent.length > 0) {
+    await prisma.auditLog.create({
+      data: {
+        userId: user.id,
+        userEmail: user.email,
+        action: "device.reboot",
+        targetType: "Device",
+        // Same rule as a group move: one box keeps its id so its own audit view
+        // still finds the row, a batch has no single id to file it under.
+        targetId: devices.length === 1 ? (devices[0]?.id ?? null) : null,
+        meta: {
+          devices: devices.length,
+          results: devices.map((device) => ({
+            serial: device.serial,
+            name: device.name,
+            result: outcomes.get(device.id) ?? "skipped",
+          })),
+        },
+      },
+    });
+  }
+
+  const skipped = [
+    offline > 0 ? `${offline} offline` : null,
+    failed.length > 0 ? `${failed.length} failed (${outcomes.get(failed[0]!.id)})` : null,
+  ]
+    .filter(Boolean)
+    .join(", ");
+
+  if (sent.length === 0) return { error: `No box took the reboot — ${skipped}.` };
+  return {
+    ok: true,
+    sent: sent.length,
+    message:
+      sent.length === devices.length
+        ? `Reboot sent to ${sent.length} ${sent.length === 1 ? "box" : "boxes"}.`
+        : `Reboot sent to ${sent.length} of ${devices.length} — ${skipped}.`,
+  };
+}
+
 /**
  * Run a command on the box and return what it printed.
  *
@@ -231,6 +344,67 @@ export async function execOnDevice(
 }
 
 /**
+ * What rewriting the box's MITM config would write.
+ *
+ * Operators only, like Execute itself: the rendered file is the MITM's
+ * credentials, and the group form already keeps the template from a viewer.
+ */
+export async function previewDeviceConfig(
+  deviceId: string,
+): Promise<ActionState & { preview?: DeviceConfigPreview }> {
+  await requireOperator();
+  try {
+    return { ok: true, preview: await hub.previewDeviceConfig(deviceId) };
+  } catch (err) {
+    return { error: toMessage(err) };
+  }
+}
+
+/**
+ * Write the MITM's config to the box and restart the MITM -- no install.
+ *
+ * `content` is sent only when somebody edited it; otherwise the hub writes the
+ * group's own template, rendered for the box, which is the same file it would
+ * have written with the next install.
+ *
+ * Audited like Execute, but with the path and the hash and never the content:
+ * that is the MITM's credentials, and keeping them out of the audit log is
+ * the reason this is not a command typed into Execute.
+ */
+export async function pushDeviceConfig(
+  deviceId: string,
+  content: string | null,
+): Promise<ActionState & { result?: DeviceConfigPush }> {
+  const user = await requireOperator();
+
+  let result: DeviceConfigPush;
+  try {
+    result = await hub.pushDeviceConfig(deviceId, content);
+  } catch (err) {
+    return { error: toMessage(err) };
+  }
+
+  await prisma.auditLog.create({
+    data: {
+      userId: user.id,
+      userEmail: user.email,
+      action: "device.config.push",
+      targetType: "Device",
+      targetId: deviceId,
+      meta: {
+        path: result.path,
+        sha256: result.sha256,
+        ok: result.ok,
+        edited: content !== null,
+        hookError: result.hookError,
+      },
+    },
+  });
+
+  return { ok: true, result };
+}
+
+/**
  * Collect the box's logs and hand back the bundle to download.
  *
  * The call blocks while the box zips and uploads — usually a few seconds — so
@@ -260,6 +434,96 @@ export async function collectDeviceLogs(
   });
 
   return { ok: true, bundleId };
+}
+
+/**
+ * Take one screenshot and hand back its id to render.
+ *
+ * Blocks exactly like the log bundle above, for a few seconds at most, so the
+ * dialog gets either an id to point an `<img>` at or the reason there is none.
+ *
+ * Audited with everything else a person does to a box, and that row matters
+ * more here than it does for a log: this is a picture of somebody's living
+ * room, and who looked is part of the answer to whether that was reasonable.
+ */
+export async function captureScreenshot(
+  deviceId: string,
+): Promise<ActionState & { screenshotId?: string }> {
+  const user = await requireOperator();
+  let screenshotId: string;
+  try {
+    ({ screenshotId } = await hub.captureScreenshot(deviceId, user.id));
+  } catch (err) {
+    return { error: toMessage(err) };
+  }
+
+  await prisma.auditLog.create({
+    data: {
+      userId: user.id,
+      userEmail: user.email,
+      action: "device.screenshot",
+      targetType: "Device",
+      targetId: deviceId,
+      meta: { screenshotId },
+    },
+  });
+
+  return { ok: true, screenshotId };
+}
+
+/**
+ * Park a box for a while, or put it back.
+ *
+ * `minutes` of 0 is the release. One action rather than two, because both
+ * halves run the group's matching hook and neither makes sense alone.
+ *
+ * What comes back includes what happened to that hook, which the dialog says
+ * out loud: "parked" that quietly meant "and the scanner is still running" is
+ * a different thing to be holding than what was asked for.
+ */
+export async function setDeviceMaintenance(
+  deviceId: string,
+  minutes: number,
+): Promise<ActionState & { until?: string | null; hookNote?: string | null }> {
+  const user = await requireOperator();
+
+  let result: MaintenanceResult;
+  try {
+    result = await hub.setDeviceMaintenance(deviceId, minutes, user.email);
+  } catch (err) {
+    return { error: toMessage(err) };
+  }
+
+  await prisma.auditLog.create({
+    data: {
+      userId: user.id,
+      userEmail: user.email,
+      action: minutes > 0 ? "device.maintenance.start" : "device.maintenance.end",
+      targetType: "Device",
+      targetId: deviceId,
+      meta: {
+        device: result.deviceName,
+        minutes,
+        until: result.until,
+        hookRan: result.hook.ran,
+        // The command itself, because "the hook failed" six weeks later is not
+        // a question this row can answer without it.
+        hookCommand: result.hook.command,
+        hookError: result.hook.error,
+      },
+    },
+  });
+
+  // The badge shows up on the fleet table and on the device page, and a parked
+  // box changes what the rollout forms will accept.
+  revalidateDeviceViews();
+  return {
+    ok: true,
+    until: result.until,
+    hookNote: result.hook.error
+      ? `The hook failed: ${result.hook.error}`
+      : (result.hook.skipped ?? null),
+  };
 }
 
 /**
@@ -372,11 +636,32 @@ export async function syncRotom(): Promise<ActionState> {
 /**
  * Removing a device drops its token, so the box goes quiet until it is
  * re-enrolled. Its job history goes with it.
+ *
+ * Boxes only. A machine deleted through here would cascade its `RedroidHost`
+ * and instance rows away without any of the three things `deleteHost` does
+ * first -- its containers would keep running, and `/etc/magnemite/host.json`
+ * would still hold a serial whose row is gone, which is what stops the machine
+ * from ever being added again. Not reachable from the UI, where the fleet
+ * lists boxes and a machine's device page redirects to `/hosts`, but this is a
+ * server action and therefore an endpoint.
+ *
+ * Hardware only, for the same reason. A Redroid box deleted here would leave
+ * its container running on the machine with a token that no longer works, and
+ * an instance row pointing at nothing; `removeInstance` is what takes one away.
  */
 export async function deleteDevice(deviceId: string): Promise<ActionState> {
   const user = await requireOperator();
-  const device = await prisma.device.findUnique({ where: { id: deviceId } });
+  const device = await prisma.device.findUnique({
+    where: { id: deviceId },
+    include: { redroidInstance: { select: { id: true } } },
+  });
   if (!device) return { error: "Device not found." };
+  if (device.kind === "HOST") {
+    return { error: "That is a machine. Remove it from its own page, so its containers go too." };
+  }
+  if (device.redroidInstance) {
+    return { error: "That is a Redroid instance. Remove it as one, so its container goes too." };
+  }
 
   await prisma.device.delete({ where: { id: deviceId } });
   await prisma.auditLog.create({
@@ -458,12 +743,14 @@ export async function loadRenameTargets(
 
   const where =
     "groupId" in source
-      ? { groupId: source.groupId, approved: true }
-      : { id: { in: source.deviceIds } };
+      ? { kind: "BOX" as const, groupId: source.groupId, approved: true }
+      : { kind: "BOX" as const, id: { in: source.deviceIds } };
 
   const [devices, fleet] = await Promise.all([
     prisma.device.findMany({ where, select: RENAME_SELECT }),
-    prisma.device.findMany({ select: { id: true, name: true } }),
+    // Boxes too: this is what the preview checks a proposed name against, and
+    // a machine's name colliding with a box's is not the clash it warns about.
+    prisma.device.findMany({ where: { kind: "BOX" }, select: { id: true, name: true } }),
   ]);
   if (devices.length === 0) return { error: "No boxes to rename." };
 
@@ -638,8 +925,11 @@ export async function renameDevices(
   if (input.deviceIds.length === 0) return { error: "No boxes picked." };
 
   const [devices, fleet] = await Promise.all([
-    prisma.device.findMany({ where: { id: { in: input.deviceIds } }, select: RENAME_SELECT }),
-    prisma.device.findMany({ select: { id: true, name: true } }),
+    prisma.device.findMany({
+      where: { kind: "BOX", id: { in: input.deviceIds } },
+      select: RENAME_SELECT,
+    }),
+    prisma.device.findMany({ where: { kind: "BOX" }, select: { id: true, name: true } }),
   ]);
   if (devices.length !== input.deviceIds.length) {
     return { error: "A box in the selection is no longer there. Reopen the dialog." };

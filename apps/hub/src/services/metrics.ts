@@ -109,6 +109,12 @@ export async function recordSample(deviceId: string, metrics: DeviceMetrics): Pr
         totalBytes: toBigInt(metrics.totalBytes),
         cpuTempC: metrics.cpuTempC ?? null,
         batteryTempC: metrics.batteryTempC ?? null,
+        // Null here rather than undefined, unlike the Device row: a sample is
+        // one moment and a reading the box did not send at that moment is a
+        // gap, which is what the chart has to draw.
+        cpuPercent: metrics.cpuPercent ?? null,
+        swapTotalBytes: toBigInt(metrics.swapTotalBytes),
+        swapFreeBytes: toBigInt(metrics.swapFreeBytes),
       },
     });
 
@@ -166,6 +172,7 @@ export async function pruneMetrics(force = false): Promise<number> {
   // exactly that rather than the shorter of the two applied to both.
   const cutoff = cutoffFor(settings.metricsRetentionDays);
   const rotomCutoff = cutoffFor(settings.rotomRetentionDays);
+  const connectionCutoff = cutoffFor(settings.connectionRetentionDays);
 
   // deleteMany takes no limit, so a batch is "select the ids, then delete
   // those". Every table here is indexed on `at` alone precisely for this. They
@@ -216,6 +223,17 @@ export async function pruneMetrics(force = false): Promise<number> {
           take,
         }),
       (ids) => prisma.rotomSample.deleteMany({ where: { id: { in: ids } } }),
+    );
+    // Kept on its own window, and never while still open: an outage happening
+    // right now must not be pruned out from under the page showing it.
+    deleted += await pruneTable(
+      (take) =>
+        prisma.deviceConnectionEvent.findMany({
+          where: { startedAt: { lt: connectionCutoff }, endedAt: { not: null } },
+          select: { id: true },
+          take,
+        }),
+      (ids) => prisma.deviceConnectionEvent.deleteMany({ where: { id: { in: ids } } }),
     );
   } catch (err) {
     log.error({ err }, "metric prune failed");

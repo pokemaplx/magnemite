@@ -1,6 +1,7 @@
 "use client";
 
 import type { ReactNode } from "react";
+import type { ActionState } from "@/actions/rollouts";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 
@@ -50,6 +51,8 @@ export function NumberField({
   label,
   value,
   min,
+  max,
+  step,
   hint,
   unit = "seconds",
   disabled,
@@ -59,6 +62,13 @@ export function NumberField({
   label: string;
   value: number;
   min: number;
+  max?: number;
+  /**
+   * Browsers validate against this, and the default is 1 — so a field that is
+   * legitimately fractional (gigabytes, where 2.5 is a real answer) refuses
+   * what the operator typed unless it says so.
+   */
+  step?: number | "any";
   hint: ReactNode;
   unit?: string;
   disabled: boolean;
@@ -78,6 +88,8 @@ export function NumberField({
           name={name}
           type="number"
           min={min}
+          max={max}
+          step={step}
           defaultValue={value}
           disabled={disabled}
           onChange={
@@ -109,4 +121,17 @@ export function Suffixed({ suffix, children }: { suffix: string; children: React
       <span className="shrink-0 text-xs text-muted-foreground">{suffix}</span>
     </div>
   );
+}
+
+/**
+ * The one outcome a save button cannot show: saved, but the hub could not be
+ * told, so it is still running on the old values. And the error, inline,
+ * because a form error belongs next to the form rather than in a toast.
+ */
+export function Outcome({ state }: { state: ActionState }) {
+  if (state.error) return <p className="text-sm text-destructive">{state.error}</p>;
+  if (state.ok && state.message && state.message !== "Saved.") {
+    return <p className="text-sm text-warning">{state.message}</p>;
+  }
+  return null;
 }

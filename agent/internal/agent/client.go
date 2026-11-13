@@ -6,10 +6,12 @@ import (
 	"context"
 	"crypto/tls"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"math/rand"
 	"net/http"
+	"os"
 	"strings"
 	"sync"
 	"time"
@@ -39,7 +41,53 @@ const (
 	// One full package inventory every 15 heartbeats — five minutes at the
 	// default rate.
 	inventoryEveryBeats = 15
+
+	// A whole beat's budget for the host block, and no more. Long enough for a
+	// `compose ps` plus an inspect per container on a loaded machine; short
+	// enough that a wedged daemon cannot stop the beat itself.
+	hostReportTimeout = 20 * time.Second
+
+	// A session that held this long is proof the connection works, so the
+	// backoff goes back to its floor. Three beats at the default rate: long
+	// enough to have actually reported, rather than merely to have dialled.
+	backoffResetAfter = 60 * time.Second
+
+	// What the expensive half of a beat gets. Generous, because nothing waits
+	// on it any more: a pass that overruns is simply skipped by the next one,
+	// and the heartbeat has already gone out without it.
+	slowBudget = 30 * time.Second
 )
+
+// HostReporter is the half of a report only a machine running containers has.
+//
+// An interface and not a concrete type so the fake can stand in: the whole
+// point of -fake-docker is that everything except the two docker calls is
+// real, and that only works if the docker calls are the seam.
+// Converger brings a machine's containers in line with a rendered compose
+// file. Separate from HostReporter because the fake implements one of them
+// trivially and the other almost entirely for real.
+type Converger interface {
+	Converge(ctx context.Context, req proto.HostConverge) proto.HostConvergeResult
+}
+
+// Bootstrapper re-runs the provisioning script on a machine already up. Its
+// own interface for the reason Converger is one: the fake stands in for it.
+type Bootstrapper interface {
+	Run(ctx context.Context, req proto.HostBootstrap) proto.HostBootstrapResult
+}
+
+// BoxEnroller runs adb against the boxes on this machine's LAN. Its own
+// interface for the reason Bootstrapper is one, and nil on a box -- which is
+// what makes a misdirected request a log line rather than a shell.
+type BoxEnroller interface {
+	Run(ctx context.Context, req proto.BoxAdb, deviceToken string) proto.BoxAdbResult
+}
+
+type HostReporter interface {
+	// Report is what this machine is and what containers it is holding. It is
+	// allowed to be slow -- it shells out -- and it is called once per beat.
+	Report(ctx context.Context) *proto.HostInfo
+}
 
 type Agent struct {
 	Cfg     *config.Config
@@ -47,6 +95,22 @@ type Agent struct {
 	Version string
 	// Path the config was loaded from, so a rotated token can be written back.
 	ConfigPath string
+	// Brings the containers in line with what the hub asked for. Nil on a box,
+	// and nil in host mode until docker is wired up.
+	Converger Converger
+	// Runs the bootstrap again on command. Nil on a box, which is what makes
+	// a misdirected request a log line rather than a shell.
+	Bootstrapper Bootstrapper
+	// Runs adb against boxes on this machine's LAN. Nil on a box, and what
+	// decides whether this agent advertises box_adb at all.
+	BoxEnroller BoxEnroller
+	// Set only in host mode, and nil on every box.
+	//
+	// This is the whole of what -host changes about the client: the loop below
+	// reconnects, enrols, beats, takes a welcome, runs exec and updates itself
+	// identically either way. A machine is a Device, so none of that needed a
+	// second copy.
+	Host HostReporter
 
 	mu      sync.Mutex
 	conn    *websocket.Conn
@@ -57,6 +121,11 @@ type Agent struct {
 	// How often to beat. The hub sets it in every welcome, so it survives a
 	// reconnect without the loop having to wait for one.
 	heartbeat time.Duration
+	// When this process started. Constant for its life, and the thing that
+	// tells the hub "the agent restarted" from "the box rebooted" — the two
+	// leave the same gap and had been indistinguishable.
+	startedAt time.Time
+
 	// Wakes the heartbeat loop when the hub changes the interval mid-session.
 	// Buffered and written to without blocking: a change that arrives while no
 	// loop is running is picked up when the next one starts and reads
@@ -67,12 +136,89 @@ type Agent struct {
 	jobID   string
 	jobStop context.CancelFunc
 
+	// Held for the length of a push_config, so a second one is refused rather
+	// than restarting the scanner in the middle of the first.
+	pushMu sync.Mutex
+
 	// One follow per source, however many dashboards are watching it: the hub
 	// shares a stream between everyone on the same source, and asks for a
 	// second one only when someone is watching something else. Keyed by the
 	// hub's stream id, valued by the follow's cancel.
 	logMu      sync.Mutex
 	logStreams map[string]*logFollow
+
+	// The last completed pass of the expensive half of a beat, waiting for a
+	// heartbeat to carry it, and whether a pass is running right now. Its own
+	// mutex rather than `mu`: a pass holds this for minutes on a wedged box,
+	// and `mu` is what every send has to take.
+	slowMu  sync.Mutex
+	slow    *slowReading
+	slowRun bool
+}
+
+// sess is one connection's own identity and tally.
+//
+// The id goes in every line about this connection, so a stretch of agent.log
+// can be matched to one episode in the dashboard rather than to a time range
+// to squint at. The tally is so the exit line can say how much work actually
+// happened on the session rather than only how long it lasted — "ended after
+// 4m with 0 beats" and "ended after 4m with 12" are different faults.
+type sess struct {
+	id    string
+	began time.Time
+
+	mu       sync.Mutex
+	beats    int
+	lastBeat time.Time
+}
+
+func newSess() *sess {
+	return &sess{id: fmt.Sprintf("%08x", rand.Uint32()), began: time.Now()}
+}
+
+func (s *sess) beat() {
+	s.mu.Lock()
+	s.beats++
+	s.lastBeat = time.Now()
+	s.mu.Unlock()
+}
+
+// tally is the beat count and how long ago the last one went out. A zero
+// duration means there was never one at all, which is the interesting case.
+func (s *sess) tally() (beats int, sinceLast time.Duration) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.lastBeat.IsZero() {
+		return s.beats, 0
+	}
+	return s.beats, time.Since(s.lastBeat)
+}
+
+// slowReading is one pass of the half of a beat that shells out: the package
+// versions and the monitor probes.
+//
+// Gathered off the heartbeat's path and handed over whole, then read exactly
+// once. Reading it once is the point: the monitor half is "how is this box
+// right now" and the hub acts on it — replaying a stale one would have the
+// fleet rebooted over the past. A beat that finds no new pass simply says
+// monitorRan false, which the hub already reads as "the agent did not look".
+type slowReading struct {
+	packages   []proto.PackageInfo
+	complete   bool
+	monitorRan bool
+	foreground string
+	anr        []string
+	checks     []proto.CheckResult
+	host       *proto.HostInfo
+}
+
+func (r *slowReading) foldInto(m *proto.DeviceMetrics) {
+	m.Packages = r.packages
+	m.PackagesComplete = r.complete
+	m.MonitorRan = r.monitorRan
+	m.ForegroundPackage = r.foreground
+	m.ANRPackages = r.anr
+	m.Checks = r.checks
 }
 
 // logFollow is one running follow. Held by pointer so the goroutine that ends
@@ -88,6 +234,7 @@ func New(cfg *config.Config, system sys.System, version, configPath string) *Age
 		Sys:        system,
 		Version:    version,
 		ConfigPath: configPath,
+		startedAt:  time.Now(),
 		tracked:    []string{"com.nianticlabs.pokemongo"},
 		heartbeat:  defaultHeartbeat,
 		rebeat:     make(chan time.Duration, 1),
@@ -103,7 +250,9 @@ func (a *Agent) Run(ctx context.Context) error {
 			return ctx.Err()
 		}
 
+		began := time.Now()
 		err := a.session(ctx)
+		lasted := time.Since(began)
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
@@ -111,11 +260,20 @@ func (a *Agent) Run(ctx context.Context) error {
 			log.Printf("connection lost: %v", err)
 		}
 
+		// A session that held for a few beats is proof the backoff has already
+		// done its job. Without this the growth is one-way — the counter lives
+		// for the life of the process — so a box that flapped once at 3am is
+		// still waiting the full minute at noon, which turns a two-minute
+		// fault into an all-day one.
+		if lasted >= backoffResetAfter {
+			backoff = minBackoff
+		}
+
 		// Jitter matters at fleet scale: a whole fleet reconnecting in lockstep
 		// after the VPS restarts is a self-inflicted denial of service.
 		jitter := time.Duration(rand.Int63n(int64(backoff / 4)))
 		wait := backoff - backoff/8 + jitter
-		log.Printf("reconnecting in %s", wait.Round(time.Second))
+		log.Printf("reconnecting in %s (backoff %s)", wait.Round(time.Second), backoff)
 
 		select {
 		case <-ctx.Done():
@@ -155,13 +313,17 @@ func (a *Agent) session(ctx context.Context) error {
 		}
 		return fmt.Errorf("dial %s: %w", wsURL, err)
 	}
-	log.Printf("connected to %s", wsURL)
+	ss := newSess()
+	log.Printf("session %s: connected to %s", ss.id, wsURL)
 
 	a.mu.Lock()
 	a.conn = conn
 	a.mu.Unlock()
 
 	defer func() {
+		beats, sinceLast := ss.tally()
+		log.Printf("session %s: ended after %s (%d beats, last %s ago)",
+			ss.id, time.Since(ss.began).Round(time.Second), beats, sinceLast.Round(time.Second))
 		a.mu.Lock()
 		if a.conn == conn {
 			a.conn = nil
@@ -176,22 +338,55 @@ func (a *Agent) session(ctx context.Context) error {
 	conn.SetPongHandler(func(string) error {
 		return conn.SetReadDeadline(time.Now().Add(pongTimeout))
 	})
+	// Gorilla's default answers the hub's keepalive on a one-second write
+	// deadline and swallows the timeout as "temporary", so a pong stuck behind
+	// a slow frame is invisible at both ends — and two of them have the hub
+	// hang up on a box that was working. Ours gets the same deadline as any
+	// other write, and says so when it still cannot get out.
+	conn.SetPingHandler(func(data string) error {
+		err := conn.WriteControl(websocket.PongMessage, []byte(data), time.Now().Add(writeTimeout))
+		if err != nil && !errors.Is(err, websocket.ErrCloseSent) {
+			log.Printf("session %s: could not answer the hub's keepalive: %v", ss.id, err)
+		}
+		// nil on purpose: a missed keepalive is worth seeing, not worth
+		// dropping a connection that is otherwise carrying frames.
+		return nil
+	})
 
 	sessionCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
-	if err := a.sendHello(); err != nil {
+	if err := a.sendHello(ss.id); err != nil {
 		return err
 	}
-	go a.heartbeatLoop(sessionCtx)
+	go a.heartbeatLoop(sessionCtx, ss)
 
 	for {
 		_, data, err := conn.ReadMessage()
 		if err != nil {
+			if errors.Is(err, os.ErrDeadlineExceeded) {
+				// Worth its own wording: nothing arrived at all, not even a
+				// keepalive, so the link died rather than the hub closing it.
+				return fmt.Errorf("nothing from the hub in %s", pongTimeout)
+			}
 			return err
 		}
 		conn.SetReadDeadline(time.Now().Add(pongTimeout))
 		a.handle(ctx, data)
+	}
+}
+
+// endSession drops the connection out from under the read loop.
+//
+// Closing the conn is what makes ReadMessage return, which unwinds session()
+// through its own defer and lets Run reconnect. Cancelling the session context
+// would not do it: nothing inside ReadMessage is selecting on it.
+func (a *Agent) endSession() {
+	a.mu.Lock()
+	conn := a.conn
+	a.mu.Unlock()
+	if conn != nil {
+		_ = conn.Close()
 	}
 }
 
@@ -232,7 +427,7 @@ func (a *Agent) send(v any) error {
 	return conn.WriteMessage(websocket.TextMessage, data)
 }
 
-func (a *Agent) sendHello() error {
+func (a *Agent) sendHello(sessionID string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
@@ -242,15 +437,45 @@ func (a *Agent) sendHello() error {
 	metrics := sys.Metrics(ctx, a.Sys, a.trackedPackages(), true)
 	a.applyMonitor(ctx, &metrics)
 
+	info := a.Sys.DeviceInfo(ctx)
+	// Filled here rather than inside DeviceInfo because only the agent knows
+	// two of the three, and because the boot instant wants taking at the same
+	// moment as the uptime it is derived from.
+	info.BootedAt = time.Now().Unix() - a.Sys.UptimeSeconds()
+	info.AgentStartedAt = a.startedAt.Unix()
+	info.SessionID = sessionID
+
 	return a.send(proto.Hello{
 		Type:            "hello",
 		ProtocolVersion: proto.Version,
 		AgentVersion:    a.Version,
-		Device:          a.Sys.DeviceInfo(ctx),
+		Device:          info,
 		Metrics:         metrics,
 		CurrentJobID:    a.currentJob(),
-		Capabilities:    proto.AgentCapabilities(),
+		// Claimed only by a machine that can actually act on it: the hub
+		// checks this before offering a relay, and the switch below has no
+		// default branch -- so a box advertising it would be asked for work
+		// it would never answer.
+		Capabilities: proto.AgentCapabilities(a.BoxEnroller != nil),
+		Host:         a.hostReport(ctx),
 	})
+}
+
+// hostReport is nil on a box, which is what keeps the field absent from every
+// message a box sends rather than present and empty.
+//
+// Given its own timeout rather than the caller's: it shells out to docker, and
+// a daemon that has wedged must cost this beat its host block and nothing else.
+// A machine whose docker is gone still has to heartbeat -- that is the fault
+// the hub needs to see, and a beat that never arrives looks like a different
+// one.
+func (a *Agent) hostReport(ctx context.Context) *proto.HostInfo {
+	if a.Host == nil {
+		return nil
+	}
+	ctx, cancel := context.WithTimeout(ctx, hostReportTimeout)
+	defer cancel()
+	return a.Host.Report(ctx)
 }
 
 // monitorSpec is what to watch this beat, or nil when there is nothing to
@@ -320,7 +545,18 @@ func (a *Agent) setHeartbeat(seconds int) {
 	}
 }
 
-func (a *Agent) heartbeatLoop(ctx context.Context) {
+// heartbeatLoop sends the beat the hub measures liveness by.
+//
+// The beat carries only readings that cannot block — a statfs and a handful of
+// /proc reads — plus whatever the last expensive pass left behind. Everything
+// that shells out happens in collectSlow, off this path.
+//
+// That split is the whole point. The gathering used to run inline: a 30s
+// metrics budget, half an interval of monitor probes and a 15s write, on top
+// of the interval itself. One beat that saturated them put 75 seconds between
+// two reports, against a hub that gives up at 70 — so a box that was sitting
+// there perfectly healthy, socket and all, was announced as unreachable.
+func (a *Agent) heartbeatLoop(ctx context.Context, ss *sess) {
 	a.mu.Lock()
 	interval := a.heartbeat
 	a.mu.Unlock()
@@ -341,26 +577,36 @@ func (a *Agent) heartbeatLoop(ctx context.Context) {
 			// Reset rather than a fresh ticker, so the beat count — and with
 			// it the inventory cadence — carries across the change.
 			ticker.Reset(d)
+			interval = d
 		case <-ticker.C:
 			beats++
-			// Apps are installed and removed by hand on these boxes, so the
-			// inventory does go stale — but not by the second. Every
-			// inventoryEveryBeats heartbeats keeps it current at a cost of one
-			// `pm list packages` every few minutes.
-			withInventory := beats%inventoryEveryBeats == 0
+			began := time.Now()
 
-			mctx, cancel := context.WithTimeout(ctx, 30*time.Second)
-			metrics := sys.Metrics(mctx, a.Sys, a.trackedPackages(), withInventory)
-			a.applyMonitor(mctx, &metrics)
-			cancel()
+			metrics := sys.BaseMetrics(a.Sys, a.trackedPackages())
+			var host *proto.HostInfo
+			if slow := a.takeSlow(); slow != nil {
+				slow.foldInto(&metrics)
+				host = slow.host
+			}
 
 			if err := a.send(proto.Heartbeat{
 				Type:         "heartbeat",
 				Metrics:      metrics,
 				CurrentJobID: a.currentJob(),
+				Host:         host,
 			}); err != nil {
+				// This was a bare return: nothing logged, the socket left
+				// open, and not one more beat on this session ever. The hub
+				// went on holding a live socket for a box it would then mark
+				// offline by sweep, and only its own read deadline eventually
+				// broke the deadlock. A box that cannot send its beat does not
+				// have a working connection, whatever the socket believes.
+				log.Printf("session %s: heartbeat send failed after %s: %v — ending the session",
+					ss.id, time.Since(began).Round(time.Millisecond), err)
+				a.endSession()
 				return
 			}
+			ss.beat()
 
 			a.mu.Lock()
 			conn := a.conn
@@ -369,8 +615,85 @@ func (a *Agent) heartbeatLoop(ctx context.Context) {
 				_ = conn.WriteMessage(websocket.PingMessage, nil)
 			}
 			a.mu.Unlock()
+
+			// Silent on a healthy box, which is what makes it worth reading:
+			// after the split above a beat is microseconds, so a line here at
+			// all means the cheap half is no longer cheap.
+			if cost := time.Since(began); cost > interval {
+				log.Printf("session %s: slow beat — %s to gather and send, on an interval of %s",
+					ss.id, cost.Round(time.Millisecond), interval)
+			}
+
+			// Apps are installed and removed by hand on these boxes, so the
+			// inventory does go stale — but not by the second. Every
+			// inventoryEveryBeats heartbeats keeps it current at a cost of one
+			// `pm list packages` every few minutes.
+			go a.collectSlow(ctx, ss, beats%inventoryEveryBeats == 0)
 		}
 	}
+}
+
+// takeSlow hands over the last completed pass and clears the slot, so no
+// reading is ever sent twice. See slowReading for why that matters.
+func (a *Agent) takeSlow() *slowReading {
+	a.slowMu.Lock()
+	defer a.slowMu.Unlock()
+	r := a.slow
+	a.slow = nil
+	return r
+}
+
+// collectSlow gathers the half of a beat that shells out, for the next beat to
+// carry.
+//
+// Skipped outright while a pass is still running, which is the point: on a box
+// whose framework is restarting every `dumpsys` blocks until its deadline, and
+// the right answer is to let the inventory go stale rather than to queue up
+// passes behind a wedge. The heartbeat has already gone out without it.
+func (a *Agent) collectSlow(ctx context.Context, ss *sess, withInventory bool) {
+	a.slowMu.Lock()
+	if a.slowRun {
+		a.slowMu.Unlock()
+		return
+	}
+	a.slowRun = true
+	a.slowMu.Unlock()
+
+	defer func() {
+		a.slowMu.Lock()
+		a.slowRun = false
+		a.slowMu.Unlock()
+	}()
+
+	began := time.Now()
+	ctx, cancel := context.WithTimeout(ctx, slowBudget)
+	defer cancel()
+
+	tracked := a.trackedPackages()
+	r := &slowReading{host: a.hostReport(ctx)}
+	r.packages, r.complete = sys.PackageVersions(ctx, a.Sys, tracked, withInventory)
+
+	// The signature of a framework restart — a Redroid `stop && start`, or a
+	// system_server that died — as against a box that is simply busy. Every
+	// one of these goes through system_server, so all of them failing at once
+	// says what failed.
+	if len(tracked) > 0 && len(r.packages) == 0 {
+		log.Printf("session %s: dumpsys answered for 0 of %d packages in %s — the framework may be restarting",
+			ss.id, len(tracked), time.Since(began).Round(time.Millisecond))
+	}
+
+	// Through applyMonitor rather than monitor.Collect directly, so the probe
+	// budget stays defined in exactly one place.
+	var probe proto.DeviceMetrics
+	a.applyMonitor(ctx, &probe)
+	r.monitorRan = probe.MonitorRan
+	r.foreground = probe.ForegroundPackage
+	r.anr = probe.ANRPackages
+	r.checks = probe.Checks
+
+	a.slowMu.Lock()
+	a.slow = r
+	a.slowMu.Unlock()
 }
 
 func (a *Agent) handle(ctx context.Context, data []byte) {
@@ -407,6 +730,94 @@ func (a *Agent) handle(ctx context.Context, data []byte) {
 			log.Printf("waiting for an operator to approve this device in the dashboard")
 		}
 
+	case "host_bootstrap":
+		// Only a machine has a bootstrap to re-run. A box ignoring this is the
+		// protocol's rule working; saying so is what stops a misdirected one
+		// being silent.
+		if a.Bootstrapper == nil {
+			log.Printf("ignoring host_bootstrap: this agent is not running in -host mode")
+			return
+		}
+		var req proto.HostBootstrap
+		if json.Unmarshal(data, &req) != nil {
+			return
+		}
+		// Its own goroutine, like the converge: this is apt, a kernel module
+		// and possibly an image build, and the read loop has to keep taking
+		// frames -- including the pings that stop the hub deciding the machine
+		// has gone while it is working.
+		go func() {
+			log.Printf("re-running the bootstrap (%d files, image %s)", len(req.Files), req.Image)
+			result := a.Bootstrapper.Run(ctx, req)
+			if result.Ok {
+				log.Printf("bootstrap %s done: %d steps", req.RequestID, len(result.Steps))
+			} else {
+				log.Printf("bootstrap %s failed: %s", req.RequestID, result.Error)
+			}
+			if err := a.send(result); err != nil {
+				log.Printf("could not report the bootstrap: %v", err)
+			}
+		}()
+
+	case "box_adb":
+		// Only a machine relays adb. A box ignoring this is the protocol's
+		// rule working; saying so is what stops a misdirected one being
+		// silent.
+		if a.BoxEnroller == nil {
+			log.Printf("ignoring box_adb: this agent is not running in -host mode")
+			return
+		}
+		var req proto.BoxAdb
+		if json.Unmarshal(data, &req) != nil {
+			return
+		}
+		// Its own goroutine, like the bootstrap: a sweep is minutes and a
+		// batch of installs is longer, and the read loop has to keep taking
+		// frames -- including the pings that stop the hub deciding this
+		// machine has gone while it is working.
+		go func() {
+			log.Printf("running adb %s (%d addresses, %d targets)", req.Mode, len(req.Addresses), len(req.Targets))
+			result := a.BoxEnroller.Run(ctx, req, a.Cfg.DeviceToken)
+			if result.Ok {
+				log.Printf("adb %s %s done: %d steps, %d facts", req.Mode, req.RequestID, len(result.Steps), len(result.Facts))
+			} else {
+				log.Printf("adb %s %s failed: %s", req.Mode, req.RequestID, result.Error)
+			}
+			if err := a.send(result); err != nil {
+				log.Printf("could not report the adb run: %v", err)
+			}
+		}()
+
+	case "host_converge":
+		// Only a machine has containers to converge. A box ignoring this is the
+		// protocol's own rule working: the type switch has no default branch,
+		// so an unknown message falls straight through -- but being explicit
+		// here means a misdirected converge is logged rather than silent.
+		if a.Converger == nil {
+			log.Printf("ignoring host_converge: this agent is not running in -host mode")
+			return
+		}
+		var req proto.HostConverge
+		if json.Unmarshal(data, &req) != nil {
+			return
+		}
+		// Its own goroutine: a converge is minutes of image pulls and Android
+		// boots, and the read loop has to keep taking frames -- including the
+		// pings that stop the hub deciding this machine has gone.
+		go func() {
+			log.Printf("converging %d bytes of compose (batch %d, orphans %v)",
+				len(req.Compose), req.BatchSize, req.RemoveOrphans)
+			result := a.Converger.Converge(ctx, req)
+			if result.Ok {
+				log.Printf("converge %s done", req.RequestID)
+			} else {
+				log.Printf("converge %s failed: %s", req.RequestID, result.Error)
+			}
+			if err := a.send(result); err != nil {
+				log.Printf("could not report the converge: %v", err)
+			}
+		}()
+
 	case "install_job":
 		var job proto.InstallJob
 		if json.Unmarshal(data, &job) != nil {
@@ -422,13 +833,21 @@ func (a *Agent) handle(ctx context.Context, data []byte) {
 		a.cancelJob(msg.JobID)
 
 	case "reboot":
-		log.Printf("reboot requested by hub")
+		// A box with its own kernel reboots. A container has none to restart —
+		// it shares the host's, and the kernel refuses reboot(2) without
+		// CAP_SYS_BOOT — so it points this at a framework restart instead. Same
+		// intent either way: everything the box was running comes back up.
+		cmd := a.Cfg.RebootCommand
+		if cmd == "" {
+			cmd = "reboot"
+		}
+		log.Printf("reboot requested by hub: %s", cmd)
 		go func() {
 			rctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 			defer cancel()
 			// Give the frame a moment to reach the hub before the box drops.
 			time.Sleep(2 * time.Second)
-			_, _ = a.Sys.Exec(rctx, "reboot")
+			_, _ = a.Sys.Shell(rctx, cmd)
 		}()
 
 	case "agent_update":
@@ -444,6 +863,15 @@ func (a *Agent) handle(ctx context.Context, data []byte) {
 			return
 		}
 		go a.collectLogs(msg)
+
+	case "collect_screenshot":
+		var msg proto.CollectScreenshot
+		if json.Unmarshal(data, &msg) != nil {
+			return
+		}
+		// Its own goroutine, like the bundle above: the read loop has to keep
+		// taking frames while a megabyte goes up whatever uplink this box has.
+		go a.collectScreenshot(msg)
 
 	case "log_stream_start":
 		var msg proto.LogStreamStart
@@ -465,6 +893,15 @@ func (a *Agent) handle(ctx context.Context, data []byte) {
 			return
 		}
 		go a.execCommand(msg)
+
+	case "push_config":
+		var msg proto.PushConfig
+		if json.Unmarshal(data, &msg) != nil {
+			return
+		}
+		// Its own goroutine: the hooks around the write can take a while, and
+		// the read loop has to keep taking frames meanwhile.
+		go a.pushConfig(msg)
 
 	case "ping":
 		// The frame-level pong is enough; nothing to do.
@@ -505,9 +942,9 @@ func (a *Agent) startJob(ctx context.Context, job proto.InstallJob) {
 	a.jobStop = cancel
 	a.jobMu.Unlock()
 
-	// Let the fake box know what version a commit should report.
+	// Let the fake box know what a commit should report.
 	if fake, ok := a.Sys.(*sys.Fake); ok {
-		fake.SetPendingVersion(job.Version)
+		fake.SetPending(job.PackageName, job.Version)
 	}
 
 	go func() {

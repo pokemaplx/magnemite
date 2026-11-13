@@ -1,14 +1,22 @@
 import path from "node:path";
 import type { InstallJob } from "@magnemite/protocol";
-import { prisma } from "@magnemite/db";
+import {
+  getRedroidSettings,
+  prisma,
+  resolveWorkers,
+  type RedroidSettingsValues,
+} from "@magnemite/db";
 import { getHubSettings } from "./hubSettings.js";
 import { env } from "../env.js";
 import { log } from "../log.js";
-import { isOnline, sendTo } from "../registry.js";
+import { getConnection, sendTo } from "../registry.js";
+import { agentUpdateInFlight } from "./agentRelease.js";
 import { hasWriteConfig, renderConfig } from "./deviceConfig.js";
 import { ACTIVE_STATES, logJobEvent, recomputeRollout, requeueStalled } from "./jobs.js";
+import { sweepExpiredMaintenance, notInMaintenance } from "./maintenance.js";
 import { pruneMetrics } from "./metrics.js";
 import { evaluate } from "./monitor.js";
+import { syncWorkersConfigs } from "./workersConfig.js";
 
 const TICK_MS = 5_000;
 
@@ -51,6 +59,11 @@ async function tick() {
     const settings = await getHubSettings();
     await promoteSoakingRollouts();
     await requeueStalled(settings.jobStallTimeoutSeconds);
+    // Before the monitor pass and before the dispatch, both deliberately: a
+    // box whose window just closed should have the hook that starts its
+    // scanner run before a rule looks at it, and before a job held for it
+    // goes out.
+    await sweepExpiredMaintenance();
     // Keeps its own hourly clock, so riding the 5-second tick costs nothing.
     await pruneMetrics();
     // Same idea, on the heartbeat's clock — one pass per beat, since that is
@@ -58,6 +71,10 @@ async function tick() {
     // monitoring is off, which is how every fleet starts.
     await evaluate();
     await dispatchQueued(settings.maxConcurrentJobs);
+    // After the dispatch, so a box that was just handed an install is seen as
+    // busy and left to it -- the install carries a config of its own. Starts
+    // its rewrites and returns without waiting for them.
+    await syncWorkersConfigs(settings.configRewriteConcurrency);
   } catch (err) {
     log.error({ err }, "scheduler tick failed");
   } finally {
@@ -101,18 +118,43 @@ async function dispatchQueued(maxConcurrentJobs: number) {
   let capacity = maxConcurrentJobs - activeCount;
   if (capacity <= 0) return;
 
+  // Taken before the candidates are read, because their device rows are what
+  // this dispatch renders the MITM config from. A box whose hello was applied
+  // after this instant may be ready by the time the loop reaches it, while the
+  // row the loop holds still predates that hello -- no `capabilities` on a box
+  // that has just enrolled. It goes on the next tick, which its hello nudges.
+  const readAt = Date.now();
+
   const candidates = await prisma.job.findMany({
     where: {
       state: "QUEUED",
       rollout: { status: { in: ["CANARY", "RUNNING"] } },
-      device: { approved: true },
+      // A parked box keeps its job queued, exactly as an offline one does, and
+      // it dispatches when the window closes. `createRollout` refuses a
+      // selection that names a parked box, so what this catches is the other
+      // order: a rollout created first and the box parked while it was still
+      // waiting for a slot.
+      //
+      // Safe to spread here: the `OR` it carries is on the device, and the
+      // one below is on the job.
+      device: { approved: true, ...notInMaintenance() },
       // A job that has just failed is held for its rollout's backoff. Filtered
       // here rather than skipped in the loop below so a held job does not eat
       // one of the 500 candidate slots on every tick.
       OR: [{ nextAttemptAt: null }, { nextAttemptAt: { lte: new Date() } }],
     },
     include: {
-      device: { include: { group: true } },
+      // `redroidInstance` and its machine because the config renderer
+      // resolves {{device.workers}} off them. Selected here rather than
+      // fetched inside the loop: the candidate query already walks these rows,
+      // so it costs no extra round trip, and a missing include would have been
+      // a placeholder that silently refused on every container.
+      device: {
+        include: {
+          group: true,
+          redroidInstance: { select: { workers: true, host: { select: { workers: true } } } },
+        },
+      },
       rollout: { include: { appVersion: { include: { appTarget: true } } } },
     },
     // Canaries first, then oldest rollout first, so one rollout drains before
@@ -124,23 +166,52 @@ async function dispatchQueued(maxConcurrentJobs: number) {
 
   // Per-group in-flight counts, for sites on a thin uplink.
   const groupActive = new Map<string, number>();
+  // And the boxes already working on something. The agent runs one install
+  // at a time and refuses a second outright, and the hub took that refusal as
+  // a failed attempt: a box that joined a group with two builds to install got
+  // both in one tick, and the one that lost burned its attempts, a backoff at
+  // a time, against a box that was simply busy with the other.
+  const busy = new Set<string>();
   const activeJobs = await prisma.job.findMany({
     where: { state: { in: ACTIVE_STATES } },
-    select: { device: { select: { groupId: true } } },
+    select: { deviceId: true, device: { select: { groupId: true } } },
   });
   for (const j of activeJobs) {
+    busy.add(j.deviceId);
     const gid = j.device.groupId;
     if (gid) groupActive.set(gid, (groupActive.get(gid) ?? 0) + 1);
   }
 
   const rolloutActive = new Map<string, number>();
+  // The fleet's end of {{device.workers}}. Read at most once a pass, and only
+  // when a config is actually rendered: most passes write none.
+  let redroidDefaults: Promise<RedroidSettingsValues> | null = null;
 
   for (const job of candidates) {
     if (capacity <= 0) break;
 
     // An offline box keeps its job queued; it gets dispatched the moment the
     // agent reconnects, no operator action needed.
-    if (!isOnline(job.deviceId)) continue;
+    const conn = getConnection(job.deviceId);
+    if (!conn) continue;
+
+    // "The moment it reconnects" means the moment its hello is applied, which
+    // is later than the moment its socket is registered. See `readyAt`.
+    if (conn.readyAt === null || conn.readyAt > readAt) continue;
+
+    // One job at a time. `busy` is what the hub has handed out; the
+    // connection's `currentJobId` is what the agent says it is doing, which
+    // covers a job the hub has already written off -- one cancelled, still
+    // winding down its post-install hook -- and the agent would refuse past.
+    if (busy.has(job.deviceId) || conn.currentJobId) continue;
+
+    // Its MITM's config is being rewritten, between a stop and a start that an
+    // install landing in the middle would undo. A push takes seconds.
+    if (conn.pushingConfig) continue;
+
+    // Swapping its own binary, which ends in a re-exec that would take an
+    // install started meanwhile down with it. Checked again at the send.
+    if (agentUpdateInFlight(conn)) continue;
 
     const rollout = job.rollout;
     if (rollout.status === "CANARY" && !job.isCanary) continue;
@@ -200,8 +271,18 @@ async function dispatchQueued(maxConcurrentJobs: number) {
     //
     // The candidate query already includes the device and its group, so this
     // costs no extra round trip inside the dispatch loop.
+    //
+    // `configWorkers` is what that config says about workers, on a container.
+    // It rides the job and reaches the instance only when the install
+    // succeeds, which is the agent's word that the file landed -- written
+    // here, a failed install would claim a config the box never got.
+    let configWorkers: number | null = null;
     if (rollout.writeConfig && job.device.group?.mitmPackageName === target.packageName) {
-      const config = renderConfig(job.device);
+      // The rollout's own config when it carries one, the group's otherwise --
+      // null here means "fall back", exactly as it does for the hooks above.
+      redroidDefaults ??= getRedroidSettings();
+      const defaults = await redroidDefaults;
+      const config = renderConfig(job.device, defaults, rollout.mitmConfig);
       if (config?.ok) {
         message.config = config.file;
       } else if (config) {
@@ -217,29 +298,61 @@ async function dispatchQueued(maxConcurrentJobs: number) {
         );
         message.config = null;
       }
+      const instance = job.device.redroidInstance;
+      if (message.config && instance) {
+        configWorkers = resolveWorkers(instance.workers, instance.host.workers, defaults);
+      }
     }
 
     const attempt = job.attempt + 1;
-    await prisma.job.update({
-      where: { id: job.id },
+    // A compare-and-set rather than a plain write. The candidates were read at
+    // the top of this pass, and a job can have moved since: cancelled, or
+    // failed and handed a backoff by a result that landed while this loop was
+    // awaiting. A plain write put DISPATCHED over both, which is how a job
+    // went out again in the same second it was told to wait a minute.
+    const claimed = await prisma.job.updateMany({
+      where: {
+        id: job.id,
+        state: "QUEUED",
+        OR: [{ nextAttemptAt: null }, { nextAttemptAt: { lte: new Date() } }],
+      },
       data: {
         state: "DISPATCHED",
         attempt,
         dispatchedAt: new Date(),
         heartbeatAt: new Date(),
         progress: 0,
+        // Every attempt says its own, null included: a retry rendered without
+        // a config must not inherit the number an earlier attempt carried.
+        configWorkers,
       },
     });
+    if (claimed.count === 0) continue;
 
-    if (!sendTo(job.deviceId, message)) {
-      // The socket died between the online check and the write. Put it back
-      // and let the next tick try again.
-      await prisma.job.update({
-        where: { id: job.id },
+    // Everything that can change across the awaits above, checked again with
+    // none between the check and the write. The socket may have died, or been
+    // replaced by a newer one whose hello is not in yet -- sending down that
+    // one is the race `readyAt` exists to close. And an agent update may have
+    // gone out meanwhile: `maybeUpdateAgent` ends in a block like this one,
+    // so whichever of the two runs second sees the first.
+    if (
+      getConnection(job.deviceId) !== conn ||
+      conn.pushingConfig ||
+      agentUpdateInFlight(conn) ||
+      !sendTo(job.deviceId, message)
+    ) {
+      // Put it back and let a later tick try again -- unless something has
+      // moved it on in the meantime, a cancel most likely.
+      await prisma.job.updateMany({
+        where: { id: job.id, state: "DISPATCHED" },
         data: { state: "QUEUED", attempt: job.attempt, dispatchedAt: null, heartbeatAt: null },
       });
       continue;
     }
+    // Ahead of the agent saying so on its next heartbeat, so nothing else --
+    // a second job, an agent update -- goes to the box in between.
+    conn.currentJobId = job.id;
+    busy.add(job.deviceId);
 
     await logJobEvent(job.id, `dispatched (attempt ${attempt}) → ${version.version}`, {
       phase: "DISPATCHED",

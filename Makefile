@@ -19,7 +19,17 @@ GO_IMAGE    ?= golang:1.23-alpine
 # The self-hosted stack. It runs no database of its own: DATABASE_URL in .env
 # points at one you already run, of either engine.
 COMPOSE_FILE ?= deploy/docker-compose.yml
+# Anything this machine needs that the versioned file should not carry -- an
+# extra port, a bind mount, a service of your own. Picked up automatically when
+# it exists, and gitignored, so `git pull` keeps delivering fixes to the file
+# below instead of landing on top of local edits to it. Compose merges the two
+# with the later one winning, and only when both are named: passing -f at all
+# turns off its own search for an override next to the base.
+COMPOSE_OVERRIDE := deploy/compose.override.yml
 COMPOSE     := docker compose --env-file .env -f $(COMPOSE_FILE)
+ifneq ($(wildcard $(COMPOSE_OVERRIDE)),)
+COMPOSE     := $(COMPOSE) -f $(COMPOSE_OVERRIDE)
+endif
 ROOT        := $(shell pwd)
 LDFLAGS     := -s -w -X main.version=$(VERSION)
 DOCKER_GO   := docker run --rm -v "$(ROOT)/agent":/src -w /src $(GO_IMAGE)
@@ -65,17 +75,71 @@ module: agent ## Package the Magisk module zip into dist/
 	@rm -rf dist/module
 	@echo "Module: dist/magnemite-agent-$(VERSION).zip"
 
+# Redroid boxes: Android in a container instead of on a shelf. The image is the
+# install, so unlike the Magisk zip it takes no SERVER or TOKEN — those are
+# properties on the docker command line, and the image stays free of secrets.
+#
+# The base image and the Magisk version are **not** defaulted here. They are
+# ARG defaults in the Dockerfile, and that is deliberate.
+#
+# The bootstrap builds this image on each machine with a plain
+# `docker build -f ./redroid/Dockerfile .` and no --build-arg, so the
+# Dockerfile's defaults are what the entire fleet actually gets. A second
+# default here could drift from it, and the failure would be silent in the
+# worst way: one tag meaning two different images depending on who ran the
+# build. To upgrade the Android version or Magisk, edit the Dockerfile.
+#
+# Both stay overridable for an experiment -- `make redroid REDROID_BASE=...` --
+# and are passed through only when set.
+REDROID_BASE   ?=
+MAGISK_VERSION ?=
+# The owner of the Magisk repo and the apk's md5, overridable for the same
+# reason and more carefully: the init block in the Dockerfile needs a *patched*
+# Magisk -- `--setup-sbin` and `--auto-selinux` are the fork's, not upstream's
+# -- so a MAGISK_VERSION on its own is a bump of the fork's tag, and pointing
+# MAGISK_REPO at topjohnwu builds an image that roots nothing. Set MAGISK_MD5=
+# empty to skip the integrity check when trying another version.
+MAGISK_REPO    ?=
+MAGISK_MD5     ?=
+REDROID_ARGS    = $(if $(REDROID_BASE),--build-arg REDROID=$(REDROID_BASE))
+REDROID_ARGS   += $(if $(MAGISK_VERSION),--build-arg MAGISK=$(MAGISK_VERSION))
+REDROID_ARGS   += $(if $(MAGISK_REPO),--build-arg MAGISK_REPO=$(MAGISK_REPO))
+REDROID_ARGS   += $(if $(MAGISK_MD5),--build-arg MAGISK_MD5=$(MAGISK_MD5))
+# Versioned by what is *in* the image -- the base, the start script, the .rc --
+# and deliberately not by the agent version.
+#
+# The agent inside is only a seed that the box's own self-update replaces, so
+# tying the tag to it would move the tag on every agent release, change the
+# rendered `image:` line, and make compose recreate every container on the
+# machine: a full Android cold boot each, to deliver a binary the containers
+# would have swapped in seconds with a syscall.Exec.
+REDROID_VERSION ?= $(shell awk -F= '/^redroid=/ { print $$2 }' VERSION)
+REDROID_TAG     ?= magnemite/redroid:$(REDROID_VERSION)
+
+.PHONY: redroid
+redroid: agent ## Build the Redroid image with the agent baked in (arm64 host)
+	docker build -f agent/redroid/Dockerfile $(REDROID_ARGS) -t $(REDROID_TAG) agent
+	@echo "Image: $(REDROID_TAG)"
+
 # Narrow every compose target to one service: `make build up SERVICE=web`
 # rebuilds and restarts the dashboard alone, leaving the hub -- and the device
 # sockets it holds -- untouched.
 SERVICE ?=
 
+# The usual deploy, now that CI publishes the images: fetch what main built and
+# restart. `make build` is still here and still wins over a published image --
+# it tags the result under the same name -- which is the path on Postgres,
+# whose client these images are not built with.
+.PHONY: pull
+pull: ## Fetch the published images, or one service with SERVICE=web
+	$(COMPOSE) pull $(SERVICE)
+
 .PHONY: build
-build: ## Rebuild the images, or one service with SERVICE=web
+build: ## Rebuild the images locally, or one service with SERVICE=web
 	$(COMPOSE) build $(SERVICE)
 
 .PHONY: up
-up: ## Start the stack, or one service with SERVICE=web. Builds only what is missing
+up: ## Start the stack, or one service with SERVICE=web. Pulls what is missing
 	$(COMPOSE) up -d $(SERVICE)
 
 .PHONY: down

@@ -1,0 +1,98 @@
+name: magnemite-redroid
+
+# Redroid boxes: one container per box, each running the same image `make
+# redroid` built. This replaces flashing a Magisk zip over adb — adding a box is
+# adding a service below, not picking one up off a shelf.
+#
+#   make redroid
+#   docker compose --env-file .env -f deploy/redroid.compose.yml up -d
+#
+# Host requirements, none of which this file can check for you:
+#   - arm64. The fleet's bundles carry an arm64-v8a split and the agent matches
+#     the ABI exactly, so an x86_64 host is not a supported target.
+#   - the binder kernel module, with the device names Android expects, and the
+#     devices readable by somebody other than root:
+#       sudo modprobe binder_linux devices="binder,hwbinder,vndbinder"
+#       sudo chmod 0666 /dev/binder /dev/hwbinder /dev/vndbinder
+#     The chmod is not optional: modprobe makes them 0600 root:root, Android's
+#     services do not run as root, and every one of them aborts on the open
+#     with "Binder driver could not be opened" -- in a container docker happily
+#     reports as Up, with nothing in `docker logs`, that never finishes booting.
+#     On kernels older than 5.18, ashmem_linux as well.
+#
+# Two variables in .env drive every box:
+#   REDROID_HUB_URL      the HUB's URL, never the dashboard's
+#   REDROID_ENROLL_TOKEN Settings -> Enrollment -> New token
+
+# Everything every box shares. The `command` cannot live here — YAML merges
+# mappings, not sequences, so each box spells its properties out. A new box is
+# this block copied with a new name, volume and serial.
+x-box: &box
+  # Tracks the `redroid=` line of VERSION, which is what `make redroid` tags.
+  # It is not the agent version: the agent updates itself over the wire, and a
+  # moving tag here would cold-boot every container on the machine for nothing.
+  image: ${REDROID_IMAGE:-magnemite/redroid:5}
+  # Redroid needs the host's binder devices; it does not run unprivileged.
+  privileged: true
+  # A container that fell over on its own is brought back; a machine that
+  # rebooted does not bring its boxes back by itself. That second half is a
+  # real behaviour change from `unless-stopped`, and it is deliberate: docker
+  # starts every container it is holding at the same moment on boot, and N
+  # Androids all reaching their peak allocation in the same minute is exactly
+  # the OOM the sizing advice warns about. A six-box machine taking a kernel
+  # update is the case that will actually happen.
+  #
+  # So starting them in waves is somebody's job rather than docker's. On a
+  # hub-managed machine the host agent does it. On this hand-written path it is
+  # yours: bring them up with `docker compose up -d` after a reboot, or write a
+  # systemd unit that does, staggered.
+  restart: on-failure
+  # This is what makes the agent report *this box's* memory. Without a limit it
+  # reads the host's total and every box on the machine reports the same RAM.
+  # Load average and temperature stay host-wide whatever you set — Linux has no
+  # per-container load, and a container has no thermal sensor of its own.
+  mem_limit: ${REDROID_MEM_LIMIT:-4g}
+
+services:
+  box-01:
+    <<: *box
+    container_name: magnemite-box-01
+    volumes:
+      # /data is the box's identity. config.json lives here and holds the device
+      # token issued at enrolment. Lose this volume and the box enrols again —
+      # harmless while the serial below is stable, because the hub then finds
+      # the existing row by serial instead of making a new one.
+      - box-01-data:/data
+    command:
+      # The line that must differ per box. The hub keys a device on its serial
+      # alone: two boxes sharing one would be one box to the fleet.
+      - ro.serialno=magnemite-box-01
+      # Software rendering. A box that has to run a real game needs a GPU passed
+      # through instead; see the Redroid documentation for host mode.
+      - androidboot.redroid_gpu_mode=guest
+      - androidboot.use_memfd=true
+      - ro.magnemite.server=${REDROID_HUB_URL:?set REDROID_HUB_URL to the hub URL}
+      - ro.magnemite.enroll_token=${REDROID_ENROLL_TOKEN:?set REDROID_ENROLL_TOKEN}
+      # A container has no kernel of its own to restart, and the kernel refuses
+      # reboot(2) without CAP_SYS_BOOT. Restarting the framework is the
+      # equivalent that works from inside: every app comes back, init and the
+      # kernel do not move. The hub's reboot button and any REBOOT monitoring
+      # rule run this.
+      - ro.magnemite.reboot_cmd=stop && start
+
+  box-02:
+    <<: *box
+    container_name: magnemite-box-02
+    volumes:
+      - box-02-data:/data
+    command:
+      - ro.serialno=magnemite-box-02
+      - androidboot.redroid_gpu_mode=guest
+      - androidboot.use_memfd=true
+      - ro.magnemite.server=${REDROID_HUB_URL:?set REDROID_HUB_URL to the hub URL}
+      - ro.magnemite.enroll_token=${REDROID_ENROLL_TOKEN:?set REDROID_ENROLL_TOKEN}
+      - ro.magnemite.reboot_cmd=stop && start
+
+volumes:
+  box-01-data:
+  box-02-data:

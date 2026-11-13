@@ -123,7 +123,7 @@ export function DeviceRotomWorkers({
           <p className="py-6 text-sm text-muted-foreground">Rotom has no workers on this box.</p>
         ) : (
           <div className="overflow-hidden rounded-lg border border-border">
-            <Table containerClassName="max-h-[62vh]">
+            <Table containerClassName="lg:max-h-[62vh]">
               <TableHeader>
                 {/* No Platform column: it is a protobuf enum whose zero value is
                     UNSET, and a MITM that does not fill the field in its welcome

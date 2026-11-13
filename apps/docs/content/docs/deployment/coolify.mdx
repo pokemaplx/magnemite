@@ -172,21 +172,23 @@ stack and Coolify's proxy cannot mount it, so without `edge` every ~170 MB
 bundle would be read out of Node.
 
 ```
-                                    ┌─ /files/*      file_server, read-only volume
-  box ──► Traefik ──► edge (Caddy) ─┼─ /ws/device    ┐
-      agents domain                 ├─ /api/enroll   ├─► hub
-                                    ├─ /api/logs/*   │
-                                    ├─ /healthz      ┘
-                                    └─ anything else 404
+                                    ┌─ /files/*            file_server, read-only volume
+  box ──► Traefik ──► edge (Caddy) ─┼─ /ws/device          ┐
+      agents domain                 ├─ /api/enroll         │
+                                    ├─ /api/logs/*         ├─► hub
+                                    ├─ /api/screenshots/*  │
+                                    ├─ /healthz            ┘
+                                    └─ anything else       404
 ```
 
-| Path          | What the edge does with it                                                                                                                                                                            |
-| ------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `/files/*`    | Serves the bundle itself: native `Range`, so an interrupted download resumes. Every request is checked first by `forward_auth` against the hub's `/internal/authz`, which validates the device token. |
-| `/ws/device`  | Proxies the socket each box holds open.                                                                                                                                                               |
-| `/api/enroll` | Proxies first-boot registration.                                                                                                                                                                      |
-| `/api/logs/*` | Proxies the log bundles a box uploads.                                                                                                                                                                |
-| `/healthz`    | Proxies liveness.                                                                                                                                                                                     |
+| Path                 | What the edge does with it                                                                                                                                                                            |
+| -------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `/files/*`           | Serves the bundle itself: native `Range`, so an interrupted download resumes. Every request is checked first by `forward_auth` against the hub's `/internal/authz`, which validates the device token. |
+| `/ws/device`         | Proxies the socket each box holds open.                                                                                                                                                               |
+| `/api/enroll`        | Proxies first-boot registration.                                                                                                                                                                      |
+| `/api/logs/*`        | Proxies the log bundles a box uploads.                                                                                                                                                                |
+| `/api/screenshots/*` | Proxies the screen captures a box uploads, for the reason a bundle goes this way: a socket frame is capped at 1 MB and a 1080p PNG is regularly more.                                                 |
+| `/healthz`           | Proxies liveness.                                                                                                                                                                                     |
 
 <Callout type="info" title="Everything else is a 404 on purpose">
   The dashboard lives on the other domain and reaches the hub over Coolify's network, so nothing

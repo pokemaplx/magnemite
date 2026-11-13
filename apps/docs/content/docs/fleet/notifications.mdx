@@ -1,0 +1,170 @@
+---
+title: Notifications
+description: Discord, ntfy or a browser notification when a rollout finishes, a build will not download, a machine fails its setup, or a monitoring rule fires.
+icon: Bell
+---
+
+Everything Magnemite says goes through three channels, set up once on
+**Settings → Notifications**. Two things talk through them:
+
+- **The fleet itself.** Rollouts starting and finishing, builds found or
+  refused, machines set up or failing. Each of those **fleet events** picks its
+  channels in the matrix on the same tab.
+- **Monitoring rules**, about a box gone wrong. Each rule picks its own channels
+  on the rule, beside what it watches — see
+  [Monitoring](/docs/fleet/monitoring#where-alerts-go).
+
+Configure no channel and nothing is sent — and nothing else changes. A
+notification is never a reason for a rollout to fail or a box to be left
+unrestarted.
+
+## Channels
+
+The three are independent in every way that matters: each has its own
+credential, its own test, and one being broken says nothing about the other two.
+The tab's count is how many of them are set up.
+
+### Discord
+
+A **webhook URL**, from the channel's Integrations settings — empty turns
+Discord off — and an optional **role to ping**. The role is pinged on critical
+monitoring alerts only: a mention on every warning is how a channel gets muted,
+which costs you the alert that mattered. Fleet events never ping.
+
+Every message's title links to the page it is about.
+
+### ntfy
+
+A **server** — the public `https://ntfy.sh`, or your own — and a **topic**.
+Empty topic turns it off. Install the ntfy app, subscribe to the topic, and a
+message buzzes the phone with a link straight to the page it is about.
+
+On ntfy.sh a topic is the only thing protecting it: anyone who guesses the name
+reads everything sent to it, so pick one nobody would. The **access token** is
+for a self-hosted server or a reserved topic; empty publishes anonymously, which
+is what a public topic wants.
+
+How loudly the phone is told follows the message: a failure is high priority, a
+success or an all-clear is low and arrives without a sound. A monitoring rule
+set to `CRITICAL` is max, which on Android gets through Do Not Disturb.
+
+### Web push
+
+A notification from the dashboard itself, on the desktop or phone of whoever
+asked for one. Nothing to install and no third party in the path.
+
+Two halves that look like one card and are not. The switch is a fleet-wide
+setting, saved with **Save** like everything else on the tab.
+**Notify this browser** is per browser and per person — it asks for the
+notification permission, registers a service worker and stores an endpoint only
+that browser can be reached at — so it takes effect on the click. Messages then
+arrive with every tab closed. A viewer can subscribe too: wanting to be told
+when the fleet breaks is not a change to the fleet.
+
+It needs a VAPID keypair in the hub's environment; without one the card says so
+rather than offering a button that cannot work. Generate it once:
+
+```sh
+npx web-push generate-vapid-keys
+```
+
+and set `VAPID_PUBLIC_KEY`, `VAPID_PRIVATE_KEY` and `VAPID_SUBJECT`. Keep them:
+a push service only accepts messages signed by the key it saw when a browser
+subscribed, so regenerating the pair silently unsubscribes everyone. There is
+no way for the server to ask a push service what it still holds — a browser
+that was cleared or revoked is only discovered when it answers 404 or 410, and
+its row is dropped then.
+
+Two messages about the same thing replace each other in the tray rather than
+stacking: a rollout that started and then finished is one notification.
+
+<Callout type="info" title="Safari and iOS need the Home Screen">
+  iOS only allows web push for a site added to the Home Screen. Until then the card says the browser
+  cannot do it, which is accurate rather than a bug.
+</Callout>
+
+## Test before you trust it
+
+Each card has **Send test**. It sends one message through **that channel only**
+— a test that fanned out to all three meant a phone buzzing for somebody fixing
+a webhook — and says whether the channel took it. It uses what is **saved**,
+not what is typed in the card, because that is what every real message will
+use: save first, then test.
+
+A test ignores the event matrix and the repeat window on purpose. Somebody
+pressing a button called "Send test" wants to see a message.
+
+## Fleet events
+
+One row per event, one box per channel. Tick where each goes; an event with
+every box clear is off. A channel that is not set up keeps its column — routing
+an event to ntfy before the topic is typed is a reasonable order to do things
+in, and the column header says why nothing arrives yet.
+
+| Event                                | Default | Sent when                                                                                                                                           |
+| ------------------------------------ | ------- | --------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Auto-update started a rollout**    | on      | [Auto-update](/docs/fleet/rollouts#automatic-rollouts) creates a rollout: a newer approved build, and boxes behind it.                              |
+| **Rollout or manual deploy started** | on      | Somebody starts one — from the fleet table or [Manual deploy](/docs/fleet/manual) — with who started it.                                            |
+| **Rollout finished**                 | on      | Every box took the build. How many, and how long it took.                                                                                           |
+| **Rollout finished with failures**   | on      | At least one box gave up. Names up to five of them with the error each one reported.                                                                |
+| **Canary failed, rollout paused**    | on      | A canary failed and the rollout parked itself. Nothing else gets the build — and auto-update for that app waits — until it is resumed or cancelled. |
+| **New build found**                  | off     | A poll found a build newer than everything already known: the newest per app, once per poll, and whether it still needs approval.                   |
+| **Build failed to download**         | on      | Caching a build failed, or it did not match its checksum. Auto-update passes over it until it is retried from Versions.                             |
+| **Version source failing**           | on      | A source failed two polls in a row — and once more when it answers again.                                                                           |
+| **Machine set up**                   | on      | A provisioned machine dialled in and was claimed, or a setup re-run finished.                                                                       |
+| **Machine setup failed**             | on      | The SSH setup failed, a re-run reported a failure, or the hub restarted in the middle of one. Names the step it stopped at.                         |
+| **Containers failed to apply**       | on      | A machine could not run what it was told to — docker's own output comes with it.                                                                    |
+| **New box failed its group install** | on      | A box that joined a group could not install one of the group's builds.                                                                              |
+| **Agent update failed**              | on      | A box reported that it could not swap its agent binary.                                                                                             |
+
+Successes go out quietly; failures are warnings. None of them is critical, so
+none of them pings a Discord role.
+
+### Said once, not on every pass
+
+Every event is announced on the moment something changed, not while something
+stays true, which is what keeps a busy fleet from being a noisy one:
+
+- **A rollout** is announced once when it finishes. Retrying its failed boxes
+  and finishing again is a new outcome and is announced again.
+- **Nothing to install, nothing to say.** A rollout where every box was already
+  on the build finishes the moment it is created, and is not announced at
+  either end.
+- **A new source does not announce its history.** Its first poll lists every
+  build it has ever published; only one newer than everything the fleet
+  already knew counts as news.
+- **A failing source** needs two failed polls in a row, so a mirror that
+  answered 502 once is not an incident — and so a hub restart, which forgets
+  the last poll, does not announce every broken feed again.
+- **Join installs** — the builds a box is given when it joins a group — are
+  silent unless one fails, and a new machine whose ten boxes all fail the same
+  build sends one message for that build in half an hour, not ten.
+- **A broken agent release** is one message, not one per box: once per agent
+  version until the hub restarts. The box keeps its old agent and is offered
+  the update again a minute later, which would otherwise be a message a minute.
+
+Never announced at all: cancellations and pauses an operator made themselves,
+a canary's soak ending, and individual job failures — the rollout's summary is
+where those are, with the boxes named.
+
+## Monitoring alerts
+
+The one knob monitoring alerts have here is **Repeat an alert after** (30
+minutes by default): the same signal on the same box is not announced again
+inside it. The action still happens and is still recorded; only the message is
+held. An all-clear is never held. Everything else about who hears about a rule
+is on the rule.
+
+## When a channel fails
+
+Nothing waits for it. A Discord outage, a revoked webhook, an ntfy rate limit —
+the rollout still finishes, the box is still restarted, and the hub's log says
+which channel refused what. A message counts as sent when **any** channel took
+it: a Discord message that landed is not made un-sent by ntfy being down at the
+same moment.
+
+## Who sees what
+
+Viewers see the tab, whether each channel is set up and the event matrix, but
+not the webhook URL, the ntfy topic or the token — on ntfy.sh, the topic alone
+is enough to read every message. Only operators can save or send a test.

@@ -10,7 +10,12 @@ export type BusEvent =
   | { kind: "device"; deviceId: string }
   | { kind: "job"; jobId: string; rolloutId: string; deviceId: string }
   | { kind: "rollout"; rolloutId: string }
-  | { kind: "version"; versionId: string };
+  | { kind: "version"; versionId: string }
+  // A machine being provisioned moved on: a step landed, or its state changed.
+  // Its own kind because nothing else about the fleet changes while a VPS is
+  // being set up, and the first machine is set up with no box online to
+  // happen to refresh the page.
+  | { kind: "bootstrap"; bootstrapId: string };
 
 class Bus extends EventEmitter {
   publish(event: BusEvent) {

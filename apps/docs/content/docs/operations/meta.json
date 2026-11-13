@@ -1,5 +1,5 @@
 {
   "title": "Operating it",
   "icon": "Gauge",
-  "pages": ["sources", "accounts", "grafana", "troubleshooting", "security"]
+  "pages": ["sources", "accounts", "shortcuts", "grafana", "troubleshooting", "security"]
 }

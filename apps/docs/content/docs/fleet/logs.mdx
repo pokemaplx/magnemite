@@ -1,11 +1,11 @@
 ---
 title: Logs and commands
-description: A box's logcat as a zip, live, or a root shell, from the device page.
+description: A box's logcat as a zip, live, a root shell, or a picture of its screen — from the device page.
 icon: ScrollText
 ---
 
-Three items in a device page's **⋯** menu, all needing the box online:
-**Logcat (.zip)**, **Live logs** and **Execute**.
+Four items in a device page's **⋯** menu, all needing the box online:
+**Logcat (.zip)**, **Live logs**, **Execute** and **Screenshot**.
 
 ## Logcat (.zip)
 
@@ -23,6 +23,28 @@ A snapshot, collected on demand and downloaded through the browser.
   hub, so it is running an image built before that route existed. Rebuild the edge, see [deploying
   without dropping the fleet](/docs/deployment/coolify#deploying-without-dropping-the-fleet).
 </Callout>
+
+### Collected automatically after an outage
+
+Both tools above need the box **online**, which is exactly what it was not
+while the thing you are investigating happened. The box's own `agent.log`
+survives the gap on its disk, so the fix is to fetch it on the way back rather
+than to ask for it afterwards.
+
+Turn on **Collect logs on recovery** in _Settings → Tuning_. When a box returns
+from an outage long enough to have flipped it offline, the hub collects a
+bundle by itself and files it against that episode — it then hangs off the row
+in _Connectivity_, see [where a box went](/docs/fleet/connectivity).
+
+It ships **off**. It runs a collection on a box in somebody's living room and
+costs that box's uplink, so it is something to turn on deliberately. Once on,
+three limits keep it sane: nothing is collected for a gap shorter than the
+offline timeout, at most one capture per box an hour, and a fleet-wide ceiling
+per hour so that an outage at the hub end does not bring fifty simultaneous
+uploads back with the fleet.
+
+Automatic captures are kept separately from the ones you ask for, so a box that
+flapped three times cannot evict the bundle you were waiting on.
 
 ## Live logs
 
@@ -51,18 +73,68 @@ use, invoked by hand. The dialog keeps the ones people were opening adb for:
 ```sh
 am force-stop com.nianticlabs.pokemongo
 am force-stop com.pokemod.aegis
-am startservice com.pokemod.aegis/com.pokemod.aegis.services.MappingService
+monkey -p com.pokemod.aegis -c android.intent.category.LAUNCHER 1; sleep 3;   am start-foreground-service com.pokemod.aegis/com.pokemod.aegis.services.MappingService
 ```
+
+<Callout type="info" title="Why the third one is three commands">
+  Each part is there because the shorter version was tried on a box and did not work. `monkey` takes
+  the app out of the stopped state the `force-stop` above left it in — Android delivers no intent to
+  a stopped package, so the obvious "stop it, then start the mapping" pair could never have worked.
+  `start-foreground-service` rather than `startservice`, because a plain service start from the
+  background is refused on Android 8 and later with `app is in background uid null`. And the
+  foreground variant *on its own* is the worst of the three: it exits 0 and starts nothing.
+
+A box that has never run Aegis needs it started by hand once before any of this works.
+
+</Callout>
 
 Anything else can be typed; `Ctrl`/`Cmd`+`Enter` runs it. Output is stdout and
 stderr together, capped at 64 KB with the **tail** kept, because the end is the
-part that says what happened. 
+part that says what happened.
 
 60 seconds and the box gives up (a command that
 needs longer belongs in a script on the box).
 
 <Callout type="warn">
   This is a root shell on hardware,`rm -rf` does exactly what you would expect.
+</Callout>
+
+## Screenshot
+
+One `screencap`, taken when you ask. It answers the question no reading can: a
+box can be online, heartbeating, with the scanner's process alive, and sitting
+on a dialog nobody has read. `APP_NOT_FOREGROUND` says the launcher owns the
+screen; this says _what is on it_ — the login that expired, the crash dialog,
+the Play Store page, the black screen.
+
+Opening the dialog takes the capture, and **Capture again** takes another.
+
+- **Nothing is captured on a schedule, and nothing is captured on an alert.**
+  These are boxes in somebody's living room. One capture, because a person
+  pressed a button, with their name on the audit row.
+- The PNG goes up over HTTP with the box's own device token, the same road a
+  log bundle takes and for the same reason: a socket frame is capped at 1 MB
+  and a 1080p capture is regularly more.
+- **The last five per box are kept, for a day.** Tighter than the log bundles'
+  week, deliberately: a log is evidence about something that happened, and a
+  picture of somebody's television is not worth keeping once it has answered
+  the question.
+- The menu item is **absent**, not greyed, on a box whose agent predates the
+  feature — the fix is an agent update, which is not on that menu.
+
+<Callout type="warn" title="screencap wrote an empty file">
+  The box has no display to capture. On hardware that is a ROM without `screencap` or a display
+  service that is not up; in a [Redroid container](/docs/fleet/redroid) it is an image with no
+  virtual display. The agent checks the PNG's first eight bytes before it uploads anything, so this
+  arrives as that sentence rather than as a broken image in the dialog.
+</Callout>
+
+<Callout type="warn" title="could not upload the screenshot: HTTP 404">
+  Same cause as the bundle's 404 above, on a different path: the edge is not routing `POST
+  /api/screenshots/*` to the hub, so the capture had nowhere to go. It is the newer of the two
+  routes, so an edge built before screenshots existed forwards logs and refuses pictures. Rebuild
+  the edge, see [deploying without dropping the
+  fleet](/docs/deployment/coolify#deploying-without-dropping-the-fleet).
 </Callout>
 
 ## What to look for in logs?

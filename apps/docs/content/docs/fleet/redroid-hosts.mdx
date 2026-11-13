@@ -1,0 +1,485 @@
+---
+title: The machines that run them
+description: A Linux machine running Redroid containers is a Device with a kind, not a second kind of thing. What that buys, what each screen says, and the traps.
+icon: Server
+---
+
+A [Redroid container](/docs/fleet/redroid) is a box. The Linux machine
+underneath it — a VPS, an Ampere instance, a server in a rack — is a
+**machine**, and Magnemite holds it too: it enrolls, it heartbeats, it reports
+its own load, memory, swap and disk, it updates its own agent, it takes a root
+shell and it goes offline when it stops answering.
+
+**Machines** in the sidebar is the list. It is deliberately not a section of the
+fleet table, because the question is different: the fleet table answers "which
+box needs attention", and a machine would be an empty row in every column over
+there — no scanner, no MITM, no installed version.
+
+<Callout type="info" title="Getting a machine here in the first place">
+  This page is the model and the screens. Turning a bare VPS into one of these — one form, from the
+  moment a provider hands over SSH access — is [provisioning a
+  machine](/docs/deployment/redroid-bootstrap), which also covers what the bootstrap does to the
+  machine and what it deliberately leaves alone.
+</Callout>
+
+## A machine is a Device
+
+A machine is a `Device` with `kind = HOST`, plus a thin `RedroidHost` satellite
+for the few facts a box has no equivalent of, and a `RedroidInstance` row per
+container. It is not a parallel entity, and the precedent is in this repo
+already: Rotom is an optional subsystem that put ~20 nullable columns on
+`Device` rather than spawning its own model.
+
+A machine does everything `Device` already models — dials out, heartbeats,
+reports `/proc`, self-updates, takes `exec`, goes offline — and does not do the
+two things a box does, install APKs and take rollouts. So it got all of this for
+nothing:
+
+| What a machine gets | The thing it reuses, unchanged                          |
+| ------------------- | ------------------------------------------------------- |
+| Enrollment          | `/api/enroll`, with `EnrollmentToken.kind = HOST`       |
+| A socket            | `/ws/device` and the hub's `registry`                   |
+| Readings + history  | `DeviceMetricSample`, one sampler, one `pruneMetrics()` |
+| The load chart      | `DeviceLoadCard` and `loadRecentTrend`                  |
+| Self-update         | `agentRelease.ts`, the same signed download             |
+| Offline detection   | `sweepOffline`, on the same **Offline after** timeout   |
+| Artifact downloads  | `/internal/authz`, the same device token                |
+| Shell and logs      | `exec` and log bundles, from the device page            |
+| Accountability      | the `AuditLog`, with no new entity to teach it about    |
+
+**The cost is real and it is one thing:** every query that means "a box" now has
+to say so. `kind: "BOX"` is in the fleet table, the sidebar counts, the manual
+install picker, rollout targeting, the Rotom sync and the health page. A query
+that forgets it counts a VPS as a box — the sidebar reporting 41 boxes when 40
+are boxes — or, worse, queues an install on a machine that has no `pm` and fails
+the job for a reason nothing on the page explains.
+
+<Callout type="warn" title="Adding a device query? Decide which kind it means">
+  There is no safe default. `grep -rn 'kind: "BOX"'` shows where the existing ones landed, and
+  [monitoring rules](/docs/fleet/monitoring) make the same decision through `appliesTo`.
+</Callout>
+
+## Enrolling a machine
+
+A machine enrolls with a **host token**, from **Settings → Enrollment**. A token
+minted for boxes cannot bring up a machine and a host token cannot bring up a
+box, because the two are handed out in completely different places: a box token
+is flashed into a module zip by a person, a host token is minted per machine.
+
+Host tokens are always **auto-approving**, and the form offers no switch for it.
+`/internal/authz` refuses an unapproved device, so a machine that enrolled
+unapproved would get a bare 401 from the edge on its first self-update, with
+nothing anywhere to say why.
+
+## The Machines list
+
+| Column        | What it says                                                                                                                                                       |
+| ------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| **Machine**   | Name, online dot, and its serial — or `not adopted yet` until its containers have been imported                                                                    |
+| **Instances** | `running/desired`, so a machine mid-converge reads as one number instead of two that disagree                                                                      |
+| **Workers**   | The configured workers summed over its instances, each [resolved](#workers) — the machine's capacity, addable up                                                   |
+| **CPU**       | Share of a **single core**: 250 is two and a half cores spent                                                                                                      |
+| **Memory**    | Available of total                                                                                                                                                 |
+| **Swap**      | Free of total. `0 B / 0 B` is a real answer, not a missing one — a machine with no swap is one the OOM killer reaches sooner                                       |
+| **Disk**      | Free of total on the filesystem docker keeps its images and volumes on, not `/` — a machine whose `/` has room while `/var/lib/docker` is full fails every install |
+| **Last seen** | The same heartbeat clock every box is on                                                                                                                           |
+
+Only the instances that are **supposed** to be there are counted. A removed one
+keeps its row, and counting it would make a drained machine look broken.
+
+Each machine's containers are listed right under it — index, the box each
+enrolled as, container state, CPU, memory and workers — open by default, and
+the arrow beside the machine's name folds them away. Removing and forgetting
+stay on the machine's own page. On **Fleet**, the **Boxes and hosts** filter is
+a list of checkboxes: hardware boxes, and each machine's containers, in any mix.
+
+## The machine page
+
+- **The header** — `running/desired instances · N workers`, and which group new
+  containers on this machine enroll into. Two badges show up when they apply:
+  `not adopted` and `binder missing`.
+- **Last failure** — the last bootstrap or converge error, as docker printed it.
+  Pre-wrapped and scrollable, because the line that explains a docker failure is
+  rarely the first one.
+- **Machine** — architecture, kernel, docker version, cores, memory, swap, agent
+  version, serial. The kernel is there for one reason:
+  `linux-modules-extra` is per kernel version, so an `apt upgrade` that installs
+  a new kernel leaves binder behind and **every container fails to come up after
+  the reboot**. Watching the kernel move is how that gets caught before it
+  bites, and [re-running the bootstrap](/docs/deployment/redroid-bootstrap#the-kernel-trap-and-re-running)
+  is the fix.
+- **Load** — the device load card, unchanged, and its history button goes to
+  `/devices/<id>/metrics`. Both work for the same reason: a machine is a Device,
+  so its readings are in the same table and the same component draws them.
+- **Where it goes** — the same total taken apart: one line per container, then
+  **everything else**, which is the machine's own reading minus the sum of the
+  containers' — docker, the agent, the kernel. It needs no measurement of its
+  own; the subtraction is the whole feature.
+
+  That last line is the one worth reading. A machine busier than its containers
+  explain is a different problem from a machine with one hot box, and the page
+  could not tell them apart before: it had the total above and the parts below,
+  with nobody subtracting.
+
+  <Callout type="info" title="Three things it does not smooth over">
+    A container that has not enrolled **reports nothing**, and says so on its own line instead of
+    being left out — its spend is real and lands in the rest, so a large rest may be a box that
+    never came up. The readings are **not simultaneous**: each box and the machine report on their
+    own heartbeat, so the parts need not add up to the whole exactly. And when the parts were
+    measured at a busier moment than the whole, the rest is shown as nothing rather than as a
+    negative quantity.
+  </Callout>
+
+- **Instances** — one row per container: index, the box it enrolled as, container
+  state, **CPU and memory**, [workers](#workers), restarts, and when the machine
+  last reported. A climbing restart count is what separates a crash-looping
+  instance from an idle one.
+
+  The CPU and memory are the box's **own**, measured inside its own cgroup and
+  reported by its own agent — not the machine's total divided up, and not
+  `docker stats` read from outside. That is what makes this the answer to
+  "where is this machine's CPU going": the column is per container, and the box
+  page behind each name breaks that container down per app. The machine's own
+  Load card above is the other end of the same question.
+
+## Workers
+
+How many workers a container is configured for is what its scanner is given as
+[`{{device.workers}}`](/docs/fleet/configs#placeholders). It is resolved every
+time it is read, from the first of these that has a number:
+
+| Where         | Set on                                        | Empty means       |
+| ------------- | --------------------------------------------- | ----------------- |
+| The container | **Instances**, the Workers field on its row   | Its machine's     |
+| The machine   | **Containers → Workers each**                 | The fleet's       |
+| The fleet     | **Settings → Tuning → Workers per container** | — (50 by default) |
+
+So changing the setting moves every machine that never chose a number of its
+own, and changing **Workers each** moves every container on that machine that
+never chose one. A field that inherits shows the number it inherits as a muted
+placeholder. A typed number is kept as typed, even one equal to what it would
+inherit: that is how a container is pinned while its machine moves.
+
+**Save on the Containers card leaves the containers' own numbers alone.** A
+scale-up adds containers that inherit. To add some that do not, use **Add _N_
+with _M_ workers each** above the Instances table — with the workers left
+empty it inherits, so it is also "one more like the others". A removed index
+brought back keeps the number it had.
+
+### The config follows by itself
+
+Workers live in the MITM config, not in the compose file, so changing one
+recreates no container. The hub instead keeps, for every box, the number its
+config was last written with — by an install that carried it, or a rewrite —
+and on every scheduler tick rewrites the config of any box whose resolved
+number has moved away from it. The rewrite is the one **Execute → Rewrite
+config** does: the group's config rendered for that box, between the group's
+stop and start hooks. **So it restarts that box's scanner**, which is the
+point — a running scanner does not re-read its file.
+
+What it leaves alone, on purpose:
+
+- **A box whose config does not say `{{device.workers}}`.** The file would be
+  the same either way, so it is marked in step instead of rewritten.
+- **A box Magnemite has not written a config to yet.** The install that brings
+  its MITM writes the first one, and pushing ahead of it would run the hooks
+  against a scanner that is not there. Its MITM has to show as installed.
+- **A box that is offline, installing, parked in maintenance, unapproved, or on
+  an agent without `push_config`.** It is still behind when that stops being
+  true, and it is rewritten then — nothing is lost by being away.
+
+It goes a few boxes at a time, fleet-wide — **Tuning → Concurrent config
+rewrites**, four by default — so a change in Settings does not restart every
+scanner in the same second. A rewrite that fails waits ten
+minutes before the next try, so a box with a broken hook is not stopped and
+started on every tick. While a box is behind, its row shows ↻ and the number
+its config still says; hover it for the reasons. One that stays is the one to
+look at — the hub's log says why.
+
+Upgrading takes every box already enrolled to be in step with the number it
+resolves to at that moment, so it rewrites nothing on its own. The first change
+afterwards is what sets a rewrite going.
+
+This used to be a copy: every Save wrote the form's number — pre-filled from
+Settings — onto every container, so changing the setting afterwards moved
+nothing, and a container could not keep a number of its own past the next Save.
+The upgrade turns those copies into the chain above without changing what any
+box renders: a machine whose copy matched Settings now follows it, and one that
+had been given another number keeps it as its own.
+
+## A new instance, setting up
+
+For half an hour after it is asked for — a scale-up, or a removed index brought
+back — an instance shows where it has got to instead of a badge: what it is
+doing, a bar, and a clock counting up from when it was asked for. Hover it for
+the longer version.
+
+| Stage                       | What is happening                                                                                          |
+| --------------------------- | ---------------------------------------------------------------------------------------------------------- |
+| **Waiting for the machine** | The machine is offline. The converge is owed to it, and goes out on its next hello.                        |
+| **Creating the container**  | `docker compose` is bringing it up, or the machine has not reported it yet — it reports every beat.        |
+| **Starting the container**  | Created, and being started.                                                                                |
+| **Booting Android**         | The container runs; the box dials in once Android has booted, usually a minute or two.                     |
+| **Settling, then …**        | The box is up, and its group's [join installs](/docs/fleet/configs#install-on-join) wait for it to settle. |
+| **Installing …**            | One of them is going in, with its own percentage: the game first, then the MITM.                           |
+
+A **converge that failed** turns it red with docker's first line, and so does a
+**join install that failed**. When the last install is in, the usual **running**
+badge takes over. So does everything below once the half hour is up, because an
+instance still not up by then is a fault rather than a stage, and the badges say
+which.
+
+A scale made while the machine is **offline** is kept: the converge is recorded
+as owed and sent when the machine says hello again. Only an owed one, though —
+a hub deploy that changes the rendered compose file does not recreate every
+container as the machines reconnect.
+
+## The instance states
+
+This is the part you will actually use, and the second one is the whole reason
+`RedroidInstance.deviceId` is nullable:
+
+| Badge                                      | What is true                                                                                                       | Where to look                                                          |
+| ------------------------------------------ | ------------------------------------------------------------------------------------------------------------------ | ---------------------------------------------------------------------- |
+| **running**                                | The container is up and its agent enrolled. The box's name links to its device page.                               | Nothing to do. It is a box now.                                        |
+| **not enrolled**                           | The container is up and **no agent has ever reported**. The row shows the serial instead of a name.                | `docker logs`. Wrong hub URL, a spent token, or Android still booting. |
+| **exited**, and the rest of docker's words | The container is not running.                                                                                      | `docker logs`, then the restart count beside it.                       |
+| **absent**                                 | Docker answered and has **no container for this instance at all** — destroyed outside Magnemite, or never created. | A converge creates it. If one is already running, wait for it.         |
+
+`absent` is not one of docker's words, because docker has nothing to say about a
+container that does not exist. It is written when the machine reports and this
+instance is not in the report, which is what stops a destroyed container reading
+as `running` for as long as the machine stays up.
+
+A fifth badge, **unknown**, is not a state at all: it means the machine has not
+reported this container yet, the same way an absent reading is unknown
+everywhere else here. Wait a beat, or check that the machine itself is online.
+The difference from `absent` is who has looked — `absent` means docker looked
+and found nothing, `unknown` means nobody has looked.
+
+**"Running but not enrolled" is the commonest failure while setting a machine
+up**, and before instance rows existed nothing could tell it apart from a
+container that was not running at all — both were just a box that never
+appeared. Telling those two apart is what the nullable `deviceId` buys.
+
+## Identity: two serials, both minted on purpose
+
+The hub keys a device on its serial and nothing else, so a device that reports a
+new serial **is** a new device: new row, new name, no history. Both serials here
+are therefore minted rather than discovered.
+
+**A machine's serial is minted by the bootstrap** into `/etc/magnemite`, and
+deliberately **not** read from `/etc/machine-id`. Imaging a VPS from a snapshot
+clones that file, and two machines claiming one row would fight over the socket
+forever — each connection evicting the other's, in a loop, with the dashboard
+showing one machine that is somehow always reconnecting.
+
+**An instance's serial is minted by the hub** from the host's immutable id — not
+from its name. A rename is a label change; if the name were in the derivation it
+would silently re-identify every box on the machine, and ten boxes would lose
+their history at once because somebody fixed a typo.
+
+That serial is rendered as `ro.magnemite.serial` — the namespaced property
+rather than `ro.serialno`, because it cannot collide with whatever the base image
+happens to set.
+
+## What is the machine's and what is the box's
+
+| Reading                   | Whose it is                                                       |
+| ------------------------- | ----------------------------------------------------------------- |
+| Storage, uptime, packages | The box's own                                                     |
+| Memory                    | The box's own, from its cgroup — **if the container has a limit** |
+| CPU percent               | The box's own, from its cgroup                                    |
+| CPU count                 | Respects `cpuset`, not the `cpus` quota                           |
+| **Load average**          | **The machine's.** Linux has no per-container load average        |
+| **Temperature**           | **The machine's.** A container has no thermal sensor of its own   |
+
+<Callout
+  type="warn"
+  title="A probe that greps /proc/loadavg reads the machine, on every box at once"
+>
+  Inside a container, `/proc/loadavg` and the thermal zones are the host's. So a
+  `HEALTH_CHECK_FAILED` probe built on either does not report one box's state — it reports the
+  machine's, identically, on all ten boxes. One cause then trips ten ladders, and the per-box
+  ceilings do not help, because each box is under its own. Nothing in the code can catch this: the
+  probe is a string you typed and the reading is perfectly valid. Watch a machine's load with a
+  **host** rule on the machine itself.
+</Callout>
+
+### cpuPercent is the honest per-box CPU
+
+`cpuPercent` exists because the load average could not be fixed. A container's
+cgroup accounts its own CPU time exactly, so the agent prefers
+`cpu.stat usage_usec` and the reading is genuinely that box's. Docker's default
+private cgroup namespace is what makes the bare path the container's own rather
+than the machine's; inside a container `/proc/stat` is the **host's**, which is
+the same trap the load average has and the reason this reading was added at all.
+
+It is a **share of one core**, the same convention as the per-app figures and
+the same number `top` shows: 250 is two and a half cores, and an eight-core
+machine at full tilt reports 800. Nothing is clamped at 100 — clamping is how a
+saturated machine would look merely busy.
+
+It is **null rather than zero** wherever the answer would be a guess: the first
+beat after a start, a counter that went backwards (a container recreated, a
+machine rebooted), no elapsed time at all, or a baseline too stale to divide by.
+Zero means genuinely idle, and a null reading neither counts nor resets a
+monitor rule.
+
+### The memory reading matches docker, deliberately
+
+`memory.current` includes reclaimable page cache. Android mmaps the ROM and the
+APKs, the scanner reads files, and all of it is charged there — so subtracting
+nothing reports a healthy idle box as ~100% full within minutes, and the chart
+becomes a flat line at the ceiling forever.
+
+The agent subtracts `memory.stat`'s `inactive_file`, which is exactly what
+`docker stats` does. That is **matching docker rather than trying to be more
+correct**: docker does not subtract `active_file` either, so both are
+approximations — but a machine reads its per-instance figures out of
+`docker stats`, and different arithmetic would put two numbers on screen for one
+box with nothing to say which to believe.
+
+<Callout type="warn" title="Without a memory limit, every box reports the machine's RAM">
+  `memory.max` reads `max` on an unlimited container, and the honest fallback is then the host's own
+  total — so ten boxes all claim 32 GB and none of it is theirs. That is why a machine reports the
+  limit docker says it **applied**, and the hub checks it against the one it asked for.
+</Callout>
+
+## Traps that are not in the code
+
+### Every box writes 65535 into the machine's pid_max
+
+The Android 11 Magisk base image carries this in
+`vendor/etc/init/redroid.common.rc`:
+
+```
+on property:ro.zygote=zygote64_32
+    write /proc/sys/kernel/pid_max 65535
+```
+
+The image is multilib, so that property **is** set. `/proc/sys` is writable and
+**not namespaced** in a `--privileged` container. So every container, on every
+boot, sets the pid ceiling of the whole machine to 65535 — not its own, the
+machine's, shared by every process on it.
+
+<Callout type="warn" title="A sysctl will not hold against it">
+  Whatever you set `kernel.pid_max` to, the next container boot puts it back, and the last container
+  to boot wins. A machine tuned higher is quietly lowered, and the symptom is fork failures in
+  **anything** on the machine rather than in the container that moved it. This is new with the
+  Android 11 base: the old `64only` image never set `ro.zygote=zygote64_32`.
+</Callout>
+
+### A fresh box is slow to enroll
+
+On a container's **first** boot, Magisk's `bootanim.rc` runs a blocking `exec`
+that installs its own ~11 MB APK, and `init` parses `.rc` files in sorted order
+— so `bootanim` registers before `magnemite` and the agent does not start until
+that install has finished.
+
+A brand new instance therefore takes noticeably longer to appear than a
+recreated one, and a container sitting at **not enrolled** for a minute or two on
+its first boot is working correctly. Read `docker logs` before concluding
+otherwise.
+
+## Removing the machine itself
+
+**Machines → the machine → Remove this machine**, which asks twice: once in the
+dialog and once by typing the machine's name. It does three things in this
+order, and the middle one is the one nobody would guess:
+
+1. **The containers and their `/data` go** — `docker compose down --volumes`
+   over the machine's own socket. Deleting only the rows would leave a VPS
+   running Androids that nothing here knows about: still scanning, still
+   costing money, invisible.
+2. **`/etc/magnemite/host.json` is removed and the agent stopped.** That file
+   holds the serial and the device token, and the agent keeps the config it
+   finds — so without this the machine would come back claiming a serial with
+   no row and a token nothing accepts, and the next **Add machine** would mint
+   a second serial the bootstrap then discards, leaving a provisioning waiting
+   for a machine that never dials in. **This is what makes adding it again
+   work.**
+3. **Then the rows** — the machine's `RedroidHost` and every `RedroidInstance`
+   on it, which cascade, **and the `Device` row of every box that enrolled from
+   one of those containers**, which does not. Step 1 destroyed the volume
+   holding each one's identity, so deleting the machine forgets all of its
+   instances; those rows are deleted the same way **Forget** deletes one. Any
+   install in progress on them is cancelled first.
+
+<Callout type="warn" title="Why the volumes go too">
+  A box's serial is derived from its machine's row id, and the volume is named after the compose
+  service — so a machine added again gets *new* serials over the *same* volume names. A kept volume
+  would be mounted under a serial that is not the one inside it: the container boots with the
+  previous box's `config.json`, enrols as that old device, and never matches the instance row
+  waiting for the new one. Containers running, table saying `not enrolled`, for ever. Which is also
+  why the boxes' own rows go: once the volume is gone there is no identity left for any of them to
+  come back with, and a kept row would be one permanently offline box in the fleet table per
+  instance.
+</Callout>
+
+A machine that is **offline** is deleted anyway — saying "forget this" about a
+VPS that is already gone is the common case — but then none of the first two
+steps happened, and the answer says so. Its containers are still running and
+its agent still has its config, so clean it up there, or re-provisioning that
+same machine will find a config it keeps.
+
+## Remove vs forget
+
+Two different things, and the difference is whether the box can come back:
+
+| Action                 | The container | The volume | The Device row | What it means          |
+| ---------------------- | ------------- | ---------- | -------------- | ---------------------- |
+| **Remove**             | destroyed     | **kept**   | **kept**       | Desired state "gone"   |
+| **Forget**             | destroyed     | destroyed  | destroyed      | This box never existed |
+| **Remove the machine** | all destroyed | destroyed  | destroyed      | Forget, for every box  |
+
+Remove sets `present = false` and keeps the instance row, so **re-adding that
+index brings the same box back** — same serial, same Device, same history, same
+`/data`. Forget is what actually deletes.
+
+Indices are **sparse and never renumbered**. Removing instance 3 of ten leaves a
+gap, and the next scale-up refills it. Closing the gap would rewrite the serial
+of every instance above it, and a changed serial is a new box with no history —
+seven boxes silently replaced to make a list look tidy.
+
+## A machine can also enrol hardware boxes
+
+A machine sits on a LAN the hub cannot reach, which is exactly what
+[adding a box over adb](/docs/fleet/box-enrollment) needs. Pick it under
+**Reach them from** and it runs adb against the boxes around it, reporting back
+over the socket it already holds — nothing new is opened, on the machine or
+anywhere else.
+
+It needs `adb`, which its bootstrap installs as a **warn-level** step: a
+machine without it is still a perfectly good Redroid host and the provisioning
+does not fail over it. A machine provisioned before this existed has no `adb`
+and no key; re-running its bootstrap installs the first, and the agent
+generates the second in `/etc/magnemite/adb` the first time it is asked.
+
+## Known limits
+
+### Rollout concurrency is not host-aware
+
+The scheduler caps installs fleet-wide (**Tuning → Concurrent installs**), per
+rollout, and per `DeviceGroup`. It has **no notion of a machine**. Ten instances
+spread across ten groups could each start pulling a ~170 MB bundle at the same
+moment, on one VPS, through one uplink and onto one disk.
+
+The workaround is the plain one: **a group per machine**, with that group's **Max
+concurrency** set. That field exists for sites on a thin uplink, and a VPS is
+exactly that case. It costs you the ability to use groups for sites on those
+machines, which is why this is written down as a limitation rather than as
+guidance.
+
+### Rotom cannot match an instance by address
+
+[Rotom matching](/docs/fleet/rotom#matching) falls back to the address Rotom sees
+a box connect from, and only when exactly one box is a candidate. Every instance
+on a VPS shares one public IP, so on a machine with more than one box **no
+instance is ever matched that way**: `rotomOrigin` is not a usable handle here.
+
+<Callout title="Instances must report to Rotom under the device name">
+  In the group's [MITM config](/docs/fleet/configs), use the `device.name` placeholder — which every
+  box has, and which the hub matches against Rotom's `id` directly. `device.rotomOrigin` on a
+  containerised group is a value that is either empty or shared by the whole machine.
+</Callout>

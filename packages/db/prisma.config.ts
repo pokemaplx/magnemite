@@ -46,4 +46,9 @@ export default defineConfig({
     path: path.join("prisma", provider === "mysql" ? "migrations-mysql" : "migrations"),
     seed: "tsx prisma/seed.ts",
   },
+  // What the CLI connects to — migrate, studio, db push. Optional on purpose:
+  // `prisma generate` needs no database, and the image builds run it with no
+  // DATABASE_URL in sight. The running client never reads this; it gets the
+  // same variable through its driver adapter in src/index.ts.
+  datasource: { url: process.env.DATABASE_URL },
 });

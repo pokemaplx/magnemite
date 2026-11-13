@@ -1,4 +1,5 @@
 import "server-only";
+import type { NotifyChannel } from "@magnemite/db";
 
 /**
  * Client for the hub's /internal API. Reads go straight to the database from
@@ -10,16 +11,40 @@ const SECRET = process.env.HUB_INTERNAL_SECRET ?? "";
 
 export class HubError extends Error {}
 
-async function call<T>(path: string, body?: unknown): Promise<T> {
+/** Mirrors `ConfigPreview` in the hub's configPush.ts. */
+export type DeviceConfigPreview =
+  | { state: "none" }
+  | {
+      state: "ready" | "refused";
+      path: string;
+      content: string;
+      reason: string | null;
+      stop: string | null;
+      start: string | null;
+      capable: boolean;
+    };
+
+/** Mirrors `PushOutcome` in the hub's configPush.ts. */
+export type DeviceConfigPush = {
+  ok: boolean;
+  path: string | null;
+  sha256: string | null;
+  error: string | null;
+  hookError: string | null;
+};
+
+async function call<T>(path: string, body?: unknown, method: "POST" | "GET" = "POST"): Promise<T> {
   let res: Response;
   try {
     res = await fetch(`${HUB_URL}${path}`, {
-      method: "POST",
+      method,
       headers: {
         "Content-Type": "application/json",
         "x-magnemite-secret": SECRET,
       },
-      body: JSON.stringify(body ?? {}),
+      // A GET with a body is legal and widely mishandled, so there simply is
+      // not one. Everything a GET here needs is already in the path.
+      body: method === "GET" ? undefined : JSON.stringify(body ?? {}),
       cache: "no-store",
     });
   } catch (err) {
@@ -49,6 +74,28 @@ async function call<T>(path: string, body?: unknown): Promise<T> {
  */
 export type HookMode = "NORMAL" | "POST_ONLY" | "NONE";
 
+/**
+ * What happened when a box was parked or released.
+ *
+ * `hook` is the half that is worth reporting: entering maintenance runs the
+ * group's pre-install hook to stop the scanner and leaving runs the
+ * post-install hook to start it again, and either can legitimately not happen
+ * — the group may have no hook, or the box may be offline. Both are states to
+ * say out loud rather than to paper over, because "parked" meaning "and the
+ * scanner is still running" is a different thing to be holding.
+ */
+export type MaintenanceResult = {
+  deviceName: string;
+  /** ISO timestamp, or null once released. */
+  until: string | null;
+  hook: {
+    command: string | null;
+    ran: boolean;
+    skipped: string | null;
+    error: string | null;
+  };
+};
+
 export type CreateRolloutInput = {
   appVersionId: string;
   deviceIds?: string[];
@@ -60,6 +107,8 @@ export type CreateRolloutInput = {
   hookMode?: HookMode;
   /** False leaves the group's MITM config alone. Defaults to writing it. */
   writeConfig?: boolean;
+  /** Override the device group's MITM config for this rollout only. */
+  mitmConfig?: string | null;
   canaryCount?: number;
   soakMinutes?: number;
   retryBackoffSeconds?: number;
@@ -168,6 +217,30 @@ export const hub = {
    */
   collectDeviceLogs: (id: string, requestedById: string | null) =>
     call<{ bundleId: string }>(`/internal/devices/${id}/logs`, { requestedById }),
+  /**
+   * Ask a box what is on its screen. Waits like the bundle above, and for the
+   * same reason: the dialog renders the image as soon as this comes back.
+   */
+  captureScreenshot: (id: string, requestedById: string | null) =>
+    call<{ screenshotId: string }>(`/internal/devices/${id}/screenshot`, { requestedById }),
+  /**
+   * Park a box, or put it back with `minutes: 0`.
+   *
+   * It goes through the hub rather than the dashboard writing the column
+   * itself, for the one thing the dashboard cannot do: the group's hooks that
+   * stop and start the scanner need the box's live socket.
+   */
+  setDeviceMaintenance: (id: string, minutes: number, byEmail: string | null) =>
+    call<MaintenanceResult>(`/internal/devices/${id}/maintenance`, { minutes, byEmail }),
+  /** What rewriting this box's MITM config would write, and the hooks around it. */
+  previewDeviceConfig: (id: string) =>
+    call<DeviceConfigPreview>(`/internal/devices/${id}/config`, undefined, "GET"),
+  /**
+   * Write the config to the box and restart its MITM, no install. Null content
+   * writes the group's own template; anything else is rendered for the box.
+   */
+  pushDeviceConfig: (id: string, content: string | null) =>
+    call<DeviceConfigPush>(`/internal/devices/${id}/config`, { content }),
   /** Run a command on the box, as root, and get back what it printed. */
   execOnDevice: (id: string, command: string, timeoutSeconds?: number) =>
     call<{ ok: boolean; output: string; error: string | null }>(`/internal/devices/${id}/exec`, {
@@ -202,9 +275,15 @@ export const hub = {
    * them. Optional because a hub from an older deploy does not send it.
    */
   refreshSettings: () => call<{ ok: boolean; pushed?: number }>("/internal/settings"),
-  /** Prove every configured channel, ignoring the level filters and the dedupe window. */
-  testAlert: () =>
-    call<{ ok: boolean; error: string | null; detail: string | null }>("/internal/monitor/test"),
+  /**
+   * Prove one channel -- or, with none named, every channel that is set up --
+   * ignoring routing and the dedupe window.
+   */
+  testNotification: (channel?: NotifyChannel) =>
+    call<{ ok: boolean; error: string | null; detail: string | null }>(
+      "/internal/notify/test",
+      channel ? { channel } : {},
+    ),
   /** Force an evaluation pass rather than waiting for the next tick. */
   runMonitor: () => call<{ ok: boolean }>("/internal/monitor/run"),
   pollSources: () =>
@@ -230,6 +309,140 @@ export const hub = {
     call<StoredBuild>("/internal/uploads/from-url", input),
   /** Integration probes for the Status page. `force` skips the hub's cache. */
   health: (force = false) => call<HubHealth>("/internal/health", { force }),
+
+  /**
+   * Bring a machine to N containers and converge it.
+   *
+   * One call because pressing Save means both: the rows are the desired state
+   * and the dashboard could write them itself, but nothing would then reach the
+   * machine, and "I changed the number and nothing happened" would be the
+   * normal experience.
+   */
+  /**
+   * `workers` and `memLimitBytes` are the machine's own numbers, and the same
+   * pair: undefined leaves the override alone, null clears it back to the
+   * fleet-wide setting.
+   */
+  scaleHost: (id: string, count: number, workers?: number | null, memLimitBytes?: number | null) =>
+    call<{ added: number; removed: number; sent: boolean; reason?: string }>(
+      `/internal/hosts/${id}/scale`,
+      {
+        count,
+        ...(workers === undefined ? {} : { workers }),
+        ...(memLimitBytes === undefined ? {} : { memLimitBytes }),
+      },
+    ),
+  /**
+   * Add `count` containers configured for `workers` each, and converge. Null
+   * inherits the machine's number.
+   */
+  addInstances: (id: string, count: number, workers: number | null) =>
+    call<{ added: number; sent: boolean; reason?: string }>(`/internal/hosts/${id}/instances`, {
+      count,
+      workers,
+    }),
+  /**
+   * Import the containers a machine already has.
+   *
+   * Nothing is converged before this, because a machine running a hand-written
+   * compose file has containers holding real device identities and an empty
+   * desired set would make every one of them an orphan.
+   */
+  adoptHost: (id: string) => call<{ adopted: number }>(`/internal/hosts/${id}/adopt`),
+  /**
+   * Provision a machine over SSH and bring it to N containers.
+   *
+   * Returns as soon as the run starts: the SSH half is minutes, and the row it
+   * creates carries the progress. The credential goes no further than this
+   * call — it is used once and stored nowhere.
+   */
+  bootstrapHost: (input: {
+    name: string;
+    host: string;
+    port?: number;
+    username: string;
+    password?: string;
+    privateKey?: string;
+    passphrase?: string;
+    desiredInstances: number;
+    desiredWorkers: number | null;
+    desiredGroupId: string | null;
+    desiredNameTemplate: string | null;
+  }) => call<{ id: string; serial: string }>("/internal/hosts/bootstrap", input),
+  /** Re-send the file. `force` sends it even when the hash already matches. */
+  convergeHost: (id: string, force = false) =>
+    call<{ sent: boolean; reason?: string }>(`/internal/hosts/${id}/converge`, { force }),
+  /** Re-run the provisioning script, with the files that build the image. */
+  rerunBootstrap: (id: string) =>
+    call<{ sent: boolean; reason?: string }>(`/internal/hosts/${id}/bootstrap`, {}),
+  /**
+   * Give a box what its group hands every new box.
+   *
+   * Enrolment already does this. This is for a box that enrolled on a token
+   * without auto-approve: it was pending then, so nothing was queued, and the
+   * moment it becomes a rollout target is the moment somebody approves it.
+   */
+  queueJoinInstalls: (id: string) =>
+    call<{ queued: number }>(`/internal/devices/${id}/join-installs`, {}),
+
+  /**
+   * Sweep a LAN for boxes with network adb on.
+   *
+   * Returns an id, not a result: a /22 is minutes, and `call` sets no
+   * timeout, so waiting here would be a hung server action rather than an
+   * error anybody could see.
+   */
+  scanForBoxes: (input: { addresses: string; relayDeviceId: string | null }) =>
+    call<{ id: string; total: number }>("/internal/boxes/scan", input),
+  getBoxScan: (id: string) => call<BoxScan>(`/internal/boxes/scan/${id}`, undefined, "GET"),
+  /** Put the agent on the boxes that were picked. */
+  enrollBoxes: (input: {
+    targets: {
+      address: string;
+      serial: string;
+      serialSource: "REPORTED" | "MINTED";
+      expectedSerial: string;
+      name: string | null;
+    }[];
+    desiredGroupId: string | null;
+    relayDeviceId: string | null;
+    reboot: boolean;
+    reprovision: boolean;
+  }) => call<{ batchId: string; rows: number }>("/internal/boxes/enroll", input),
+  /** Every adb public key the fleet uses, for preseeding a golden image. */
+  adbKeys: () => call<{ keys: string }>("/internal/boxes/adb-keys", undefined, "GET"),
+};
+
+/** What a sweep found, as the dialog polls it. */
+export type BoxScan = {
+  id: string;
+  startedAt: string;
+  done: boolean;
+  error: string | null;
+  total: number;
+  probed: number;
+  found: BoxCandidate[];
+};
+
+export type BoxCandidate = {
+  address: string;
+  state: string;
+  reportedSerial: string;
+  model: string;
+  manufacturer: string;
+  abi: string;
+  sdk: string;
+  root: string;
+  enrolled: string;
+  knownDeviceId: string | null;
+  knownName: string | null;
+  serial: string;
+  /** What it will enrol under: the override when there is one, else its own. */
+  expectedSerial: string;
+  serialSource: "REPORTED" | "MINTED";
+  serialReason: string;
+  eligible: boolean;
+  blockedBy: string | null;
 };
 
 export const HUB_BASE_URL = HUB_URL;

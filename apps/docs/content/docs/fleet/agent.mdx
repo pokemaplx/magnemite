@@ -43,7 +43,10 @@ adb shell "su -c 'magisk --install-module /data/local/tmp/magnemite-agent-1.0.0.
 adb reboot
 ```
 
-In bulk over the LAN:
+In bulk, this is what [Fleet → Add boxes](/docs/fleet/box-enrollment) does for
+you — it scans for the boxes, mints a token each and installs the module over
+adb without a laptop in the loop. The script is still there for a box neither
+the hub nor a machine can reach:
 
 ```sh
 ./scripts/enroll.sh dist/magnemite-agent-1.0.0.zip 192.168.1.10 192.168.1.11
@@ -78,6 +81,12 @@ reference](/docs/deployment/environment#the-agents-own-configuration).
 `linux/amd64` and `windows/amd64`. The module zip carries the two ARM builds
 and picks at install time; the other two are for a [fake
 fleet](/docs/development/fake-fleet).
+
+<Callout type="info">
+  A box does not have to be hardware. The same binary runs in a [Redroid
+  container](/docs/fleet/redroid), started by Android's own `init` instead of Magisk — no zip, no
+  flashing, one service per box.
+</Callout>
 
 ## The agent updates itself, oh yeah!
 
@@ -116,6 +125,18 @@ A box reporting a different `agentVersion`, not running a job, is sent an
 `agent_update` with the URL, sha256 and version. Boxes on the target are left
 alone.
 
+This is decided before the box is handed any job, and a box told to update
+gets none until it is back on the new version: the swap ends in a re-exec, and
+an install started in the meantime would die with the old process. On a fresh
+container whose image carries an older agent, that is the first thing it does.
+
+An update that is not going to land is noticed rather than waited out. A box
+that comes back as a **new agent process still on its old version** lost it, and
+is told again at once; one found **running a job** set it aside — an agent
+never swaps under an install — and is told again once it is idle. Either way the
+attempt is closed as failed, saying which, and an attempt overtaken by a later
+one is closed as that instead of being left `updating`.
+
 </Step>
 
 <Step>
@@ -144,16 +165,18 @@ that never returned, no power, or a binary that cannot reach the hub.
   the old binary or the new one, never half of one. If the new one cannot start, the module's
   respawn loop puts `.old` back. `tail /data/adb/magnemite/agent.log` for `self-update:` lines.
 
-  A `checksum mismatch` means the box was served a different file than the hub published.
+A `checksum mismatch` means the box was served a different file than the hub published.
+
 </Callout>
 
 ## When the module is needed again
+
 Scenarios that require a new module zip:
 
 1. A **brand-new box** (obviously no agent to update).
 2. A box that **never comes online**, it cannot be told anything. Check [troubleshooting](/docs/operations/troubleshooting#a-box-enrolled-but-never-appears-online) first.
 3. `service.sh` or `customize.sh` **changed** (those live in the module, not in
-  the binary).
+   the binary).
 
 > Reinstalling an old zip over an updated box puts the old binary back, so keep a
-freshly built one.
+> freshly built one.

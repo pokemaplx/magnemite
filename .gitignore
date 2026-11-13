@@ -29,6 +29,10 @@ caddy_config/
 # Local scratch: fake-fleet configs, dev session tokens
 .dev/
 
+# Local compose overlay: per-machine changes that must not land in the
+# versioned file, which is pulled rather than edited.
+deploy/compose.override.yml
+
 # Env
 .env
 .env.local

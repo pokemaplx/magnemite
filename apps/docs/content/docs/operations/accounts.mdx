@@ -12,15 +12,22 @@ icon: Users
 - Changing someone's password deletes their sessions, signing them out
   everywhere.
 - `ADMIN_EMAIL` must be a well-formed address. `admin@localhost` is rejected.
+- There is one account and no sign-up, so changing `ADMIN_EMAIL` renames it on the
+  next boot instead of adding a second admin. Sessions survive the rename; the
+  old address does not.
 
 <Callout type="info" title="Locked out?">
   The hub syncs the admin account to `ADMIN_EMAIL`/`ADMIN_PASSWORD` on every
-  boot. Change `ADMIN_PASSWORD` and restart the hub container — that is the
+  boot. Change `ADMIN_PASSWORD` and bring the hub up again — that is the
   way back in, and it is why both live on the **hub** service's environment
   rather than in a file inside the container.
 
 ```sh
-docker compose --env-file .env -f deploy/docker-compose.yml restart hub
+docker compose --env-file .env -f deploy/docker-compose.yml up -d hub
 ```
+
+`restart` is not enough: it starts the same container again, with the
+environment it was created with. `up -d` sees the changed value and
+replaces the container.
 
 </Callout>

@@ -1,7 +1,36 @@
 name: magnemite
 
+# Pulled, not built.
+#
+# CI publishes one image per deployable on every push to main
+# (.github/workflows/images.yml), so a deploy here is
+#
+#   docker compose --env-file .env -f deploy/docker-compose.yml pull
+#   docker compose --env-file .env -f deploy/docker-compose.yml up -d
+#
+# rather than minutes of Go cross-compilation and a Next build on the machine
+# that is holding the fleet's sockets. `up -d --build` still works and still
+# wins: it rebuilds from this checkout and tags the result under the same name,
+# which is the path to take on Postgres -- see the note on DB_PROVIDER below --
+# or anywhere GHCR cannot be reached.
+#
+# Each image is a variable so a fork can point at its own registry without
+# editing this file, and so a release is pinned by naming its tag:
+# `HUB_IMAGE=ghcr.io/pokemaplx/magnemite/hub:1.0.4` in .env. The numbers are
+# the VERSION file's, one per deployable, and rolling back is naming the
+# previous one.
 services:
   hub:
+    # `latest` is the last push to main. The published hub and dashboard carry
+    # a **MariaDB/MySQL** Prisma Client, which is what DB_PROVIDER defaults to
+    # here; on Postgres they are the wrong half of that build and the deploy
+    # has to be `up -d --build`.
+    image: ${HUB_IMAGE:-ghcr.io/pokemaplx/magnemite/hub:latest}
+    # Pull a missing image instead of silently building it, which is what makes
+    # a fresh machine take seconds rather than ten minutes. The cost is that a
+    # machine with no route to GHCR fails here instead of falling back, and
+    # needs `--build` once.
+    pull_policy: missing
     build:
       context: ..
       dockerfile: apps/hub/Dockerfile
@@ -37,6 +66,15 @@ services:
       ROTOM_SECRET: ${ROTOM_SECRET:-}
       ROTOM_BASIC_USERNAME: ${ROTOM_BASIC_USERNAME:-}
       ROTOM_BASIC_PASSWORD: ${ROTOM_BASIC_PASSWORD:-}
+      # The admin login. The hub syncs the account to these on every boot, so
+      # changing ADMIN_PASSWORD and bringing the hub up again is the way back
+      # in -- which only works if they reach the container, and compose passes
+      # nothing it is not told to. ADMIN_PASSWORD is required rather than
+      # defaulted because nothing downstream validates it: an unset variable
+      # arrives as an empty string and the hub sets that as the password, and
+      # a default here would put every deploy on the same known one.
+      ADMIN_EMAIL: ${ADMIN_EMAIL:-admin@example.com}
+      ADMIN_PASSWORD: "${ADMIN_PASSWORD:?set ADMIN_PASSWORD in .env}"
       # --- Web push -----------------------------------------------------
       # The VAPID keypair identifies this server to every push service the
       # dashboard's browsers use. Generate once with
@@ -45,12 +83,22 @@ services:
       VAPID_PUBLIC_KEY: ${VAPID_PUBLIC_KEY:-}
       VAPID_PRIVATE_KEY: ${VAPID_PRIVATE_KEY:-}
       VAPID_SUBJECT: ${VAPID_SUBJECT:-mailto:admin@example.com}
+      # --- Debugging ----------------------------------------------------
+      # Read straight off the environment rather than through the schema in
+      # env.ts, so they do nothing unless they are passed here. Both carry a
+      # default rather than `:-`: an unset variable arrives as an empty
+      # string, and `""` is not nullish, so it would reach pino as a log level
+      # and throw. `info` is what log.ts picks anyway with NODE_ENV=production.
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      PRISMA_LOG: ${PRISMA_LOG:-0}
     volumes:
       - artifacts:/data/artifacts
     expose:
       - "3001"
 
   web:
+    image: ${WEB_IMAGE:-ghcr.io/pokemaplx/magnemite/web:latest}
+    pull_policy: missing
     build:
       context: ..
       dockerfile: apps/web/Dockerfile
@@ -71,18 +119,30 @@ services:
       # Behind Caddy the dashboard and the agents share one origin, so Better
       # Auth's origin check uses the same URL. The Coolify setup splits them.
       MAGNEMITE_DASHBOARD_URL: ${MAGNEMITE_DASHBOARD_URL:-${MAGNEMITE_PUBLIC_URL}}
+      # The override for when that is not the origin Better Auth should build
+      # callbacks on. Empty is safe here, unlike above: the candidates are
+      # filtered on truthiness, so an unset one falls through to the next.
+      BETTER_AUTH_URL: ${BETTER_AUTH_URL:-}
       MAGNEMITE_PUBLIC_URL: ${MAGNEMITE_PUBLIC_URL}
       HUB_URL: http://hub:3001
       HUB_INTERNAL_SECRET: ${HUB_INTERNAL_SECRET}
       # The public half only. The browser needs it to subscribe; the private
       # half stays on the hub, which is what signs the pushes.
+      # The dashboard opens a Prisma client of its own, so turning queries on
+      # for the hub alone would show half of them.
+      PRISMA_LOG: ${PRISMA_LOG:-0}
       VAPID_PUBLIC_KEY: ${VAPID_PUBLIC_KEY:-}
     expose:
       - "3000"
 
   caddy:
+    # The published edge carries the plain `Caddyfile`, which is the one this
+    # file's stack wants. The Coolify variant is a build arg and is built
+    # there, from the repository.
+    image: ${CADDY_IMAGE:-ghcr.io/pokemaplx/magnemite/caddy:latest}
+    pull_policy: missing
     build:
-      # Built rather than pulled, so the Caddyfile travels inside the image:
+      # The Caddyfile travels inside the image rather than as a bind mount:
       # a bind-mounted config is one more thing that has to be in the right
       # state on the server, and a stale one 404s a new route with nothing
       # obviously wrong.

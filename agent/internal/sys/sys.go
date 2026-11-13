@@ -57,6 +57,16 @@ type System interface {
 	// Memory reports total and available bytes out of /proc/meminfo.
 	Memory() (total uint64, available uint64)
 	CPUCount() int
+	// CPUPercent is how busy this whole machine is, as a share of a single
+	// core: 250 means two and a half cores spent, the same convention
+	// ProcessStats uses. Nil until there are two readings to make a rate from,
+	// and nil again whenever the answer would be a guess -- never zero for it,
+	// because zero means genuinely idle.
+	CPUPercent() *float64
+	// Swap reports total and free bytes. ok is false only where the kernel does
+	// not report swap at all; a machine with none configured answers (0, 0,
+	// true), which is a reading worth having rather than an absent one.
+	Swap() (total uint64, free uint64, ok bool)
 	// Temperatures reports degrees Celsius for the SoC and the battery. Zero
 	// means the box exposes no such sensor, which is common enough on TV
 	// hardware that it is a normal answer rather than an error.
@@ -79,17 +89,31 @@ type System interface {
 	FileStream(ctx context.Context, path string) (io.ReadCloser, error)
 }
 
-// Android is the real implementation. The agent is started by the Magisk
-// service.sh, so it already runs as root and never needs to shell out to su.
+// Android is the real implementation. The agent is started as root — by the
+// Magisk service.sh on a box, by an init service inside a Redroid container —
+// so it never needs to shell out to su.
 type Android struct {
+	// Reported instead of ro.serialno when set. See config.Config.Serial.
+	serialOverride string
 	// CPU time is a counter, not a gauge: a percentage only exists between two
 	// readings. These carry the previous one from beat to beat.
 	cpuMu   sync.Mutex
 	lastCPU map[string]cpuReading
+	// The machine-wide counterpart, under the same mutex.
+	lastMachineCPU machineCPU
 	// Resolved package -> pids, kept so the common case skips the /proc walk.
 	// Validated against each pid's own cmdline before use, because pids are
 	// recycled and an app that was killed and restarted gets a new one.
 	pidCache map[string][]int
+}
+
+// machineCPU is one cumulative reading of a whole machine's CPU time, in
+// seconds. Separate from cpuReading, which counts a package's clock ticks: the
+// sources differ (cgroup microseconds, or /proc/stat ticks) and converting both
+// to seconds at the point of reading keeps one rate function for either.
+type machineCPU struct {
+	seconds float64
+	at      time.Time
 }
 
 type cpuReading struct {
@@ -98,7 +122,9 @@ type cpuReading struct {
 	at    time.Time
 }
 
-func NewAndroid() *Android { return &Android{} }
+func NewAndroid(serialOverride string) *Android {
+	return &Android{serialOverride: serialOverride}
+}
 
 func (a *Android) Exec(ctx context.Context, name string, args ...string) (string, error) {
 	cmd := exec.CommandContext(ctx, name, args...)
@@ -451,12 +477,28 @@ func (a *Android) Prop(ctx context.Context, name string) string {
 	return strings.TrimSpace(out)
 }
 
+// UptimeSeconds reads /proc directly rather than forking `cat`.
+//
+// It used to shell out on context.Background() — the only unbounded context in
+// this file — once per box every twenty seconds, from inside the heartbeat. A
+// fork that blocked took the beat with it, and a box whose beat never arrives
+// is marked offline while its socket is still open. /proc needs no shell, and
+// the parsing below already takes the raw text.
 func (a *Android) UptimeSeconds() int64 {
-	out, err := a.Shell(context.Background(), "cat /proc/uptime")
-	if err != nil {
-		return 0
-	}
-	fields := strings.Fields(out)
+	return uptimeSeconds(readProc("/proc/uptime"), readProc("/proc/1/stat"))
+}
+
+// uptimeSeconds is how long *this* Android has been up, which is not the same
+// as how long the kernel has.
+//
+// A container shares the host's kernel, so /proc/uptime inside one reports the
+// host's uptime — N boxes on a server would all report the same climbing
+// number. What did start when this Android started is its pid 1, so subtracting
+// how long ago that happened gives the real answer. On a box with its own
+// kernel init starts at boot, the subtraction is ~0, and this is the plain
+// reading it always was; no container detection needed either way.
+func uptimeSeconds(uptime, pid1Stat string) int64 {
+	fields := strings.Fields(uptime)
 	if len(fields) == 0 {
 		return 0
 	}
@@ -464,12 +506,138 @@ func (a *Android) UptimeSeconds() int64 {
 	if err != nil {
 		return 0
 	}
+	if start, ok := procStartTicks(pid1Stat); ok {
+		secs -= float64(start) / clockTicksPerSecond
+	}
+	if secs < 0 {
+		return 0
+	}
 	return int64(secs)
+}
+
+// procStartTicks is field 22 of a /proc/<pid>/stat line: when the process
+// started, in clock ticks since the kernel booted.
+//
+// Split from the right like procCPUTicks, for the same reason: field 2 is the
+// executable name in parentheses and may contain spaces. Everything after the
+// closing parenthesis begins at field 3, so field 22 is the 20th of that
+// remainder.
+func procStartTicks(line string) (uint64, bool) {
+	end := strings.LastIndexByte(line, ')')
+	if end < 0 {
+		return 0, false
+	}
+	fields := strings.Fields(line[end+1:])
+	if len(fields) < 20 {
+		return 0, false
+	}
+	ticks, err := strconv.ParseUint(fields[19], 10, 64)
+	if err != nil {
+		return 0, false
+	}
+	return ticks, true
 }
 
 // procField pulls one whitespace-separated field out of a /proc file. These
 // are the cheapest readings on the box: no fork, no dumpsys, a few hundred
 // bytes each.
+// meminfoSwap reads SwapTotal and SwapFree out of /proc/meminfo.
+//
+// Both are returned even when zero, and the caller is expected to pass them on
+// as a genuine zero rather than as absent: a machine with no swap configured is
+// one the OOM killer reaches sooner, which is worth seeing. `ok` is false only
+// when the file had no SwapTotal line at all -- a kernel built without swap
+// support, or a /proc that could not be read.
+func meminfoSwap(meminfo string) (total uint64, free uint64, ok bool) {
+	scanner := bufio.NewScanner(strings.NewReader(meminfo))
+	for scanner.Scan() {
+		fields := strings.Fields(scanner.Text())
+		if len(fields) < 2 {
+			continue
+		}
+		value, err := strconv.ParseUint(fields[1], 10, 64)
+		if err != nil {
+			continue
+		}
+		// Values are in kB.
+		switch fields[0] {
+		case "SwapTotal:":
+			total = value * 1024
+			ok = true
+		case "SwapFree:":
+			free = value * 1024
+		}
+	}
+	return total, free, ok
+}
+
+// busyTicks sums the non-idle fields of /proc/stat's aggregate `cpu` line.
+//
+// The fields are user, nice, system, idle, iowait, irq, softirq, steal, and
+// idle plus iowait are the two that are not work. iowait in particular is a
+// CPU waiting on disk rather than spending itself, and counting it is how a box
+// doing a large install looks pinned when it is only waiting.
+//
+// Ticks are USER_HZ, which is 100 on every Android and Linux target here --
+// the same constant ProcessStats already divides by.
+func busyTicks(stat string) (uint64, bool) {
+	scanner := bufio.NewScanner(strings.NewReader(stat))
+	for scanner.Scan() {
+		fields := strings.Fields(scanner.Text())
+		// The aggregate line only: "cpu" with no trailing digit. "cpu0" is one
+		// core, and summing those as well would double every reading.
+		if len(fields) < 5 || fields[0] != "cpu" {
+			continue
+		}
+		var busy uint64
+		for i, field := range fields[1:] {
+			// Fields 3 and 4 (zero-based) are idle and iowait.
+			if i == 3 || i == 4 {
+				continue
+			}
+			value, err := strconv.ParseUint(field, 10, 64)
+			if err != nil {
+				return 0, false
+			}
+			busy += value
+		}
+		return busy, true
+	}
+	return 0, false
+}
+
+// cpuRate turns two cumulative CPU-time readings into a percentage of a single
+// core, so 250 means two and a half cores spent. The same convention as
+// ProcessStats.CPUPercent, and deliberately not normalised against the core
+// count: a value above 100 is the honest way to say a machine is using more
+// than one core, and the dashboard divides by cpuCount when it wants a share.
+//
+// Nil rather than zero in every case where the answer would be a guess. A rate
+// needs two readings, and the hub reads an absent field as "unknown" while a
+// zero means genuinely idle:
+//
+//   - no previous reading: the first beat after a start
+//   - the counter went backwards: a container recreated, or a host rebooted,
+//     restarts its counter at zero
+//   - no elapsed time: two beats inside one clock tick, which a forced refresh
+//     reaches
+//   - a stale baseline: dividing by a twenty-minute-old reading publishes a
+//     twenty-minute average as "right now"
+//
+// Nothing is clamped at 100. An eight-core machine at full tilt reports 800,
+// and clamping is how that would look merely busy.
+func cpuRate(prev, cur machineCPU, maxAge time.Duration) *float64 {
+	if prev.at.IsZero() || cur.seconds < prev.seconds {
+		return nil
+	}
+	elapsed := cur.at.Sub(prev.at)
+	if elapsed <= 0 || (maxAge > 0 && elapsed > maxAge) {
+		return nil
+	}
+	percent := (cur.seconds - prev.seconds) / elapsed.Seconds() * 100
+	return &percent
+}
+
 func readProc(path string) string {
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -478,6 +646,9 @@ func readProc(path string) string {
 	return string(data)
 }
 
+// LoadAvg is the whole machine's, deliberately. Linux has no per-container load
+// average — there is nothing to scope it to — so boxes sharing a host all
+// report the same figure, and reading it as one box's own load is a mistake.
 func (a *Android) LoadAvg() (float64, float64, float64) {
 	fields := strings.Fields(readProc("/proc/loadavg"))
 	if len(fields) < 3 {
@@ -490,8 +661,128 @@ func (a *Android) LoadAvg() (float64, float64, float64) {
 }
 
 func (a *Android) Memory() (uint64, uint64) {
+	// /proc/meminfo inside a container is the host's, so a memory-limited box
+	// would report the whole server's RAM. The cgroup knows the real ceiling.
+	if total, available, ok := cgroupMemory(
+		readProc("/sys/fs/cgroup/memory.max"),
+		readProc("/sys/fs/cgroup/memory.current"),
+		readProc("/sys/fs/cgroup/memory.stat"),
+	); ok {
+		return total, available
+	}
+	return meminfoMemory(readProc("/proc/meminfo"))
+}
+
+// CPUPercent prefers the container's own cgroup accounting and falls back to
+// the machine's /proc/stat.
+//
+// Inside a container /proc/stat is the *host's*, so on a machine running ten
+// boxes all ten would report the same figure and none of it would be theirs --
+// the same trap the load average has, and the reason this reading exists.
+// cpu.stat is per-cgroup and hierarchical, so it covers every nested cgroup
+// Android's init creates inside the box.
+//
+// Docker defaults to a private cgroup namespace, which is what makes the bare
+// path the container's own rather than the machine's.
+func (a *Android) CPUPercent() *float64 {
+	now := time.Now()
+
+	var cur machineCPU
+	if usec, ok := statKey(readProc("/sys/fs/cgroup/cpu.stat"), "usage_usec"); ok {
+		cur = machineCPU{seconds: float64(usec) / 1e6, at: now}
+	} else if ticks, ok := busyTicks(readProc("/proc/stat")); ok {
+		cur = machineCPU{seconds: float64(ticks) / clockTicksPerSecond, at: now}
+	} else {
+		// Neither source: a box whose /proc this agent cannot read. Unknown,
+		// never zero -- a zero here reads as a perfectly idle machine.
+		return nil
+	}
+
+	a.cpuMu.Lock()
+	prev := a.lastMachineCPU
+	a.lastMachineCPU = cur
+	a.cpuMu.Unlock()
+
+	// A baseline older than a few minutes would publish its own average as
+	// "right now", which is what a suspended or long-throttled agent leaves
+	// behind.
+	return cpuRate(prev, cur, 5*time.Minute)
+}
+
+func (a *Android) Swap() (uint64, uint64, bool) {
+	return meminfoSwap(readProc("/proc/meminfo"))
+}
+
+// cgroupMemory reads the cgroup v2 limit and usage. Not ok when there is no
+// cgroup at all, or when it is unlimited — `memory.max` reads "max" then, and
+// the host's own total is the honest answer, which is what a real box gives.
+//
+// `memory.current` includes reclaimable page cache, which the kernel documents
+// as part of what the controller charges, and that is not what anyone means by
+// "memory used". Android mmaps the ROM and the APKs, the scanner reads files,
+// and all of it lands in that number — so subtracting nothing reports a
+// healthy idle box as ~100% full within minutes and the chart becomes a flat
+// line at the ceiling forever.
+//
+// `docker stats` subtracts `inactive_file` for exactly this reason, and this
+// matches it deliberately rather than trying to be more correct: host mode
+// reads the per-instance figures out of `docker stats`, and if the agent inside
+// the box used different arithmetic the dashboard would show two memory numbers
+// for the same box with nothing to say which was wrong.
+//
+// It is an approximation, and worth knowing which one: docker does not subtract
+// `active_file`, which is also reclaimable, so this is not "anonymous plus
+// kernel". It is what docker shows.
+func cgroupMemory(max, current, stat string) (uint64, uint64, bool) {
+	limit, err := strconv.ParseUint(strings.TrimSpace(max), 10, 64)
+	if err != nil || limit == 0 {
+		return 0, 0, false
+	}
+	used, err := strconv.ParseUint(strings.TrimSpace(current), 10, 64)
+	if err != nil {
+		return 0, 0, false
+	}
+
+	// The guard is docker's, and it is not paranoia: the two values are
+	// separate reads, so a box sitting at its limit can read a larger
+	// inactive_file than the usage sampled a moment earlier. An unsubtracted
+	// number is wrong; an underflowed one is 16 exabytes.
+	//
+	// A missing memory.stat falls through with the raw usage rather than
+	// deferring to meminfo, which is also what docker does — the limit is still
+	// the box's own, and the host's total would be a worse answer.
+	if inactive, ok := statKey(stat, "inactive_file"); ok && inactive < used {
+		used -= inactive
+	}
+
+	if used > limit {
+		used = limit
+	}
+	return limit, limit - used, true
+}
+
+// statKey reads one key out of a cgroup flat-keyed file — `memory.stat` and
+// `cpu.stat` are both "name value" per line, in bytes and microseconds
+// respectively.
+func statKey(content, key string) (uint64, bool) {
+	scanner := bufio.NewScanner(strings.NewReader(content))
+	for scanner.Scan() {
+		name, value, found := strings.Cut(strings.TrimSpace(scanner.Text()), " ")
+		if !found || name != key {
+			continue
+		}
+		parsed, err := strconv.ParseUint(strings.TrimSpace(value), 10, 64)
+		if err != nil {
+			return 0, false
+		}
+		return parsed, true
+	}
+	return 0, false
+}
+
+func meminfoMemory(meminfo string) (uint64, uint64) {
 	var total, available uint64
-	scanner := bufio.NewScanner(strings.NewReader(readProc("/proc/meminfo")))
+	scanner := bufio.NewScanner(strings.NewReader(meminfo))
 	for scanner.Scan() {
 		fields := strings.Fields(scanner.Text())
 		if len(fields) < 2 {
@@ -881,7 +1172,12 @@ func (a *Android) DeviceInfo(ctx context.Context) proto.DeviceInfo {
 	sdk, _ := strconv.Atoi(a.Prop(ctx, "ro.build.version.sdk"))
 	density, _ := strconv.Atoi(a.Prop(ctx, "ro.sf.lcd_density"))
 
-	serial := a.Prop(ctx, "ro.serialno")
+	// An explicit serial wins over anything the box reports. A container has no
+	// stable one of its own, and the hub keys a device on this string alone.
+	serial := a.serialOverride
+	if serial == "" {
+		serial = a.Prop(ctx, "ro.serialno")
+	}
 	if serial == "" {
 		serial = a.Prop(ctx, "ro.boot.serialno")
 	}
@@ -966,19 +1262,30 @@ func fallbackSerial(ctx context.Context, a *Android) string {
 	return fmt.Sprintf("unknown-%d", time.Now().UnixNano())
 }
 
-// Metrics gathers everything the hub wants on a heartbeat.
+// Metrics is both halves of a reading, for the one caller that wants a
+// complete picture and can afford to wait for it: the hello on a fresh
+// connection, where one `pm list` is nothing next to the reconnect itself.
 //
-// Cost matters here: this runs every 20 seconds on a box whose day job is
-// scanning. Load, memory and cpu count are three small /proc reads and are
-// always included. The package versions are not: `dumpsys package` prints a
-// wall of text per package, so only the packages the hub asked to track get
-// one, and the full third-party inventory — a single `pm list packages` — is
-// gathered on request rather than on every beat.
+// Every other caller wants the halves apart. See BaseMetrics.
 func Metrics(ctx context.Context, s System, packages []string, withInventory bool) proto.DeviceMetrics {
+	m := BaseMetrics(s, packages)
+	m.Packages, m.PackagesComplete = PackageVersions(ctx, s, packages, withInventory)
+	return m
+}
+
+// BaseMetrics is the half of a reading that cannot wedge: a statfs and a
+// handful of /proc reads, no forks, and so no context to time out.
+//
+// This is what a heartbeat carries every single time. Liveness must never wait
+// on something that can hang — a beat that arrives late is indistinguishable
+// at the hub from a box that is gone, and the cost of the other half is
+// unbounded on a box whose framework is restarting.
+func BaseMetrics(s System, packages []string) proto.DeviceMetrics {
 	free, total, _ := s.Disk("/data")
 	one, five, fifteen := s.LoadAvg()
 	memTotal, memAvailable := s.Memory()
 	cpuTemp, batteryTemp := s.Temperatures()
+	swapTotal, swapFree, hasSwap := s.Swap()
 
 	m := proto.DeviceMetrics{
 		FreeBytes:         free,
@@ -992,11 +1299,54 @@ func Metrics(ctx context.Context, s System, packages []string, withInventory boo
 		MemAvailableBytes: memAvailable,
 		CPUTempC:          cpuTemp,
 		BatteryTempC:      batteryTemp,
+		CPUPercent:        s.CPUPercent(),
+		// Empty rather than nil, because `packages` has no omitempty: a nil
+		// slice marshals as JSON `null`, and the hub's schema takes an array.
+		// A host lists nothing -- PackageInfo and ThirdPartyPackages both
+		// refuse, by design -- so it sent null on every beat, and the hub
+		// dropped the whole frame. The frame carries liveness too, so the
+		// machine read as offline while sitting there perfectly healthy.
+		//
+		// The hub tolerates null now as well. This is the other half: the
+		// agent should say "nothing installed" rather than "no answer", which
+		// on a machine is the truth.
+		Packages: []proto.PackageInfo{},
 		// Same cost class as the readings above — a handful of small /proc
 		// reads for the tracked apps — so it rides every beat rather than
 		// waiting for the inventory pass.
 		Processes: s.ProcessStats(packages),
 	}
+
+	// Pointers, so "no swap configured" and "this kernel does not report swap"
+	// stay different answers at the hub. Zero bytes of swap is a fact about a
+	// machine, not a missing reading.
+	if hasSwap {
+		m.SwapTotalBytes = &swapTotal
+		m.SwapFreeBytes = &swapFree
+	}
+
+	return m
+}
+
+// PackageVersions is the half that shells out: one `dumpsys package` per
+// tracked app, plus a `pm list packages` on an inventory pass.
+//
+// `dumpsys` talks to system_server, so on a box whose framework is restarting
+// every one of these blocks until its deadline — minutes of wall clock for a
+// reading that is only ever inventory. That is why it is collected away from
+// the beat, and why its caller is expected to carry on without it.
+//
+// An empty list is "no answer", not "nothing installed", and the hub reads it
+// that way: it only marks an app uninstalled when complete is true.
+func PackageVersions(
+	ctx context.Context,
+	s System,
+	packages []string,
+	withInventory bool,
+) (infos []proto.PackageInfo, complete bool) {
+	// Empty rather than nil, for the reason BaseMetrics gives: a nil slice
+	// marshals as JSON null and the hub's schema takes an array.
+	infos = []proto.PackageInfo{}
 
 	seen := map[string]bool{}
 	for _, pkg := range packages {
@@ -1005,25 +1355,25 @@ func Metrics(ctx context.Context, s System, packages []string, withInventory boo
 			continue
 		}
 		seen[info.PackageName] = true
-		m.Packages = append(m.Packages, info)
+		infos = append(infos, info)
 	}
 
 	if withInventory {
 		installed, err := s.ThirdPartyPackages(ctx)
 		if err == nil {
-			m.PackagesComplete = true
+			complete = true
 			for _, info := range installed {
 				// The tracked entry already carries a versionName, which the
 				// inventory does not: never overwrite it with the thinner one.
 				if seen[info.PackageName] {
 					continue
 				}
-				m.Packages = append(m.Packages, info)
+				infos = append(infos, info)
 			}
 		}
 	}
 
-	return m
+	return infos, complete
 }
 
 // ParseDumpsysVersion is exported for tests and for the verify step, which

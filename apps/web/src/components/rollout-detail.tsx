@@ -84,10 +84,14 @@ export function RolloutActions({
           </Button>
         ) : null}
 
-        {status === "PAUSED" || status === "SOAKING" ? (
+        {status === "PAUSED" || status === "SOAKING" || status === "PENDING" ? (
           <Button disabled={pending} onClick={() => run(() => resumeRolloutAction(rolloutId))}>
             <PlayCircle />
-            {status === "SOAKING" ? "Release fleet now" : "Resume anyway"}
+            {status === "SOAKING"
+              ? "Release fleet now"
+              : status === "PENDING"
+                ? "Start now"
+                : "Resume anyway"}
           </Button>
         ) : null}
 
@@ -121,7 +125,7 @@ export function RolloutJobs({
 
   return (
     <div className="overflow-hidden rounded-xl border border-border bg-card">
-      <Table containerClassName="max-h-[60vh]">
+      <Table containerClassName="lg:max-h-[60vh]">
         <TableHeader>
           <TableRow>
             <TableHead className="w-8" />

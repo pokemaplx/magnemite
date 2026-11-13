@@ -1,4 +1,5 @@
+// The URL is not here: Prisma 7 reads it from prisma.config.ts for the CLI,
+// and the client gets it through its driver adapter.
 datasource db {
   provider = "postgresql"
-  url      = env("DATABASE_URL")
 }

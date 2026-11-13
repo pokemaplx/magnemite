@@ -51,8 +51,19 @@ when the config had changed but the app had not. It needed a restart command to
 go with it, because writing a file a running process has already read changes
 nothing by itself. Inside an install the post-install hook already restarts the
 scanner, so the command only earned its keep on the push, and the two were
-removed together. An edited config now reaches the fleet by deploying the MITM
+removed together. An edited config reaches the fleet by deploying the MITM
 again.
+
+It is back for one box at a time, as **`push_config`**, sent when somebody
+presses **Rewrite config** in a device's Execute dialog — and carrying what the
+first one lacked. Its `preHook` and `postHook` are the group's own install
+hooks, run either side of the write, so the MITM stops, the file goes in, and
+the MITM starts again on it. The agent answers with **`push_config_result`**:
+`ok` is the write, with the sha256 read back off the box, and `hookError` says
+apart that a hook failed, since the file can be in place and the scanner still
+stopped. Neither side logs the content, which is why this is a message rather
+than a command typed into Execute: those land in the audit log, the hub's log
+and the box's own `agent.log`. Claimed as the `push_config` capability.
 
 The write is still atomic rather than a truncate-then-fill a scanner can read
 halfway through, and the JSON never goes through a shell that would have to

@@ -1,0 +1,16 @@
+# Android init service, the Redroid counterpart of the Magisk service.sh.
+#
+# init gives the same three things Magisk did and nothing else was ever needed:
+# it starts the agent as root, it waits for the box to finish booting, and it
+# respawns the process when it exits. A service that is not `oneshot` is
+# restarted by init on its own, which is the `while true` loop in service.sh.
+
+service magnemite /system/bin/magnemite-start.sh
+    user root
+    group root root
+    # Started by the trigger below, not at class time: before boot_completed
+    # getprop returns half-populated values and the network is not up.
+    disabled
+
+on property:sys.boot_completed=1
+    start magnemite

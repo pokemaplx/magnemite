@@ -1,5 +1,5 @@
-import { type MonitorSettingsValues } from "@magnemite/db";
-import { type AlertInput, LEVEL_ICON, clamp, deviceUrl } from "./alerts.js";
+import { type NotifySettingsValues } from "@magnemite/db";
+import { type Notice, clamp, dashboardUrl, noticeTitle } from "./alerts.js";
 import { log } from "../log.js";
 
 /**
@@ -17,49 +17,56 @@ const LEVEL_COLOUR: Record<string, number> = {
   CRITICAL: 0xef_44_44,
 };
 
-export function discordConfigured(settings: MonitorSettingsValues): boolean {
+/**
+ * Discord's own ceilings. Past any of them the whole message is refused with
+ * a 400, so a long error is cut here rather than costing the notification.
+ */
+const TITLE_MAX = 256;
+const FIELD_MAX = 1024;
+const DESCRIPTION_MAX = 4096;
+
+export function discordConfigured(settings: NotifySettingsValues): boolean {
   return Boolean(settings.discordWebhookUrl);
 }
 
 export async function sendDiscord(
-  alert: AlertInput,
-  settings: MonitorSettingsValues,
+  notice: Notice,
+  settings: NotifySettingsValues,
 ): Promise<boolean> {
   if (!settings.discordWebhookUrl) return false;
-  return post(settings.discordWebhookUrl, buildPayload(alert, settings.discordMentionRoleId));
+  return post(settings.discordWebhookUrl, buildPayload(notice, settings.discordMentionRoleId));
 }
 
-export function buildPayload(alert: AlertInput, mentionRoleId: string): unknown {
-  const fields: { name: string; value: string; inline?: boolean }[] = [
-    { name: "Device", value: `[${alert.deviceName}](${deviceUrl(alert.deviceId)})`, inline: true },
-    { name: "Group", value: alert.groupName ?? "—", inline: true },
-  ];
-
-  if (alert.action && alert.action !== "NOTIFY_ONLY") {
-    fields.push({
-      name: "Action",
-      // Whether it worked is the second half of the sentence, and the half an
-      // operator is actually deciding on: a failed restart needs a person.
-      value: `${alert.action}${alert.actionOk === null ? "" : alert.actionOk ? " ✓" : " ✗ failed"}`,
-      inline: true,
-    });
-  }
-  if (alert.detail) {
+export function buildPayload(notice: Notice, mentionRoleId: string): unknown {
+  const fields = (notice.fields ?? []).map((field) => ({
+    ...field,
+    // An empty value is a 400 for the whole message, not a blank field.
+    value: clamp(field.value || "—", FIELD_MAX),
+  }));
+  // Fields when the builder had facts to set out, the plain body when it did
+  // not — never both, which would say everything twice. The body already ends
+  // with the detail, so the fenced copy below is only for the fields layout.
+  const description = fields.length === 0 ? clamp(notice.body, DESCRIPTION_MAX) : undefined;
+  if (notice.detail && fields.length > 0) {
     // Fenced, because a detail is usually a line of log or command output and
     // Discord would otherwise render its punctuation as markdown.
-    fields.push({ name: "Detail", value: `\`\`\`\n${clamp(alert.detail, 900)}\n\`\`\`` });
+    fields.push({ name: "Detail", value: `\`\`\`\n${clamp(notice.detail, 900)}\n\`\`\`` });
   }
 
   return {
     // Only CRITICAL pings. A role mention on every warning is how a channel
     // gets muted, which costs the alert that mattered.
-    content: mentionRoleId && alert.level === "CRITICAL" ? `<@&${mentionRoleId}>` : undefined,
+    content: mentionRoleId && notice.level === "CRITICAL" ? `<@&${mentionRoleId}>` : undefined,
     embeds: [
       {
-        title: `${LEVEL_ICON[alert.level]} ${alert.deviceName} — ${alert.message}`,
-        color: LEVEL_COLOUR[alert.level],
+        title: clamp(noticeTitle(notice), TITLE_MAX),
+        // The title itself is the link, so a message is one click from the
+        // page it is about whatever its fields say.
+        url: dashboardUrl(notice.path),
+        description,
+        color: LEVEL_COLOUR[notice.level],
         fields,
-        footer: { text: `Magnemite · ${alert.signal}` },
+        footer: { text: `Magnemite · ${notice.footer}` },
         timestamp: new Date().toISOString(),
       },
     ],
@@ -87,7 +94,7 @@ async function post(webhookUrl: string, payload: unknown): Promise<boolean> {
         continue;
       }
 
-      log.warn({ status: res.status }, "discord webhook refused an alert");
+      log.warn({ status: res.status }, "discord webhook refused a notification");
       return false;
     } catch (err) {
       log.warn({ err }, "discord webhook unreachable");

@@ -12,6 +12,28 @@ import { z } from "zod";
  */
 export const PROTOCOL_VERSION = 1;
 
+/**
+ * A list that survives arriving as `null`.
+ *
+ * Go marshals a **nil slice as `null`**, not as `[]`, and `.default([])` only
+ * fires on `undefined` — so one nil slice makes the whole frame fail
+ * validation, and the hub drops frames whole. That is not a cosmetic loss: a
+ * heartbeat carries the box's liveness as well as its readings, so a machine
+ * whose agent could not list packages went offline on the dashboard while
+ * sitting there perfectly healthy, with the reason only in the hub's log.
+ *
+ * It happened exactly once and the cost was a day, so every list on a frame an
+ * agent sends goes through this rather than through `.default([])`. Absent,
+ * null and empty all mean the same thing here — nothing to report — and none
+ * of them is worth losing the readings around it.
+ */
+function listOf<T extends z.ZodTypeAny>(schema: T) {
+  return z
+    .array(schema)
+    .nullish()
+    .transform((value) => value ?? []);
+}
+
 /** Mirrors the JobState enum in the Prisma schema. */
 export const jobStateSchema = z.enum([
   "QUEUED",
@@ -56,6 +78,18 @@ export const deviceInfoSchema = z.object({
    * report it.
    */
   localIp: z.string().nullish(),
+  /**
+   * When this Android booted and when this agent process started, as unix
+   * seconds, plus the id of the connection carrying this hello.
+   *
+   * All three absent from an agent too old to send them, and that absence is
+   * the signal — the same shape `monitorRan` uses. The hub falls back to
+   * uptime arithmetic for the one question it needs them for, so an old box
+   * still classifies, just less precisely.
+   */
+  bootedAt: z.number().int().nonnegative().nullish(),
+  agentStartedAt: z.number().int().nonnegative().nullish(),
+  sessionId: z.string().nullish(),
 });
 
 /**
@@ -104,7 +138,7 @@ export const deviceMetricsSchema = z.object({
   freeBytes: z.number().nonnegative().nullish(),
   totalBytes: z.number().nonnegative().nullish(),
   uptimeSeconds: z.number().int().nonnegative().nullish(),
-  packages: z.array(packageInfoSchema).default([]),
+  packages: listOf(packageInfoSchema),
   /**
    * Set when `packages` is the whole third-party inventory rather than just
    * the tracked apps. Only a complete list is evidence that an app was
@@ -125,6 +159,32 @@ export const deviceMetricsSchema = z.object({
   memAvailableBytes: z.number().nonnegative().nullish(),
 
   /**
+   * Share of a *single* core this whole machine is spending, so 250 means two
+   * and a half cores — the same convention as `processStatsSchema`, and the
+   * one that composes.
+   *
+   * The honest version of the load average, and the only CPU figure a
+   * container has. Inside one, `/proc/loadavg` is the host's and there is
+   * nothing to scope it to; its own cgroup accounts its CPU time exactly. On
+   * hardware this is `/proc/stat` deltas and means the same thing, which is
+   * what lets a TV box and a container share one chart.
+   */
+  cpuPercent: z.number().nonnegative().nullish(),
+
+  /**
+   * Swap, which in practice only a host has. Fifty workers in a container is
+   * where a VPS runs out of RAM, and swap is what stands between that and the
+   * OOM killer taking a box down mid-scan.
+   *
+   * Zero is a real answer and means *no swap configured*, which is worth
+   * knowing. That is why the Go side sends these as pointers: `omitempty` on a
+   * plain integer would drop a genuine zero and the hub would read it as "has
+   * not said yet".
+   */
+  swapTotalBytes: z.number().nonnegative().nullish(),
+  swapFreeBytes: z.number().nonnegative().nullish(),
+
+  /**
    * Degrees Celsius off the box's thermal zones. Not every ROM exposes one —
    * plenty of TV boxes ship with an empty /sys/class/thermal — so null here
    * means "this box cannot say", which the dashboard shows as an absent chart
@@ -138,7 +198,7 @@ export const deviceMetricsSchema = z.object({
    * everything above. Empty on agents old enough not to gather it, and empty
    * for an app that simply is not running.
    */
-  processes: z.array(processStatsSchema).default([]),
+  processes: listOf(processStatsSchema),
 
   /**
    * What the box saw when it ran the monitor spec from its `welcome`.
@@ -158,13 +218,104 @@ export const deviceMetricsSchema = z.object({
    */
   monitorRan: z.boolean().default(false),
   foregroundPackage: z.string().nullish(),
-  anrPackages: z.array(z.string()).default([]),
-  checks: z.array(monitorCheckResultSchema).default([]),
+  anrPackages: listOf(z.string()),
+  checks: listOf(monitorCheckResultSchema),
 });
 
 // ---------------------------------------------------------------------------
 // agent -> hub
 // ---------------------------------------------------------------------------
+
+/**
+ * One Redroid container, as the host's docker saw it a moment ago.
+ *
+ * This is the half of an instance's state that nothing inside the container
+ * can see: `docker stats` reports no container state and no restart count, and
+ * a process in the guest has no way to ask. Everything else about a box — its
+ * memory, its storage, its packages — comes from the agent inside it, over its
+ * own socket, like any other box.
+ */
+export const containerStatSchema = z.object({
+  /** The container's name, which the renderer derives from the instance index. */
+  name: z.string(),
+  /**
+   * The serial the container was started with, read back off its own command
+   * line rather than assumed. This is what matches it to an instance row, and
+   * reading it back is what makes adoption of a hand-written compose file
+   * possible at all.
+   */
+  serial: z.string().nullish(),
+  /** docker's own word: running, exited, restarting, created, paused. */
+  state: z.string(),
+  /**
+   * Climbing restart counts are what distinguish a crash-looping instance from
+   * an idle one. Null from a docker that did not say, never zero for it.
+   */
+  restartCount: z.number().int().nonnegative().nullish(),
+  /**
+   * The memory limit docker reports it actually applied.
+   *
+   * Reported rather than assumed because it is the single most consequential
+   * field in the rendered file: it is what makes a box report its own RAM
+   * instead of the machine's, and a silent miss would have every container on
+   * a host claiming the whole machine's memory. The hub compares it against
+   * what it asked for.
+   */
+  memLimitBytes: z.number().nonnegative().nullish(),
+  image: z.string().nullish(),
+});
+export type ContainerStat = z.infer<typeof containerStatSchema>;
+
+/**
+ * What a host says about itself, beyond the readings every machine sends.
+ *
+ * Optional on both `hello` and `heartbeat`, and absent from every box, which
+ * is what lets this ride the existing socket rather than needing one of its
+ * own. A host *is* a Device: same enrollment, same token, same `welcome`, same
+ * metrics, same self-update.
+ */
+export const hostInfoSchema = z.object({
+  /** `uname -m`. arm64 is a hard requirement, and this is the evidence. */
+  arch: z.string().nullish(),
+  /**
+   * `uname -r`. Worth a column of its own because `linux-modules-extra` is per
+   * kernel version: an apt upgrade that installs a new kernel leaves binder
+   * behind and every container fails to come up after the reboot. Seeing the
+   * kernel move is how that gets spotted.
+   */
+  kernel: z.string().nullish(),
+  dockerVersion: z.string().nullish(),
+  /**
+   * Whether the binder devices Android needs were actually there, as opposed
+   * to the modprobe having been run. Redroid's own documentation disagrees
+   * with itself about whether a modern kernel needs the module at all, so the
+   * end state is what gets checked.
+   */
+  binderOk: z.boolean().nullish(),
+  /** The compose project the containers below were found under. */
+  project: z.string().nullish(),
+  /**
+   * sha256 of the compose file on disk, read back after writing it.
+   *
+   * Says what is on the machine rather than what the hub meant — the same rule
+   * a written MITM config follows. The hub compares a fresh render against
+   * this to decide whether a converge is needed at all, which is why the
+   * render has to be a pure function of the instance rows.
+   */
+  composeSha256: z.string().nullish(),
+  /**
+   * Every container under the project, running or not.
+   *
+   * Empty and absent mean the same thing here, and deliberately so: Go sends a
+   * nil slice as `null`, and treating that as a third state cost a machine its
+   * whole heartbeat once already. What separates "a machine with nothing on
+   * it" from "docker could not be asked" is `dockerVersion` being empty, which
+   * is the one signal the agent sets before it gives up — and it is what the
+   * hub gates on before it writes anything about containers.
+   */
+  containers: listOf(containerStatSchema),
+});
+export type HostInfo = z.infer<typeof hostInfoSchema>;
 
 export const helloSchema = z.object({
   type: z.literal("hello"),
@@ -182,13 +333,17 @@ export const helloSchema = z.object({
    * arithmetic reads a backported build as too old, and the failure mode is a
    * message sent to a box that silently drops it.
    */
-  capabilities: z.array(z.string()).default([]),
+  capabilities: listOf(z.string()),
+  /** Set only by an agent in host mode. Absent from every box. */
+  host: hostInfoSchema.nullish(),
 });
 
 export const heartbeatSchema = z.object({
   type: z.literal("heartbeat"),
   metrics: deviceMetricsSchema,
   currentJobId: z.string().nullish(),
+  /** Set only by an agent in host mode. Absent from every box. */
+  host: hostInfoSchema.nullish(),
 });
 
 export const jobProgressSchema = z.object({
@@ -246,6 +401,22 @@ export const logBundleResultSchema = z.object({
 });
 
 /**
+ * Closes out a screenshot the box could not deliver.
+ *
+ * The same shape and the same reason as `log_bundle_result`: the PNG goes up
+ * over HTTP, because a 1080p capture is regularly more than the 1 MB a socket
+ * frame is capped at. There is no success frame on either — the upload landing
+ * is the hub's proof, and a second one would only be a way for the two to
+ * disagree.
+ */
+export const screenshotResultSchema = z.object({
+  type: z.literal("screenshot_result"),
+  screenshotId: z.string(),
+  ok: z.boolean(),
+  error: z.string().nullish(),
+});
+
+/**
  * A batch of live logcat lines, while someone has the panel open.
  *
  * Batched rather than sent per line: a busy box writes thousands a second and
@@ -256,7 +427,7 @@ export const logBundleResultSchema = z.object({
 export const logLinesSchema = z.object({
   type: z.literal("log_lines"),
   streamId: z.string(),
-  lines: z.array(z.string()).default([]),
+  lines: listOf(z.string()),
   dropped: z.number().int().nonnegative().default(0),
 });
 
@@ -271,7 +442,94 @@ export const execResultSchema = z.object({
   error: z.string().nullish(),
 });
 
+/**
+ * How a `push_config` went. `ok` is the write: the file is in place, with the
+ * sha256 of what was read back off the box. A hook that failed is said apart,
+ * because the file can be in place and the scanner still stopped.
+ */
+export const pushConfigResultSchema = z.object({
+  type: z.literal("push_config_result"),
+  requestId: z.string(),
+  ok: z.boolean(),
+  sha256: z.string().nullish(),
+  error: z.string().nullish(),
+  hookError: z.string().nullish(),
+});
+
 export const pongSchema = z.object({ type: z.literal("pong") });
+
+/**
+ * One `::step` line the bootstrap script printed.
+ *
+ * The same three fields the hub parses out of its stdout over SSH, because it
+ * is the same script and the same markers — a stage that fails has to say
+ * which one and why, whichever way it was started.
+ */
+export const bootstrapStepSchema = z.object({
+  name: z.string(),
+  /** A warning is not a failure: swap that could not be made leaves a machine that runs. */
+  ok: z.boolean(),
+  detail: z.string().default(""),
+});
+
+/** What re-running the bootstrap did. */
+export const hostBootstrapResultSchema = z.object({
+  type: z.literal("host_bootstrap_result"),
+  requestId: z.string(),
+  ok: z.boolean(),
+  steps: listOf(bootstrapStepSchema),
+  /** Capped by the agent: this rides the socket and a frame is 1 MB. */
+  error: z.string().nullish(),
+});
+export type HostBootstrapResult = z.infer<typeof hostBootstrapResultSchema>;
+
+/**
+ * One thing the probe learned about one box.
+ *
+ * Fixed leading fields and a free-text tail, mirroring the `::fact` line the
+ * script prints, because `ro.product.model` is routinely "Chromecast with
+ * Google TV" and `key=value` pairs break on the spaces. An address of `-`
+ * means the fact is about the run -- the machine's own adb public key arrives
+ * that way.
+ */
+export const boxFactSchema = z.object({
+  address: z.string(),
+  key: z.string(),
+  value: z.string().default(""),
+});
+export type BoxFact = z.infer<typeof boxFactSchema>;
+
+/** What running adb against the LAN found, or did. */
+export const boxAdbResultSchema = z.object({
+  type: z.literal("box_adb_result"),
+  requestId: z.string(),
+  ok: z.boolean(),
+  steps: listOf(bootstrapStepSchema),
+  facts: listOf(boxFactSchema).default([]),
+  /** Capped by the agent: this rides the socket and a frame is 1 MB. */
+  error: z.string().nullish(),
+});
+export type BoxAdbResult = z.infer<typeof boxAdbResultSchema>;
+
+/**
+ * What the machine did about it.
+ *
+ * `output` is docker's own, capped by the agent: a frame is 1 MB and the
+ * column it lands in is 64 KB on MariaDB, so an uncapped cold image build
+ * would close the socket or fail the insert — and either way the hub would
+ * never record the sha256, see the same mismatch on reconnect, and converge
+ * forever.
+ */
+export const hostConvergeResultSchema = z.object({
+  type: z.literal("host_converge_result"),
+  requestId: z.string(),
+  ok: z.boolean(),
+  /** sha256 of the file as read back off disk, not of what was sent. */
+  composeSha256: z.string().nullish(),
+  output: z.string().nullish(),
+  error: z.string().nullish(),
+});
+export type HostConvergeResult = z.infer<typeof hostConvergeResultSchema>;
 
 export const agentMessageSchema = z.discriminatedUnion("type", [
   helloSchema,
@@ -281,9 +539,14 @@ export const agentMessageSchema = z.discriminatedUnion("type", [
   logSchema,
   agentUpdateResultSchema,
   logBundleResultSchema,
+  screenshotResultSchema,
   logLinesSchema,
   execResultSchema,
+  pushConfigResultSchema,
   pongSchema,
+  hostConvergeResultSchema,
+  hostBootstrapResultSchema,
+  boxAdbResultSchema,
 ]);
 export type AgentMessage = z.infer<typeof agentMessageSchema>;
 
@@ -436,6 +699,21 @@ export const collectLogsSchema = z.object({
   maxLines: z.number().int().positive().default(50_000),
 });
 
+/**
+ * Take one `screencap` and POST it at `uploadUrl`, which carries the
+ * screenshot's own id and is authenticated with the device token.
+ *
+ * What this answers is the question no reading can. A box can be online,
+ * heartbeating, with the scanner process alive, and sitting on a dialog nobody
+ * has read — `APP_NOT_FOREGROUND` says the launcher owns the screen, and this
+ * says *what is on it*.
+ */
+export const collectScreenshotSchema = z.object({
+  type: z.literal("collect_screenshot"),
+  screenshotId: z.string(),
+  uploadUrl: z.string().url(),
+});
+
 export const logStreamStartSchema = z.object({
   type: z.literal("log_stream_start"),
   streamId: z.string(),
@@ -474,6 +752,29 @@ export const execCommandSchema = z.object({
 });
 
 /**
+ * A MITM's config, rewritten on a running box with nothing installed.
+ *
+ * `preHook` stops what reads the file, the file goes in exactly as an install
+ * writes it -- temp file, rename, read back -- and `postHook` starts it again.
+ * The hooks are the point: a running scanner does not re-read a file it has
+ * already read, which is what retired the first `write_config`, a push of the
+ * file and nothing else. These are the group's own install hooks, so the
+ * restart is the one every install already does.
+ *
+ * A message rather than a command typed into Execute because of what is in the
+ * file -- an aegis config holds `authBearer` and `deviceAuthToken` -- and a
+ * command lands in the audit log, the hub's log and the box's own agent.log.
+ * Neither side logs this one's content.
+ */
+export const pushConfigSchema = z.object({
+  type: z.literal("push_config"),
+  requestId: z.string(),
+  config: deviceConfigFileSchema,
+  preHook: z.string().nullish(),
+  postHook: z.string().nullish(),
+});
+
+/**
  * Names the agent puts in `hello.capabilities`.
  *
  * Still `write_config` after the message of that name was removed: it says the
@@ -482,6 +783,46 @@ export const execCommandSchema = z.object({
  * agent look incapable until it updated.
  */
 export const CAPABILITY_WRITE_CONFIG = "write_config";
+
+/**
+ * The agent knows `collect_screenshot`.
+ *
+ * Checked so the dashboard can leave the menu item out on a box whose agent
+ * predates it, rather than offering a button that waits two minutes and then
+ * says the box never answered — which is what an unknown message type looks
+ * like from this side, since the agent's type switch has no default branch.
+ */
+export const CAPABILITY_SCREENSHOT = "screenshot";
+
+/**
+ * This agent can run adb against boxes on its LAN, on the hub's behalf.
+ *
+ * Only ever claimed by an agent in `-host` mode that was given an enroller --
+ * a box must never advertise it. Checked for the same reason
+ * `CAPABILITY_SCREENSHOT` is: the agent's type switch has no default branch,
+ * so asking a machine whose agent predates this produces silence until the
+ * request times out, and the operator is told nothing.
+ */
+export const CAPABILITY_BOX_ADB = "box_adb";
+
+/**
+ * The agent knows `push_config`. Checked so the dashboard can say the box's
+ * agent is too old rather than send a message the agent's type switch drops,
+ * and wait out the timeout to learn nothing.
+ */
+export const CAPABILITY_PUSH_CONFIG = "push_config";
+
+/**
+ * Does this box's `hello.capabilities` claim one?
+ *
+ * Null is the honest answer for an agent old enough not to send the field at
+ * all, and it reads as false here — a box that cannot say it can do something
+ * is treated as not being able to, which is the safe direction for every
+ * capability there is.
+ */
+export function hasCapability(capabilities: unknown, name: string): boolean {
+  return Array.isArray(capabilities) && capabilities.includes(name);
+}
 
 /**
  * What a group's config template may substitute.
@@ -507,11 +848,154 @@ export const CONFIG_PLACEHOLDERS = [
   "device.publicIp",
   "device.rotomOrigin",
   "device.rotomDeviceId",
+  // How many workers the box is configured for, off its Redroid instance row.
+  // Null on a box that is not a container, and the renderer refuses a null
+  // rather than substituting an empty string -- the same rule every other
+  // placeholder follows, and the reason a group mixing containers with real
+  // hardware finds out at the deploy that names the box.
+  "device.workers",
   "group.name",
 ] as const;
 export type ConfigPlaceholder = (typeof CONFIG_PLACEHOLDERS)[number];
 
 export const pingSchema = z.object({ type: z.literal("ping") });
+
+/**
+ * Bring the containers on a machine in line with what the hub wants.
+ *
+ * The hub renders the compose file and sends its bytes, rather than sending a
+ * desired set for the machine to render. Two reasons: the rendered file is then
+ * the auditable artifact and the same on every machine, and the hub can compare
+ * a fresh render against the sha256 the host read back off disk to decide
+ * whether a converge is needed at all. That comparison is why the render has to
+ * be a pure function of the instance rows — anything conditional in it turns a
+ * reconnect into a container recreate.
+ *
+ * Carries the whole desired set every time, never a delta. That makes it
+ * idempotent, makes drift self-correcting, and means a machine that missed one
+ * catches up on the next rather than needing a replay.
+ */
+/**
+ * Run the bootstrap again on a machine that is already up.
+ *
+ * The script is already on the machine — it installs itself there for exactly
+ * this — but it is **sent again** rather than invoked where it sits, and so are
+ * the files that build the Redroid image. A re-run whose point is to deliver a
+ * fixed image cannot be done with the copies from the day the machine was
+ * provisioned: those are the ones being replaced.
+ *
+ * Nothing here is a credential. The machine keeps its own config, and the
+ * script leaves an existing `/etc/magnemite/host.json` alone — re-running must
+ * not make a machine enrol a second time.
+ */
+export const hostBootstrapSchema = z.object({
+  type: z.literal("host_bootstrap"),
+  /** Correlates the result, since a run outlives the beat that asked. */
+  requestId: z.string(),
+  /** The bootstrap script itself, as the hub has it now. */
+  script: z.string(),
+  /**
+   * What builds the Redroid image, written into a `redroid/` directory beside
+   * the script. The script looks for it relative to its working directory, so
+   * where these land is what decides whether the image is rebuilt at all.
+   */
+  files: listOf(
+    z.object({
+      name: z.string(),
+      content: z.string(),
+      /** Octal, as a string, the way the config file's mode travels. */
+      mode: z.string().default("0644"),
+    }),
+  ),
+  /** The tag to build. A machine with that tag already skips the build. */
+  image: z.string(),
+  /** Seconds the whole run may take: apt, a kernel module, an image build. */
+  timeoutSeconds: z.number().int().positive().default(1800),
+});
+export type HostBootstrap = z.infer<typeof hostBootstrapSchema>;
+
+export const hostConvergeSchema = z.object({
+  type: z.literal("host_converge"),
+  /** Correlates the result, since a converge outlives the beat that asked. */
+  requestId: z.string(),
+  project: z.string(),
+  dir: z.string(),
+  /** The rendered compose file. */
+  compose: z.string(),
+  /**
+   * How many containers may be started at once.
+   *
+   * `docker compose up` starts every service simultaneously, and ten Androids
+   * coming up together on sixteen cores is the OOM the sizing advice warns
+   * about. Low by default; it only costs time on a first provisioning.
+   */
+  batchSize: z.number().int().positive().default(2),
+  /**
+   * Whether containers under the project that the file does not name may be
+   * removed.
+   *
+   * False until a machine has converged once. A machine running the
+   * hand-written compose file has containers holding real device identities,
+   * and an empty desired set would make every one of them an orphan.
+   */
+  removeOrphans: z.boolean().default(false),
+});
+export type HostConverge = z.infer<typeof hostConvergeSchema>;
+
+/**
+ * Run adb against boxes on this machine's LAN, on the hub's behalf.
+ *
+ * The relay half of box enrollment, and the reason it exists: boxes live
+ * behind NAT in other people's homes, so a hub on a VPS cannot open
+ * `192.168.1.10:5555`. A machine already on that LAN can, over the socket it
+ * already holds outwards.
+ *
+ * One message for both modes rather than two near-identical pairs. The
+ * payload is the same either way and the result differs only in which array
+ * fills, so splitting it would double the type switch, the goroutine guard
+ * and the capability for nothing.
+ *
+ * **The module zip is not in here.** It is ~5 MB of binary, and
+ * `files[].content` is a JSON string -- base64 would put ~7 MB on the wire
+ * and the same again as a string on the hub's event loop, per machine, with
+ * no resume and no checksum. The machine is an approved Device holding a
+ * token and `/files/*` is token-authenticated, so it fetches the zip the same
+ * way it fetches an agent update.
+ */
+export const boxAdbSchema = z.object({
+  type: z.literal("box_adb"),
+  /** Correlates the result, since a run outlives the beat that asked. */
+  requestId: z.string(),
+  /** `probe` reads and writes nothing; `enroll` provisions. */
+  mode: z.enum(["probe", "enroll"]),
+  /** The adb-enroll script itself, as the hub has it now. */
+  script: z.string(),
+  /** Probe mode: what to sweep. */
+  addresses: listOf(z.string()).default([]),
+  /**
+   * Enroll mode: one entry per box.
+   *
+   * `serial` empty means "let the box use its own ro.serialno" -- the hub
+   * only overrides when that value is missing, junk, or already taken.
+   */
+  targets: listOf(
+    z.object({
+      address: z.string(),
+      serial: z.string().default(""),
+      token: z.string(),
+    }),
+  ).default([]),
+  /** Enroll mode: where to fetch the Magisk module zip, and what it hashes to. */
+  moduleUrl: z.string().nullish(),
+  moduleSha256: z.string().nullish(),
+  /** What gets written into each box's config as its hub. */
+  serverUrl: z.string().default(""),
+  reboot: z.boolean().default(true),
+  reprovision: z.boolean().default(false),
+  /** Seconds the whole run may take: a sweep is fast, a batch of pushes is not. */
+  timeoutSeconds: z.number().int().positive().default(1800),
+});
+export type BoxAdb = z.infer<typeof boxAdbSchema>;
 
 export const serverMessageSchema = z.discriminatedUnion("type", [
   welcomeSchema,
@@ -520,10 +1004,15 @@ export const serverMessageSchema = z.discriminatedUnion("type", [
   rebootSchema,
   agentUpdateSchema,
   collectLogsSchema,
+  collectScreenshotSchema,
   logStreamStartSchema,
   logStreamStopSchema,
   execCommandSchema,
+  pushConfigSchema,
   pingSchema,
+  hostConvergeSchema,
+  hostBootstrapSchema,
+  boxAdbSchema,
 ]);
 export type ServerMessage = z.infer<typeof serverMessageSchema>;
 

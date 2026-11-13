@@ -16,10 +16,11 @@
     "db:studio": "pnpm --filter @magnemite/db studio",
     "db:seed": "pnpm --filter @magnemite/db seed",
     "format": "prettier --write .",
-    "lint": "prettier --check ."
+    "lint": "prettier --check .",
+    "test": "pnpm --filter @magnemite/hub test"
   },
   "devDependencies": {
-    "prettier": "^3.4.2",
-    "typescript": "^5.7.3"
+    "prettier": "^3.9.10",
+    "typescript": "^5.9.3"
   }
 }

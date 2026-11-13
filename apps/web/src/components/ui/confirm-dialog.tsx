@@ -34,6 +34,7 @@ export function ConfirmDialog({
   confirmLabel = "Remove",
   pendingLabel = "Removing…",
   pending = false,
+  disabled = false,
   error = null,
   onConfirm,
 }: {
@@ -46,6 +47,8 @@ export function ConfirmDialog({
   confirmLabel?: string;
   pendingLabel?: string;
   pending?: boolean;
+  /** Nothing to confirm — every box picked is offline, say. The children say why. */
+  disabled?: boolean;
   error?: string | null;
   onConfirm: () => void;
 }) {
@@ -66,7 +69,12 @@ export function ConfirmDialog({
           <Button type="button" variant="ghost" onClick={() => onOpenChange(false)}>
             Cancel
           </Button>
-          <Button type="button" variant="destructive" disabled={pending} onClick={onConfirm}>
+          <Button
+            type="button"
+            variant="destructive"
+            disabled={pending || disabled}
+            onClick={onConfirm}
+          >
             {pending ? pendingLabel : confirmLabel}
           </Button>
         </DialogFooter>

@@ -1,8 +1,10 @@
+import { CAPABILITY_SCREENSHOT, hasCapability } from "@magnemite/protocol";
 import { prisma } from "@magnemite/db";
 import { requireUser } from "@/lib/session";
 import { compareVersions } from "@/lib/format";
-import { mitmColumns } from "@/lib/mitm-columns";
+import { execMitm, mitmColumns } from "@/lib/mitm-columns";
 import { FleetTable, type DeviceRow, type VersionOption } from "@/components/fleet-table";
+import type { EnrollingRow } from "@/components/enrolling-boxes";
 
 export const dynamic = "force-dynamic";
 
@@ -30,8 +32,15 @@ export default async function FleetPage() {
 
   const [devices, versions] = await Promise.all([
     prisma.device.findMany({
+      // The Fleet table is the boxes. Machines have their own page, and a VPS
+      // in here would show an empty MITM column, no scanner and no version
+      // for every one of them.
+      where: { kind: "BOX" },
       include: {
         group: { select: { id: true, name: true } },
+        // Which machine a container runs on -- `hostId` is that machine's own
+        // Device id -- for the filter that narrows the table to one of them.
+        redroidInstance: { select: { hostId: true } },
         packages: { where: { packageName: { in: [packageName, ...mitmNames] } } },
         jobs: {
           where: { state: { in: [...ACTIVE_OR_QUEUED] } },
@@ -60,10 +69,15 @@ export default async function FleetPage() {
       serial: device.serial,
       online: device.status === "ONLINE",
       approved: device.approved,
+      maintenanceUntil: device.maintenanceUntil?.toISOString() ?? null,
+      beatStaleSince: device.beatStaleSince?.toISOString() ?? null,
       model: [device.manufacturer, device.model].filter(Boolean).join(" ") || null,
       androidVersion: device.androidVersion,
       agentVersion: device.agentVersion,
+      groupId: device.group?.id ?? null,
       groupName: device.group?.name ?? null,
+      hostId: device.redroidInstance?.hostId ?? null,
+      canScreenshot: hasCapability(device.capabilities, CAPABILITY_SCREENSHOT),
       installedVersion: installed.get(packageName)?.versionName ?? null,
       mitmVersions: Object.fromEntries(
         mitmNames.map((name) => {
@@ -117,10 +131,65 @@ export default async function FleetPage() {
   const latestVersion =
     versionOptions.find((option) => option.targetId === target?.id)?.version ?? null;
 
+  // What can relay an adb enrollment, and what is already being enrolled.
+  // Both only matter to the dialog and the banner, so they are read here
+  // rather than threaded through the device query above.
+  const [machines, hosts, enrollingRows] = await Promise.all([
+    prisma.device.findMany({
+      where: { kind: "HOST", status: "ONLINE" },
+      select: { id: true, name: true },
+      orderBy: { name: "asc" },
+    }),
+    // Every machine, online or not, for the filter: a machine that is down is
+    // exactly when somebody wants to see which boxes went with it.
+    prisma.device.findMany({
+      where: { kind: "HOST" },
+      select: { id: true, name: true },
+      orderBy: { name: "asc" },
+    }),
+    // DONE rows are left out: the box is in the table above by then, and a
+    // banner repeating it is noise. A failure stays until it is dismissed.
+    prisma.boxEnroll.findMany({
+      where: { state: { in: ["RUNNING", "WAITING", "FAILED"] } },
+      orderBy: { startedAt: "desc" },
+      take: 20,
+      select: {
+        id: true,
+        address: true,
+        serial: true,
+        state: true,
+        error: true,
+        steps: true,
+        relay: { select: { name: true } },
+      },
+    }),
+  ]);
+
+  const enrolling: EnrollingRow[] = enrollingRows.map((row) => ({
+    id: row.id,
+    address: row.address,
+    serial: row.serial,
+    state: row.state,
+    error: row.error,
+    // `steps` is Json, which is the one shape both providers agree on -- so
+    // it comes back as unknown and is narrowed here rather than trusted.
+    steps: Array.isArray(row.steps) ? (row.steps as EnrollingRow["steps"]) : [],
+    relayName: row.relay?.name ?? null,
+  }));
+
   return (
     <FleetTable
       rows={rows}
-      groups={groups.map((g) => ({ id: g.id, name: g.name }))}
+      machines={machines}
+      hosts={hosts}
+      enrolling={enrolling}
+      groups={groups.map((g) => ({
+        id: g.id,
+        name: g.name,
+        // The Execute dialog's config view shows the config, which is the
+        // MITM's credentials — the same rule the device page follows.
+        mitm: user.role !== "VIEWER" ? execMitm(g) : null,
+      }))}
       versions={versionOptions}
       latestVersion={latestVersion}
       packageName={packageName}

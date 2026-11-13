@@ -11,8 +11,10 @@ import { NumberField, SettingGroup } from "@/components/settings/setting-fields"
 export type HubSettingsRow = {
   maxConcurrentJobs: number;
   jobStallTimeoutSeconds: number;
+  joinInstallDelaySeconds: number;
   heartbeatSeconds: number;
   agentUpdateConcurrency: number;
+  configRewriteConcurrency: number;
   deviceOfflineTimeoutSeconds: number;
 };
 
@@ -98,12 +100,29 @@ export function HubSettingsForm({
               hint="How many boxes may swap their agent binary at once. The whole fleet reconnecting after a hub deploy is when this matters."
             />
             <NumberField
+              name="configRewriteConcurrency"
+              label="Concurrent config rewrites"
+              value={settings.configRewriteConcurrency}
+              min={1}
+              unit="boxes"
+              disabled={disabled}
+              hint="How many boxes may have their MITM config rewritten at once when their workers change. Each one restarts that box's scanner, so this is how much of the fleet stops scanning together."
+            />
+            <NumberField
               name="jobStallTimeoutSeconds"
               label="Job stalls after"
               value={settings.jobStallTimeoutSeconds}
               min={1}
               disabled={disabled}
               hint="Silence from a box mid-job before that job is re-queued to it."
+            />
+            <NumberField
+              name="joinInstallDelaySeconds"
+              label="New boxes settle for"
+              value={settings.joinInstallDelaySeconds}
+              min={0}
+              disabled={disabled}
+              hint="How long after it boots a box waits before its group's join installs start. 0 installs on enrolment."
             />
           </SettingGroup>
 

@@ -6,6 +6,7 @@ import { requireUser } from "@/lib/session";
 import { loadDeviceMetrics } from "@/lib/metrics";
 import { parseRange } from "@/lib/metrics-view";
 import { DeviceMetrics } from "@/components/device-metrics";
+import { DeviceShortcuts } from "@/components/device-shortcuts";
 import { OnlineDot } from "@/components/status";
 
 export const dynamic = "force-dynamic";
@@ -31,7 +32,15 @@ export default async function DeviceMetricsPage({
 
   const device = await prisma.device.findUnique({
     where: { id },
-    select: { id: true, name: true, serial: true, status: true, cpuCount: true },
+    select: {
+      id: true,
+      name: true,
+      serial: true,
+      status: true,
+      cpuCount: true,
+      kind: true,
+      rotomDeviceId: true,
+    },
   });
   if (!device) notFound();
 
@@ -62,6 +71,12 @@ export default async function DeviceMetricsPage({
           </div>
         </div>
       </header>
+
+      {/* A machine's load lives here too, reached from its own page; the keys
+          are for a box's pages, which a machine does not have. */}
+      {device.kind === "BOX" ? (
+        <DeviceShortcuts deviceId={device.id} current="metrics" hasRotom={!!device.rotomDeviceId} />
+      ) : null}
 
       <DeviceMetrics view={view} />
     </div>

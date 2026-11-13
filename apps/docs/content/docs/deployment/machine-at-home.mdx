@@ -1,0 +1,231 @@
+---
+title: Local machine (Mac)
+description: A Mac cannot be a Redroid machine, and the reason is not Magnemite. What to run instead, and the three ways to provision something that lives behind your own router.
+icon: HousePlug
+---
+
+import { Step, Steps } from "fumadocs-ui/components/steps";
+
+A spare Mac is good hardware to point at this, and the hardware is not the
+problem. What stops it is one layer down, and no amount of configuration gets
+past it.
+
+## Why the Mac itself cannot be the machine
+
+Redroid is **Android in a container**, not a virtual machine. Every container
+shares the host's Linux kernel and talks to Android's `binder` driver in it.
+
+macOS has no Linux kernel. There is no `modprobe`, no `/dev/binder`, no
+`/proc` — which is also where this project's agent reads a machine's load,
+memory and CPU from. There is no `darwin` build of the agent either: it is
+cross-compiled for `linux/arm64`, `linux/arm`, `linux/amd64` and
+`windows/amd64`, and nothing else.
+
+Docker Desktop does not rescue it. It runs containers inside a Linux VM of its
+own, whose kernel ships no `binder_linux` and will not take one.
+
+<Callout type="info" title="The arch check passes, which is the confusing part">
+  On Apple Silicon `uname -m` says `arm64`, so the bootstrap's first step — the one that refuses
+  x86_64 — is perfectly happy. It dies at the next one, on `apt-get`, long before it reaches the
+  thing that actually cannot work. A Mac failing this is not a near miss.
+</Callout>
+
+## What to run instead
+
+**A Linux VM on the Mac.** The machine Magnemite manages is the VM; the Mac is
+the hypervisor and Magnemite never knows it exists. This is also Redroid's own
+answer to the question — its maintainer's reply to "how do I run this on an M2"
+is _set up a VM and run it there_
+([redroid-doc#609](https://github.com/remote-android/redroid-doc/issues/609)).
+
+**Parallels Desktop** and **UTM** are both reported working with an Ubuntu arm64
+guest. **OrbStack is not**: its Linux machines are containers on a shared
+LinuxKit kernel, which is the same wall Docker Desktop hits.
+
+What the VM needs:
+
+|                                     |                                                                                                         |
+| ----------------------------------- | ------------------------------------------------------------------------------------------------------- |
+| **arm64**                           | A `linux/arm64` guest. The fleet's bundles carry an `arm64-v8a` split and the agent matches ABI exactly |
+| **Debian or Ubuntu**                | The bootstrap installs with `apt-get`, and gets `binder_linux` from `linux-modules-extra-$(uname -r)`   |
+| **RAM**                             | Whatever you give the VM is what the capacity planner divides up — the Mac's total is invisible to it   |
+| **Reachable once**                  | The hub needs one outbound SSH connection to it, and only for provisioning. See below                   |
+| **Its own IP, or a forwarded port** | A NAT'd VM is fine; a bridged one is simpler                                                            |
+
+Everything after that is the ordinary
+[provisioning](/docs/deployment/redroid-bootstrap) — same form, same script,
+same steps.
+
+## Getting the hub to it, once
+
+This is the only part a machine at home makes harder, and it is harder for
+exactly one moment. **After provisioning, nothing ever connects towards the
+machine again**: the agent dials out and holds the socket, and scaling,
+converging, metrics, exec, logs and re-running the setup all travel back down
+it. No static address, no open port, no dynamic DNS.
+
+Four ways through that one moment, easiest first.
+
+<Steps>
+
+<Step>
+### Nothing at all, when the hub is already on that network
+
+Worth checking first, because at home it is often already true and there is no
+work in it. A self-hosted hub on the same LAN as the Mac reaches a **bridged**
+VM directly — the VM takes an address from your router like any other machine,
+and the hub opens an ordinary connection to it. No router page, no forwarding,
+nothing exposed.
+
+One value has to be right for this, and it is not the SSH side.
+`MAGNEMITE_PUBLIC_URL` is written into the machine's own config as the hub's
+address, so `localhost` makes a machine dial _itself_ — it provisions, reports
+every step fine, and never appears online. Set it to the hub's address **on
+that network** before provisioning anything that is not the hub's own box. The
+hub already listens on every interface, and plain `http://` is accepted and
+becomes `ws://`, so a LAN address needs no certificate.
+
+</Step>
+
+<Step>
+### Or forward a port
+
+On your router, forward a port to the VM's `22`, give the VM a reserved lease
+so the target stops moving, and then **Machines → Add machine** with your
+public address and that port.
+
+Translation is fine: forward external `2222` to the VM's `22`, type `2222`, and
+the firewall still ends up correct. The hardening step does not take the port
+you typed as dictation — it opens the **union** of that port, whatever
+`sshd -T` resolves, and every `Port` line in `sshd_config` and its drop-ins. A
+spare rule costs nothing and a missing one costs the machine, which is the
+whole reason it guesses wide rather than precisely.
+
+</Step>
+
+<Step>
+### Or join them to a mesh
+
+Any path that lets the hub reach the VM's SSH once will do. The hub needs a
+host and a port it can open a TCP connection to, and nothing more — so a mesh
+VPN works, needs no router page, and keeps the address stable when your ISP
+moves you.
+
+The thing to check is that the VPN has a **Linux** client, since it is the VM
+that has to join, not the Mac. Tailscale and NordVPN's Meshnet both do.
+Windows-only meshes — Radmin VPN among them — cannot be used here for that
+reason, however convenient they are between desktops.
+
+A reverse tunnel from the VM is the same idea with no third party: the VM dials
+out and forwards its `22` back, so nothing is opened on your router either. It
+has to stay up for the length of one provisioning and not a minute longer.
+
+</Step>
+
+<Step>
+### Or provision it by hand, with nothing open at all
+
+The one-click form is a driver for a script that does not need it. Copy the
+pieces to the VM and run it there — no inbound connection ever.
+
+From the repo, on the Mac:
+
+```sh
+make agent
+ssh you@vm 'mkdir -p /tmp/magnemite-bootstrap/redroid && chmod 700 /tmp/magnemite-bootstrap'
+scp agent/bin/magnemite-agent-linux-arm64 you@vm:/tmp/magnemite-bootstrap/magnemite-agent
+scp agent/host/bootstrap.sh you@vm:/tmp/magnemite-bootstrap/
+scp agent/redroid/Dockerfile agent/redroid/magnemite-start.sh \
+  agent/redroid/magnemite-root-grant.sh agent/redroid/magnemite.rc \
+  you@vm:/tmp/magnemite-bootstrap/redroid/
+```
+
+No Go on the Mac? Take the binary out of the hub's own image instead, which
+also guarantees it is the build that hub expects:
+
+```sh
+docker cp <hub-container>:/app/agent-bin/magnemite-agent-linux-arm64 .
+```
+
+Then, on the VM, as root:
+
+```sh
+cd /tmp/magnemite-bootstrap
+
+MAGNEMITE_SERVER=https://agents.example.com \
+MAGNEMITE_TOKEN=<host enrollment token> \
+MAGNEMITE_NAME=mac-vm \
+MAGNEMITE_SERIAL=<any stable, unique value> \
+MAGNEMITE_SSH_PORT=22 \
+MAGNEMITE_IMAGE=magnemite/redroid:5 \
+sh ./bootstrap.sh
+```
+
+Two values are worth being careful about. The token comes from **Settings →
+Enrollment** with **Enrols** set to **A machine** — a box token cannot bring a
+machine up, and the only symptom is a device that never grows a Machines page.
+And `MAGNEMITE_SERVER` is the **hub's** URL, which is not the dashboard's.
+
+</Step>
+
+</Steps>
+
+<Callout type="warn" title="Provisioned by hand means adopted by hand">
+  The one-click path remembers what you asked for and applies it the moment the machine dials in: it
+  adopts the machine and brings its containers up. A machine provisioned by hand has no such record,
+  so it enrols, appears under **Machines**, and sits there marked `not adopted` — with **Adopt** and
+  the instance count waiting for you on its page. That is two clicks, and nobody guesses them from a
+  bootstrap that reported every step as fine.
+</Callout>
+
+## The 32-bit half of Android, which the fleet no longer has
+
+Worth reading once even though there is nothing to do about it, because it is
+the reason a Mac was unsupported until recently and the reason the image is
+Android 12 rather than 11.
+
+An arm64 Android normally ships two zygotes, 64-bit and 32-bit, because AOSP
+expects to run 32-bit apps. Whether the 32-bit one can start at all is a
+property of the **CPU**, and Arm has been removing AArch32 generation by
+generation:
+
+| Core               | Machines                                   | AArch32 at EL0 |
+| ------------------ | ------------------------------------------ | -------------- |
+| Neoverse N1        | Ampere Altra, AWS Graviton 2               | yes            |
+| Neoverse V1        | AWS Graviton 3                             | yes            |
+| Neoverse N2        | Alibaba Yitian 710                         | yes            |
+| Neoverse V2        | AWS Graviton 4, Google Axion, NVIDIA Grace | **no**         |
+| Neoverse V3        | AWS Graviton 5                             | **no**         |
+| Apple M1 and later | every Apple Silicon Mac                    | **no**         |
+
+On everything in the bottom half a 32-bit zygote has nothing to run on, and the
+symptom is the nastiest kind: the container runs, the Android in it never
+finishes booting, and the instance sits **running, not enrolled** — which reads
+like a network fault and is not one. It is also invisible to the bootstrap,
+because a Graviton 4 answers `aarch64` exactly like a Graviton 3 does.
+
+**The fleet's image has no 32-bit half.** It is built on
+`redroid/redroid:12.0.0_64only-latest`, which ships `init.zygote64.rc` and no
+`init.zygote64_32.rc`, no `app_process32`, and an empty
+`ro.product.cpu.abilist32`. Nothing is lost: the fleet's `.apkm` bundles carry
+an `arm64-v8a` split and the agent matches ABI exactly, so no 32-bit runtime
+was ever used by anything here.
+
+So a Mac VM runs the same image as every VPS, and so will whatever arm64
+machine you buy next. See
+[the Redroid image](/docs/fleet/redroid) for how it is built — including the
+one behavioural consequence, which is that hiding root is Zygisk and the
+DenyList rather than Delta's MagiskHide.
+
+## Two things that bite a machine at home and not a VPS
+
+- **A Mac that sleeps is a machine that disappears.** `AGENT_OFFLINE` fires on
+  the same timeout a dead VPS gets, and the offline sweep cannot tell the two
+  apart. Put a machine like this in a [group](/docs/fleet/redroid-hosts) of its
+  own and give its monitoring rules a longer threshold, or none. Turning off
+  sleep for the VM's host is the other half.
+- **The VM's memory is the only memory there is.** The capacity line divides
+  what the VM reports, not what the Mac has, and the fleet-wide defaults — 4 GB
+  per container with 2 GB held back — mean a 4 GB VM fits nothing. Give it more
+  than you think, or lower both in **Settings → Tuning** and watch the sentence
+  under the instance count do the arithmetic for you.

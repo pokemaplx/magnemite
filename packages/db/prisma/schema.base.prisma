@@ -4,11 +4,14 @@
 // (generated, gitignored) before every Prisma command — edit this file, not
 // schema.prisma directly.
 
+// TypeScript source in packages/db/generated (gitignored), compiled by
+// whatever imports @magnemite/db — tsup for the hub, Next for the dashboard.
+// There is no query engine binary any more, so no per-platform targets: the
+// query compiler is WebAssembly, and the connection is the driver adapter
+// src/index.ts picks from DB_PROVIDER.
 generator client {
-  provider      = "prisma-client-js"
-  // "native" covers local development on Windows/macOS; the musl target is
-  // what the alpine-based hub and web images actually load.
-  binaryTargets = ["native", "linux-musl-openssl-3.0.x"]
+  provider = "prisma-client"
+  output   = "../generated/prisma"
 }
 
 // ---------------------------------------------------------------------------
@@ -18,6 +21,25 @@ generator client {
 enum DeviceStatus {
   ONLINE
   OFFLINE
+}
+
+/// What sort of machine this agent runs on.
+///
+/// A box is what the fleet is for: hardware on a shelf, or a Redroid
+/// container, which are the same thing to every message in the protocol. A
+/// host is the Linux machine those containers run on -- same agent, same
+/// socket, same metrics, same self-update, but it installs no APKs and takes
+/// no rollouts.
+///
+/// A discriminator rather than a separate model, for the reason the Rotom
+/// integration is twenty columns on this table rather than an entity of its
+/// own: a host does everything `Device` already models, and a parallel entity
+/// would mean a second token, socket, registry, offline sweep, enrollment
+/// route, metric table, prune clock and self-update path, all to describe the
+/// same behaviour. The cost is that every query meaning "a box" has to say so.
+enum DeviceKind {
+  BOX
+  HOST
 }
 
 enum VersionSource {
@@ -49,7 +71,7 @@ enum RolloutMode {
 }
 
 enum RolloutStatus {
-  PENDING
+  PENDING // waiting for the rollout named in `waitsForId` to succeed
   CANARY // canary jobs dispatched
   SOAKING // canary succeeded, waiting out soakMinutes
   RUNNING // full fleet dispatched
@@ -100,7 +122,13 @@ model Device {
   name   String
   /// ro.serialno, or a MAC-derived fallback. Identifies the box across
   /// re-enrollments and IP changes.
-  serial String @unique
+  ///
+  /// On a host this is minted by the bootstrap into /etc/magnemite, and
+  /// deliberately not read from /etc/machine-id: imaging a VPS from a snapshot
+  /// clones that file, and two machines claiming one row would fight over the
+  /// socket forever.
+  serial String     @unique
+  kind   DeviceKind @default(BOX)
 
   manufacturer   String?
   model          String?
@@ -124,6 +152,27 @@ model Device {
 
   status        DeviceStatus @default(OFFLINE)
   lastSeenAt    DateTime?
+  /// Set while we still hold this box's socket and its heartbeats have stopped
+  /// anyway — reachable and mute, which is neither of the two statuses.
+  ///
+  /// There is deliberately no third DeviceStatus. `ONLINE` means "we have a
+  /// socket" in a dozen queries across the hub and the dashboard, and a third
+  /// value would make every one of them decide a question it has no business
+  /// deciding. Null is healthy; the value is the `lastSeenAt` the stall began
+  /// from. Cleared by the next beat, in the update that beat already does.
+  beatStaleSince DateTime?
+  /// When this Android last booted, as a wall-clock instant, from the agent's
+  /// hello. Null on an agent too old to report it.
+  ///
+  /// The discriminator the whole connectivity record rests on, and better than
+  /// uptime for it: uptime is measured when a beat is *generated*, so a slow
+  /// beat under-reports it, while this does not move at all unless the box
+  /// actually restarted.
+  bootedAt DateTime?
+  /// When the agent process started. Same boot with a different value means
+  /// the agent restarted — a self-update, a crash, an init respawn — which is
+  /// a different story from the box rebooting, and was previously a guess.
+  agentStartedAt DateTime?
   /// Address the socket came from. Behind the reverse proxy this is the same
   /// internal 10.x for every box, which is why the UI shows localIp instead.
   publicIp      String?
@@ -142,6 +191,23 @@ model Device {
   cpuCount          Int?
   memTotalBytes     BigInt?
   memAvailableBytes BigInt?
+
+  /// How busy this machine's own CPU is: 0-100 per core, so 250 means two and
+  /// a half cores spent. The same convention as `processStatsSchema`, and the
+  /// one that composes.
+  ///
+  /// The honest version of the load average. A container shares the host's
+  /// /proc/loadavg and there is nothing to scope it to, but its own cgroup
+  /// knows exactly how much CPU time it has spent. On hardware this is
+  /// /proc/stat deltas and means the same thing, which is what lets a TV box
+  /// and a container share one chart instead of needing two.
+  cpuPercent        Float?
+
+  /// Swap, which in practice only a host has and only a host needs: fifty
+  /// workers in a container is where a VPS runs out of RAM, and swap is what
+  /// stands between that and the OOM killer taking a container down mid-scan.
+  swapTotalBytes    BigInt?
+  swapFreeBytes     BigInt?
   /// Degrees Celsius off the box's thermal zones. Null on boxes whose ROM
   /// exposes no sensor at all, which is common on TV hardware — "cannot say"
   /// rather than "cold".
@@ -196,6 +262,23 @@ model Device {
   /// depend on the agent skip it rather than reading its silence as a fault.
   monitorReportedAt DateTime?
 
+  // --- Maintenance ---------------------------------------------------------
+  /// Until when somebody is working on this box by hand. While it is in the
+  /// future the box is left alone by everything the fleet does on its own
+  /// initiative — monitoring rules, auto-rollouts, join installs, agent
+  /// self-updates — and a rollout aimed straight at it is refused saying so,
+  /// rather than queued to land halfway through somebody's repair.
+  ///
+  /// A timestamp rather than a boolean, because the failure mode of a flag is
+  /// a box that quietly stops being watched: somebody sets it, forgets, and
+  /// six months later there is one box no rule has ever fired on. This one
+  /// runs out on its own.
+  ///
+  /// The diagnostics are deliberately *not* blocked — logs, live logs,
+  /// Execute, screenshots and reboot are the tools somebody in maintenance is
+  /// holding, and taking them away would be taking away the point.
+  maintenanceUntil DateTime?
+
   notes   String?
   groupId String?
   group   DeviceGroup? @relation(fields: [groupId], references: [id], onDelete: SetNull)
@@ -204,17 +287,41 @@ model Device {
   jobs           Job[]
   agentUpdates   AgentUpdate[]
   logBundles     DeviceLogBundle[]
+  screenshots      DeviceScreenshot[]
+  connectionEvents DeviceConnectionEvent[]
   metricSamples  DeviceMetricSample[]
   packageSamples DevicePackageMetricSample[]
   rotomSamples   RotomSample[]
   monitorStates  MonitorState[]
   monitorEvents  MonitorEvent[]
 
+  /// Set only on a HOST, and only once its agent has enrolled.
+  redroidHost     RedroidHost?
+  /// Set on a BOX that is a Redroid container, once the instance row the hub
+  /// minted its serial for has been claimed by an enrollment.
+  redroidInstance RedroidInstance?
+  /// The provisioning run that produced this machine, if the hub did it.
+  redroidBootstraps RedroidBootstrap[]
+  /// The adb run that enrolled this box, if the hub did it.
+  boxEnrolls        BoxEnroll[]        @relation("BoxEnrollDevice")
+  /// Boxes this machine ran adb against on the hub's behalf. Only ever set on
+  /// a HOST.
+  boxEnrollRelays   BoxEnroll[]        @relation("BoxEnrollRelay")
+
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
   @@index([status])
   @@index([groupId])
+  /// Every fleet-wide query is "the boxes, by state". Leading on kind keeps
+  /// the hosts out of it without a second scan.
+  @@index([kind, status])
+  /// Read on every scheduler tick and every monitor pass, always as "which
+  /// boxes are parked right now". Declared here rather than left as a
+  /// hand-written partial index in the migration: Prisma compares the database
+  /// to this file, so an index it cannot see is an index the next
+  /// `migrate dev` writes a migration to drop.
+  @@index([maintenanceUntil])
 }
 
 /// One attempt at swapping the agent binary on a box.
@@ -271,13 +378,71 @@ model DeviceLogBundle {
   requestedAt   DateTime  @default(now())
   completedAt   DateTime?
 
+  /// Who or what asked for it. The prune keeps the newest few *per reason*, so
+  /// a run of automatic captures cannot evict the bundle an operator asked for
+  /// — which is exactly what would happen with one shared ceiling.
+  reason DeviceLogBundleReason @default(OPERATOR)
+  /// The episode of lost contact this was collected to explain, when it was
+  /// collected for one.
+  ///
+  /// Set at creation rather than on success, so a capture that *failed* still
+  /// shows against the episode: "we asked and the box could not answer" is
+  /// more useful than a blank. SetNull rather than Cascade because the bundle
+  /// is still a real file once the episode has been pruned.
+  connectionEventId Int?
+  connectionEvent   DeviceConnectionEvent? @relation(fields: [connectionEventId], references: [id], onDelete: SetNull)
+
   @@index([deviceId, requestedAt])
+  @@index([connectionEventId])
+}
+
+enum DeviceLogBundleReason {
+  OPERATOR // somebody pressed the button
+  AUTO_RECOVERY // a box came back and the hub grabbed the window automatically
 }
 
 enum DeviceLogBundleState {
   PENDING // asked for, waiting on the box
   READY // uploaded and downloadable
   FAILED // the agent could not collect it, or never answered
+}
+
+/// One `screencap` off a box, on request.
+///
+/// What it answers is the question no reading can: a box can be online,
+/// heartbeating, with the scanner process alive, and sitting on a dialog
+/// nobody has read. `APP_NOT_FOREGROUND` says the launcher owns the screen;
+/// this says *what is on it*.
+///
+/// Shaped like `DeviceLogBundle` and uploaded the same way, over HTTP with the
+/// box's own device token, because the socket caps a frame at 1 MB and a 1080p
+/// PNG is regularly more than that. Kept few and briefly: this is a look at a
+/// box, not an archive of what it has ever shown.
+model DeviceScreenshot {
+  id       String @id @default(cuid())
+  deviceId String
+  device   Device @relation(fields: [deviceId], references: [id], onDelete: Cascade)
+
+  state DeviceScreenshotState @default(PENDING)
+  /// Path inside ARTIFACT_DIR. Null until the upload lands.
+  path      String?
+  sizeBytes BigInt?
+  /// Why it never arrived. Null unless state is FAILED.
+  error     String?
+
+  /// Who asked. An id rather than a relation, for the same reason a log
+  /// bundle's is: the image outliving the account is not a reason to lose it.
+  requestedById String?
+  requestedAt   DateTime  @default(now())
+  completedAt   DateTime?
+
+  @@index([deviceId, requestedAt])
+}
+
+enum DeviceScreenshotState {
+  PENDING // asked for, waiting on the box
+  READY // uploaded and viewable
+  FAILED // the box could not capture it, or never answered
 }
 
 /// One point on a box's health timeline.
@@ -315,6 +480,12 @@ model DeviceMetricSample {
   totalBytes        BigInt?
   cpuTempC          Float?
   batteryTempC      Float?
+  /// Share of a single core summed over the machine, as on `Device`. This is
+  /// the series a container actually has -- its load average is the host's and
+  /// says nothing about it.
+  cpuPercent        Float?
+  swapTotalBytes    BigInt?
+  swapFreeBytes     BigInt?
 
   /// The chart's own query: one box, one time window.
   @@index([deviceId, at])
@@ -445,11 +616,540 @@ model DeviceGroup {
   /// aegis config is longer than that.
   mitmConfig      String? @db.Text
 
-  devices      Device[]
-  monitorRules MonitorRule[]
+  devices           Device[]
+  monitorRules      MonitorRule[]
+  /// Machines whose new containers enroll into this group.
+  redroidHosts      RedroidHost[]
+  /// Machines still being provisioned that will enroll their containers here.
+  redroidBootstraps RedroidBootstrap[]
+  /// Hardware boxes still being enrolled over adb that will land here.
+  boxEnrolls        BoxEnroll[]
+  /// What a box gets installed the moment it joins this group.
+  joinInstalls      GroupJoinInstall[]
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
+}
+
+/// A build every new box in a group is given, before anybody asks.
+///
+/// The gap this closes: a container that has just come up, or a box somebody
+/// has just flashed, is in its group with nothing on it. Everything the fleet
+/// does to a box assumes the scanner and its MITM are already there, so the
+/// first thing after every scale-up was a trip to Manual deploy to install the
+/// same two builds on the same kind of box again.
+///
+/// **Empty on every group, and nothing happens until an operator fills it.**
+/// This creates rollouts with nobody pressing anything, which is the one shape
+/// of feature this repo is most careful about -- an upgrade that starts
+/// installing on its own is the version nobody asked for.
+///
+/// A build and not a package, deliberately. "Install whatever is newest" is
+/// what a rollout is for, and answering it here would mean every new box
+/// becoming the first to try a version nobody chose. This answers the narrower
+/// question -- what does a box need before it is any use -- and that is a
+/// build somebody picked and has already seen work.
+///
+/// There is no ordering field. Each build becomes its own rollout, a box takes
+/// one install at a time and the scheduler sends the oldest job first, so they
+/// run in the order they were added -- except the group's MITM, which
+/// `queueJoinInstalls` always puts last, so its config and the hook that
+/// starts it land on a box that already has the game.
+model GroupJoinInstall {
+  id      String      @id @default(cuid())
+  groupId String
+  group   DeviceGroup @relation(fields: [groupId], references: [id], onDelete: Cascade)
+
+  appVersionId String
+  appVersion   AppVersion @relation(fields: [appVersionId], references: [id], onDelete: Cascade)
+
+  createdAt DateTime @default(now())
+
+  /// One row per build per group: adding the same build twice is the same
+  /// instruction, not two.
+  @@unique([groupId, appVersionId])
+  @@index([appVersionId])
+}
+
+// ---------------------------------------------------------------------------
+// Redroid hosts
+// ---------------------------------------------------------------------------
+
+/// A Linux machine running Redroid containers.
+///
+/// Keyed on the Device its agent enrolled as, because a host with no agent is
+/// a machine nobody can reach and there is nothing to record about it. The
+/// machine's own readings -- load, memory, swap, disk, CPU -- live on that
+/// Device like any other box's, which is the whole point of `DeviceKind`:
+/// one metrics pipeline, one chart component, one prune.
+///
+/// What is left here is only what a box has no use for. Not a DeviceGroup
+/// either: a group is a logical site -- its own comment says "two sites on two
+/// Rotom instances are two groups" -- and a site can span three VPSes while
+/// one VPS can hold two sites. This is the physical thing.
+model RedroidHost {
+  deviceId String @id
+  device   Device @relation(fields: [deviceId], references: [id], onDelete: Cascade)
+
+  // --- what the machine said about itself -----------------------------------
+  // Facts with no Device equivalent. The readings -- CPU, memory, swap, disk
+  // -- are on the Device like any box's; these are the things only a Linux
+  // host has.
+  /// `uname -m`. Recorded rather than assumed: arm64 is a hard requirement
+  /// (the fleet's bundles carry an arm64-v8a split and the agent matches the
+  /// ABI exactly), the bootstrap refuses anything else, and this is the
+  /// evidence of what it found.
+  arch          String?
+  /// `uname -r`. The one fact behind the trap that costs a whole machine:
+  /// `linux-modules-extra` is per kernel version, so an apt upgrade that
+  /// installs a new kernel leaves binder behind and every container fails to
+  /// come up after the reboot. Seeing the kernel move is how that is spotted.
+  kernel        String?
+  dockerVersion String?
+  /// Whether the binder devices Android needs were actually present, as
+  /// opposed to the modprobe having been run. Redroid's own docs disagree
+  /// about whether a modern kernel needs the module at all, so the bootstrap
+  /// checks the end state and this records it.
+  binderOk      Boolean?
+
+  /// `docker compose -p` and the directory the rendered file is written to.
+  /// Everything the hub renders lives under one project name, which is what
+  /// makes --remove-orphans safe: it can only ever remove containers
+  /// Magnemite put there.
+  project String @default("magnemite-redroid")
+  dir     String @default("/etc/magnemite/redroid")
+
+  /// sha256 of the compose file this machine last converged, as the host read
+  /// it back off its own disk -- so it says what is on the machine rather than
+  /// what the hub meant, the same way a written MITM config does.
+  ///
+  /// Null until the first converge. Comparing a fresh render against this is
+  /// how the hub decides a converge is needed at all, which is why the render
+  /// has to be a pure function of the instance rows: anything conditional in
+  /// it turns a reconnect into a container recreate.
+  appliedSha256 String?
+  appliedAt     DateTime?
+  /// Set when a converge is dispatched and cleared when its result lands.
+  ///
+  /// A converge is minutes of image pulls and Android boots, so it is not
+  /// awaited over an HTTP request -- the dashboard would hold a connection
+  /// open for half an hour. This is what lets the page say "converging" rather
+  /// than looking idle while the machine works, and a value left behind by a
+  /// hub restart is how a converge that never reported is spotted.
+  convergingSince DateTime?
+  /// Set when a converge was asked for while the machine was offline, and
+  /// cleared once one is sent. What "it will converge when it reconnects" is
+  /// kept to: the next hello sends it.
+  ///
+  /// A flag rather than "the rows changed", deliberately. A hub deploy that
+  /// changes the rendered compose file -- a new image, a template edit -- must
+  /// not have every machine recreate its containers on reconnect, which is
+  /// what converging whenever the file differs would do. Only a converge
+  /// somebody asked for is owed.
+  convergeOwedAt  DateTime?
+
+  /// Whether this machine's existing containers have been imported as
+  /// instance rows. Nothing is converged before that: a machine already
+  /// running the hand-written compose file has containers holding real device
+  /// identities, and an empty desired set would make every one of them an
+  /// orphan for --remove-orphans to delete.
+  adoptedAt DateTime?
+
+  /// Last failure from a bootstrap or a converge, for the dashboard to show.
+  /// Capped by the caller well under 64KB: @db.Text is TEXT on MariaDB, which
+  /// is 65,535 bytes and errors rather than truncating, and docker's output on
+  /// a cold image build is far larger than that.
+  lastError   String?   @db.Text
+  lastErrorAt DateTime?
+
+  /// What re-running the bootstrap last reported, one entry per `::step` line.
+  ///
+  /// Json for the reason RedroidBootstrap.steps is: a short fixed list written
+  /// once, and the one shape that works on both providers. Null on a machine
+  /// that has never been asked -- which is every machine provisioned before
+  /// this existed, and is why the page says "never" rather than "no steps".
+  bootstrapSteps  Json?
+  bootstrapRanAt  DateTime?
+  bootstrapOk     Boolean?
+
+  // --- defaults every instance on this machine inherits --------------------
+  // Here as well as in Settings because a 32GB Ampere and an 8GB VPS want
+  // different answers, and a box wants neither. Null falls back to the
+  // `redroid.` settings group.
+  /// What each container is capped at. This is the one field that decides
+  /// whether a box reports its own RAM or the machine's, so the host reports
+  /// the limit docker actually applied and the hub flags a mismatch.
+  memLimitBytes BigInt?
+  cpuset        String?
+  /// androidboot.redroid_gpu_mode. "guest" is software rendering.
+  gpuMode       String?
+  /// Workers each container here is configured for, unless it has its own.
+  ///
+  /// The middle of `instance ?? host ?? settings`, the same chain the memory
+  /// ceiling follows. Null follows `redroid.workersPerInstance`, so changing
+  /// that setting moves every machine that never chose a number of its own --
+  /// which a copy written onto each row at scale time never did.
+  workers       Int?
+  /// Overrides the image tag every instance runs. Pinned to the Redroid base
+  /// version, never to the agent's: `make redroid` tags from the agent line,
+  /// so tying the rendered file to that would move the tag on every agent
+  /// release and make compose recreate every container on the machine -- a
+  /// full Android cold boot each, to deliver a binary the containers would
+  /// have self-updated in seconds.
+  image         String?
+
+  /// The group a container on this machine enrolls into.
+  ///
+  /// Enrollment otherwise hard-codes `default`, and a box in the wrong group
+  /// is handed the wrong MITM config by the first rollout that reaches it --
+  /// with the sha256 read-back faithfully confirming the wrong file. Setting
+  /// the site once per machine is what makes a new instance arrive already
+  /// configured for where it actually is.
+  ///
+  /// Only a default: after enrolling, a box's group is its own and moves with
+  /// the usual controls.
+  defaultGroupId String?
+  defaultGroup   DeviceGroup? @relation(fields: [defaultGroupId], references: [id], onDelete: SetNull)
+
+  /// What a container on this machine is called when it enrols, with `{host}`,
+  /// `{index}` and `{serial}` filled in.
+  ///
+  /// Null uses what the box says about itself, which on Redroid is the
+  /// manufacturer and model Android reports -- identical on every box in the
+  /// fleet -- plus six characters of serial.
+  ///
+  /// Only a default, and only at creation: a box renamed by hand keeps its
+  /// name, and changing this never renames a box that already enrolled.
+  nameTemplate String?
+
+  /// This machine's own adb public key, reported the first time it relays an
+  /// enrollment.
+  ///
+  /// Each machine keeps its own rather than sharing the hub's: a key a box has
+  /// trusted is, with `su`, a root shell on that box, and a relay can be a
+  /// machine in somebody's living room. The dashboard offers the hub's key and
+  /// every machine's as one `adb_keys` file, which is the format
+  /// /data/misc/adb/adb_keys wants -- so preseeding a golden image is still
+  /// one file, and revoking a machine is not a fleet-wide re-pairing.
+  adbPublicKey String? @db.Text
+
+  instances RedroidInstance[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  /// Declared rather than left to the foreign key: Postgres does not index one
+  /// on its own, and `Device.groupId` next door sets the same precedent.
+  @@index([defaultGroupId])
+}
+
+/// One Redroid container on one host.
+///
+/// A row exists before the container does, and before the Device it will
+/// become: the hub mints the serial here, the renderer writes it into the
+/// compose file, and the agent inside the container enrolls with it. That
+/// ordering is what makes a container's identity survive being recreated.
+model RedroidInstance {
+  id     String      @id @default(cuid())
+  hostId String
+  host   RedroidHost @relation(fields: [hostId], references: [deviceId], onDelete: Cascade)
+
+  /// Stable, sparse, and never renumbered. Removing instance 3 of ten leaves
+  /// a gap and the next scale-up refills it; closing the gap would rewrite
+  /// serials, and a changed serial is a new box with no history.
+  index Int
+
+  /// The serial the container reports, minted once and never changed.
+  ///
+  /// Derived from the host's immutable id rather than its name, so renaming a
+  /// machine does not silently re-identify every box on it. Rendered as
+  /// `ro.magnemite.serial`, which `magnemite-start.sh` reads -- the namespaced
+  /// property, not `ro.serialno`, because it cannot collide with whatever the
+  /// base image sets.
+  serial String @unique
+
+  /// The Device this container enrolled as, once it has. Null is the state
+  /// worth reading: a container that is running and has never enrolled is the
+  /// most common failure while setting a machine up, and without this field
+  /// nothing can tell it apart from one that is not running at all.
+  deviceId String? @unique
+  device   Device? @relation(fields: [deviceId], references: [id], onDelete: SetNull)
+
+  /// False is the desired state "gone". Kept as a row rather than deleted so
+  /// re-adding the index brings the same box back; "forget" is what deletes.
+  present Boolean @default(true)
+
+  /// This one container's own worker count, when it differs from its
+  /// machine's. Null inherits `RedroidHost.workers`, then Settings.
+  ///
+  /// The resolved number is what reaches the group's MITM config as
+  /// {{device.workers}}. Magnemite owning it is what makes a machine's
+  /// capacity addable-up, and 50 is the per-container ceiling the scanners
+  /// impose.
+  workers Int?
+
+  /// The workers this box's MITM config was last written with -- by an
+  /// install that carried it, or a rewrite. When the resolved number moves
+  /// away from it, the hub rewrites the config by itself
+  /// (`services/workersConfig.ts`); the difference is the whole signal.
+  ///
+  /// Null is "nothing Magnemite wrote is on the box", and is left alone: a
+  /// box that has not had its config yet gets it from the install that brings
+  /// its MITM, and pushing one ahead of that would run the group's hooks
+  /// against a scanner that is not there. Reset by an enrolment, because a
+  /// box only enrols again when its /data -- the config with it -- is gone.
+  configWorkers Int?
+
+  /// Per-instance overrides of the host's defaults. Null inherits.
+  memLimitBytes BigInt?
+  cpuset        String?
+  image         String?
+
+  // --- what the host last saw -----------------------------------------------
+  /// docker's own state word: running, exited, restarting, created. Null
+  /// before the first report. Current state, not history -- no process inside
+  /// the container can see it, and it is not worth a time series.
+  containerState String?
+  /// Climbing restart counts are what distinguish a crash-looping instance
+  /// from an idle one.
+  restartCount   Int?
+  /// The memory limit docker reports actually applied, against which
+  /// `memLimitBytes` is checked. A silent miss here would have every box on
+  /// the machine reporting the host's total RAM.
+  appliedMemLimitBytes BigInt?
+  reportedAt     DateTime?
+
+  /// When this instance was last asked for: created, or brought back after a
+  /// removal. What the dashboard times its setup from -- `createdAt` is the
+  /// row's, and a revived row keeps the one it had the first time. Null on
+  /// rows from before it existed, which read as long since set up.
+  requestedAt DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  /// The renderer's own query, and what keeps an index unique per machine.
+  @@unique([hostId, index])
+  @@index([hostId, present])
+}
+
+/// How a bootstrap went.
+///
+/// WAITING is the state that matters and the one a simpler enum would miss:
+/// the SSH half finished and the machine has not dialled in yet. A bootstrap
+/// may have installed a kernel module that needs a reboot, after which SSH is
+/// gone and the only proof left is the socket -- so "the script exited zero"
+/// is not success, and saying so would hide the one failure that matters.
+enum RedroidBootstrapState {
+  RUNNING
+  WAITING
+  DONE
+  FAILED
+}
+
+/// A machine being provisioned, before it is a Device.
+///
+/// It needs a row of its own because of an ordering problem: the hub keys a
+/// machine on its serial, the bootstrap has to write that serial into
+/// /etc/magnemite/host.json, and none of it can hang off a `Device` that will
+/// not exist until the machine enrols with the serial this row minted.
+///
+/// It is also where the bootstrap's progress lives, which is the other half of
+/// why it exists: a bootstrap is minutes of apt, Docker, kernel modules and an
+/// image pull, and one that fails on the fourth step has to say which.
+///
+/// No credential is stored. The SSH access is used once, held in memory for the
+/// duration of the run, and dropped -- which is the whole reason this feature
+/// needs no secret store. A retry asks for it again.
+model RedroidBootstrap {
+  id String @id @default(cuid())
+
+  /// What the machine will be called, and the serial it will enrol under.
+  /// Minted here rather than on the machine: /etc/machine-id is cloned by a VPS
+  /// snapshot, and two machines claiming one row would fight over the socket.
+  name   String
+  serial String @unique
+
+  /// Where it was reached, for the operator to recognise the row by. Not a
+  /// credential, and not used again after the run.
+  address String
+
+  /// What to bring the machine to once it enrols. Applied on first contact,
+  /// which is what makes this one action rather than four.
+  desiredInstances Int  @default(0)
+  desiredWorkers   Int?
+
+  /// The site those first containers enrol into.
+  ///
+  /// Parked here rather than set on the machine afterwards, because there is no
+  /// afterwards to set it in: the containers come up on first contact and their
+  /// boxes enrol in the same breath. By the time the machine's page can be
+  /// opened they are already in `default`, already handed that group's MITM
+  /// config by the first rollout to reach them, and already needing to be moved
+  /// by hand -- which is the work this field exists to remove.
+  ///
+  /// Null means the same as it means on a machine: no group chosen, so
+  /// enrolment falls back to `default`.
+  desiredGroupId String?
+  desiredGroup   DeviceGroup? @relation(fields: [desiredGroupId], references: [id], onDelete: SetNull)
+
+  /// What those first containers are called, carried for the same reason as
+  /// the group above: they enrol as the run ends, and a name chosen afterwards
+  /// is a rename of boxes that already exist rather than a default.
+  desiredNameTemplate String?
+
+  state RedroidBootstrapState @default(RUNNING)
+
+  /// One entry per `::step` line the script printed: its name, whether it
+  /// passed, and its detail. A Json array rather than a child table because it
+  /// is a short fixed list written once, and because `Json` is the one shape
+  /// that works on both providers.
+  steps Json?
+
+  /// Why it failed, capped by the caller well under MariaDB's 64 KB TEXT.
+  error String? @db.Text
+
+  /// Set when the machine finally enrols, which is what closes this out.
+  deviceId String?
+  device   Device? @relation(fields: [deviceId], references: [id], onDelete: SetNull)
+
+  startedAt  DateTime  @default(now())
+  finishedAt DateTime?
+
+  @@index([state])
+  @@index([deviceId])
+  /// Declared rather than left to the foreign key, for the reason
+  /// `RedroidHost.defaultGroupId` says: Postgres does not index one on its own.
+  @@index([desiredGroupId])
+}
+
+// ---------------------------------------------------------------------------
+// Enrolling hardware boxes over adb
+// ---------------------------------------------------------------------------
+
+/// The one adb identity the hub presents to a box.
+///
+/// A single row. It exists because the public half is what the "Always allow
+/// from this computer" dialog on the TV remembers: lose the key and every box
+/// in the fleet asks again, in a living room, where nobody is to tap it.
+///
+/// In the database rather than on disk, and that is not arbitrary. The obvious
+/// home is ARTIFACT_DIR, which is already a volume -- but that volume is
+/// *served*: `/files/*` rejects a path only when its basename starts with a
+/// dot, so `/files/adb/.android/adbkey` has basename `adbkey` and would be
+/// handed to any approved device token that asked. An adb key plus `su` is a
+/// root shell on every box that trusts it.
+///
+/// A relay machine never gets this key -- it generates and keeps its own, in
+/// `RedroidHost.adbPublicKey`. One compromised machine in somebody's living
+/// room must not be root on the whole fleet.
+model AdbIdentity {
+  id String @id @default("singleton")
+
+  privateKeyPem String @db.Text
+  publicKey     String @db.Text
+
+  createdAt DateTime @default(now())
+}
+
+/// How an adb enrollment went. The states mean what `RedroidBootstrapState`'s
+/// do, for the same reason: adb finishing proves the box was *provisioned*,
+/// not that it works. It still has to reboot and dial in, and WAITING is that
+/// gap.
+enum BoxEnrollState {
+  RUNNING
+  WAITING
+  DONE
+  FAILED
+}
+
+/// Where the serial in `BoxEnroll.serial` came from.
+///
+/// Worth recording rather than inferring, because the two have different
+/// failure modes months later: a REPORTED serial can turn out to be shared
+/// with another box off a reference firmware, and a MINTED one is only in the
+/// fleet because this row put it there.
+enum BoxSerialSource {
+  REPORTED
+  MINTED
+}
+
+/// A hardware box being enrolled over adb, before it is a Device.
+///
+/// The `RedroidBootstrap` of boxes, and the shape is deliberately the same.
+/// One row per box, not per batch -- the row is claimed by serial when the box
+/// dials in, so a batch of twelve is twelve rows that `batchId` groups for the
+/// page.
+///
+/// No credential is stored. adb needs none: the hub's key is the credential
+/// and it lives in `AdbIdentity`.
+model BoxEnroll {
+  id String @id @default(cuid())
+
+  /// One per submit, so the fleet page can show "eight boxes being enrolled"
+  /// rather than eight unrelated rows.
+  batchId String?
+
+  /// `ip:port`, for the operator to recognise the row by. Not reachable again
+  /// after the run and not used as an identity -- a box behind DHCP will have
+  /// moved by the time anybody reads this.
+  address String
+
+  /// The serial the box will enrol under.
+  ///
+  /// Deliberately **not** unique, unlike `RedroidBootstrap.serial`. That one
+  /// can be, because the host flow mints a fresh random serial every run. This
+  /// one is usually `ro.serialno`, which is the *same value* on a retry -- so
+  /// a unique constraint would turn a second attempt into a row that cannot be
+  /// created, surfacing as "could not start" with nothing to explain it. The
+  /// claim reads the newest live row instead.
+  serial       String
+  serialSource BoxSerialSource @default(REPORTED)
+
+  /// What to call it, applied at creation the way a Redroid name template is.
+  ///
+  /// Carried here rather than written into the box's config.json, which would
+  /// look equivalent and is not: enrolment does `name: body.name ?? existing.name`,
+  /// so a name baked into the box would silently undo every later rename, on
+  /// every re-enrolment.
+  desiredName String?
+
+  /// The site it enrols into. Same reasoning as `RedroidBootstrap.desiredGroupId`:
+  /// set afterwards, the box is already in `default` and already holding that
+  /// group's MITM config.
+  desiredGroupId String?
+  desiredGroup   DeviceGroup? @relation(fields: [desiredGroupId], references: [id], onDelete: SetNull)
+
+  /// The machine that ran adb for this box, when the hub could not reach it
+  /// itself. Null means the hub dialled directly.
+  relayDeviceId String?
+  relay         Device? @relation("BoxEnrollRelay", fields: [relayDeviceId], references: [id], onDelete: SetNull)
+
+  state BoxEnrollState @default(RUNNING)
+
+  /// One entry per `::step` line, as on a bootstrap and for the same reason.
+  steps Json?
+
+  /// Why it failed, capped by the caller well under MariaDB's 64 KB TEXT.
+  error String? @db.Text
+
+  /// Set when the box finally enrols, which is what closes this out.
+  deviceId String?
+  device   Device? @relation("BoxEnrollDevice", fields: [deviceId], references: [id], onDelete: SetNull)
+
+  startedAt  DateTime  @default(now())
+  finishedAt DateTime?
+
+  @@index([state])
+  /// How the claim finds its row on enrolment, which happens once per box and
+  /// always by serial.
+  @@index([serial])
+  @@index([batchId])
+  @@index([deviceId])
+  /// Declared rather than left to the foreign key, for the reason
+  /// `RedroidHost.defaultGroupId` says.
+  @@index([desiredGroupId])
+  @@index([relayDeviceId])
 }
 
 // ---------------------------------------------------------------------------
@@ -593,6 +1293,8 @@ model AppVersion {
   discoveredAt DateTime  @default(now())
 
   rollouts Rollout[]
+  /// Groups that hand this build to every box that joins them.
+  joinGroups GroupJoinInstall[]
 
   /// One row per build, whichever feed happened to list it first. Two feeds
   /// mirroring the same release are the same thing to everyone downstream —
@@ -636,6 +1338,20 @@ model Rollout {
   preInstallHook  String?
   postInstallHook String?
 
+  /// The MITM config for this rollout only, overriding the one on the device's
+  /// group. The same idea as the hooks above and for the same reason: a deploy
+  /// often needs one value different for one set of boxes, and editing the
+  /// group to get it changes every box in that group -- including the ones
+  /// this deploy is not touching.
+  ///
+  /// The body only. The path stays the group's, because that is where the
+  /// scanner reads it and it does not vary with the deploy -- which also means
+  /// a box whose group has no config path still takes none, override or not.
+  ///
+  /// Text for the reason `DeviceGroup.mitmConfig` is: a bare String is
+  /// VARCHAR(191) on MariaDB, and these are JSON documents.
+  mitmConfig String? @db.Text
+
   /// Which of the resolved hooks this rollout is allowed to run.
   ///
   /// Null on `preInstallHook` already means "fall back to the group", so there
@@ -659,6 +1375,18 @@ model Rollout {
   createdById String?
   createdBy   User?   @relation(fields: [createdById], references: [id], onDelete: SetNull)
 
+  /// Another rollout this one waits for. While that one has not finished with
+  /// every job a success, this one sits PENDING and the scheduler leaves its
+  /// jobs alone; the moment it has, this one starts.
+  ///
+  /// What a box joining its group installs in order: the game, and only once
+  /// it is on the box, the MITM -- whose config and post-install hook want the
+  /// game already there. A failed prerequisite leaves this waiting rather than
+  /// going ahead without it, and retrying that job is what releases it.
+  waitsForId String?
+  waitsFor   Rollout?  @relation("RolloutWaitsFor", fields: [waitsForId], references: [id], onDelete: SetNull)
+  waiting    Rollout[] @relation("RolloutWaitsFor")
+
   createdAt      DateTime  @default(now())
   startedAt      DateTime?
   canaryPassedAt DateTime?
@@ -667,6 +1395,7 @@ model Rollout {
   jobs Job[]
 
   @@index([status])
+  @@index([waitsForId])
 }
 
 model Job {
@@ -688,6 +1417,13 @@ model Job {
   /// True when the install had to fall back to uninstall, or forceClean was
   /// set. Surfaced in the UI because it means the box lost its app data.
   dataWiped   Boolean      @default(false)
+
+  /// The workers the MITM config sent with this attempt said, for a Redroid
+  /// box. Copied onto its instance's `configWorkers` only when the job
+  /// succeeds -- the agent fails a job whose config did not land -- so a
+  /// failed install never claims a config the box does not have. Null when no
+  /// config went with it.
+  configWorkers Int?
 
   fromVersion String?
   toVersion   String
@@ -735,7 +1471,19 @@ model EnrollmentToken {
   /// First 8 chars of the plaintext, so the UI can tell tokens apart.
   prefix    String
 
+  /// What this token may enrol. A token minted for boxes cannot bring up a
+  /// host and vice versa, because the two are handed out in completely
+  /// different places: a box token is flashed into a module zip by a person, a
+  /// host token is minted per machine and written into that machine's compose
+  /// file.
+  kind DeviceKind @default(BOX)
+
   /// Devices enrolling with this token skip manual approval.
+  ///
+  /// Forced true for HOST, and the form offers no switch for it: `/internal/authz`
+  /// refuses an unapproved device, so a host that enrolled unapproved would
+  /// get a bare 401 from the edge on its first self-update, with nothing
+  /// anywhere to say why.
   autoApprove Boolean   @default(true)
   maxUses     Int?
   uses        Int       @default(0)
@@ -792,12 +1540,14 @@ model Session {
 }
 
 model Account {
-  id         String @id @default(cuid())
-  /// Namespaces the identity so an OAuth provider id can never collide with a
-  /// local one. Credential accounts use "local:credential"
-  /// (`CREDENTIAL_ISSUER` in @magnemite/db) — sign-in looks the account up by
-  /// this, so a row without it simply will not authenticate.
-  issuer     String
+  id         String  @id @default(cuid())
+  /// Dead. Better Auth 1.7.0–1.7.2 required it and looked accounts up by
+  /// (issuer, accountId); 1.7.3 went back to (providerId, accountId) and
+  /// refuses to start while a column it never writes is still required. Kept
+  /// nullable rather than dropped so a hub or dashboard still on the old build
+  /// mid-deploy — which writes it and selects it — keeps working; drop it in a
+  /// later migration.
+  issuer     String?
   accountId  String
   providerId String
 
@@ -816,7 +1566,6 @@ model Account {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  @@unique([issuer, accountId])
   @@index([userId])
   @@map("account")
 }
@@ -868,6 +1617,7 @@ model Setting {
 /// is unknown, never a fault.
 enum MonitorSignal {
   AGENT_OFFLINE // the socket has been gone longer than the alert delay
+  AGENT_STALLED // the socket is open and the beats have stopped
   SERVICE_DOWN // a tracked package has no processes on the box
   APP_NOT_FOREGROUND // something else owns the screen
   APP_ANR // the package is sitting on an ANR dialog
@@ -876,6 +1626,32 @@ enum MonitorSignal {
   ROTOM_DISCONNECTED // Rotom stopped seeing the box, or has no workers on it
   ROTOM_NOT_SCANNING // Rotom has the box and no worker is allocated on it
   ROTOM_IDLE // a worker is allocated and making no requests at all
+
+  // --- the box's own resources ---------------------------------------------
+  // Read off the columns the agent already fills on every heartbeat, exactly
+  // as the host three below are. No probe, nothing new on the wire, and they
+  // work on every box in the fleet the moment a rule exists -- including
+  // agents older than monitoring itself, because these readings predate it.
+  //
+  // The two floors are honest inside a container: `sys.Memory` reads the
+  // cgroup rather than /proc/meminfo, so ten boxes on one machine do not all
+  // report the machine's RAM. A container with *no* memory limit set is the
+  // exception, and falls back to the host's figure -- which is why the form
+  // says so rather than leaving a rule that can never fire.
+  DEVICE_MEMORY_LOW // available memory under the rule's percentage floor
+  DEVICE_STORAGE_LOW // free space on /data under that floor
+  DEVICE_TEMP_HIGH // the SoC over the rule's ceiling, in degrees Celsius
+
+  // --- hosts ---------------------------------------------------------------
+  // Each one is its own value rather than a HEALTH_CHECK_FAILED rule with a
+  // shell probe, which is the cheaper-looking design and does not work:
+  // `rulesFor` dedupes on signal + packageName and keeps one winner per key,
+  // so three host probe rules would collapse into one and the other two would
+  // never run -- no error, no probe, nothing in the log.
+  HOST_DOCKER_DOWN // the agent is up and the docker daemon is not
+  HOST_MEMORY_LOW // free memory or swap under the rule's floor
+  HOST_DISK_LOW // the filesystem docker keeps its images and volumes on
+  REDROID_INSTANCE_DOWN // a container that should be running is not
 }
 
 /// What a rule does about it. Everything except REBOOT and the ROTOM_* three is
@@ -897,6 +1673,11 @@ enum MonitorAction {
   ROTOM_RESTART
   ROTOM_DISCONNECT
   ROTOM_REBOOT
+  /// Restart one Redroid container, from the host that runs it. The host-side
+  /// counterpart of RESTART_APP: it is the smallest thing that fixes a wedged
+  /// instance, and REBOOT is deliberately not extended to mean "reboot the
+  /// VPS" -- that takes every box on the machine down at once.
+  RESTART_INSTANCE
 }
 
 enum MonitorLevel {
@@ -923,6 +1704,15 @@ model MonitorRule {
   /// or a box would be restarted twice for one fault.
   groupId String?
   group   DeviceGroup? @relation(fields: [groupId], references: [id], onDelete: Cascade)
+
+  /// Which kind of machine this rule is about. A box rule evaluated against a
+  /// VPS would read a scanner's absence as a fault on a machine that never ran
+  /// one; a host rule against a box would do the mirror image.
+  ///
+  /// This is also what lets AGENT_OFFLINE cover a machine going silent with no
+  /// signal of its own -- it already means exactly the right thing on a
+  /// `Device`, whichever kind it is.
+  appliesTo DeviceKind @default(BOX)
 
   signal MonitorSignal
   /// The package the signal and its actions are about. Null for the signals
@@ -1040,7 +1830,7 @@ model MonitorEvent {
   /// needs more than the 191 characters a String gets on MySQL: the agent caps
   /// a detail at 512 bytes, and a truncated explanation is worse than none.
   detail   String?        @db.Text
-  /// Whether this went to Discord, so a silent hour is explicable.
+  /// Whether any channel took this, so a silent hour is explicable.
   notified Boolean        @default(false)
   /// The all-clear rather than a fault. Kept as a column rather than read off
   /// the level or the message because the alert dedupe window has to ignore
@@ -1090,4 +1880,80 @@ model PushSubscription {
   updatedAt DateTime @updatedAt
 
   @@index([userId])
+}
+
+// ---------------------------------------------------------------------------
+// Connectivity
+// ---------------------------------------------------------------------------
+
+/// One stretch where Magnemite lost contact with a box, and what it was.
+///
+/// An interval, not a point: the question is never "when did it drop" but
+/// "what happened across that gap", and answering it needs both ends. Opened
+/// the moment contact is lost, closed by the beat or the hello that restores
+/// it, and left open — `endedAt` null — for a box that is away right now,
+/// which is also what makes "down since" a row rather than arithmetic.
+///
+/// The before/after pairs are the point of the table. A gap where the boot
+/// instant moved is a reboot; a gap where it did not and the socket never
+/// closed is an agent that stalled. Both halves are snapshotted rather than
+/// read back later, so no ordering against `markOnline` can lose them.
+model DeviceConnectionEvent {
+  /// An autoincrement for the reason DeviceMetricSample has one: a flapping
+  /// fleet writes a lot of these, and a cuid is bigger than the row.
+  id       Int    @id @default(autoincrement())
+  deviceId String
+  device   Device @relation(fields: [deviceId], references: [id], onDelete: Cascade)
+
+  /// The last moment the box was known to be there — its `lastSeenAt` as it
+  /// stood, not when we noticed, which is up to a sweep interval later.
+  startedAt       DateTime
+  endedAt         DateTime?
+  durationSeconds Int?
+  /// Null while the episode is open: we do not know yet, and a guess is worse
+  /// than a blank.
+  cause DeviceConnectionCause?
+
+  /// How the socket went, when it went at all. Null for a stall, which is
+  /// exactly the case where the socket never closed.
+  closeCode   Int?
+  closeReason String?
+  /// The hub itself was down for part of this gap, so nothing about the box is
+  /// evidence of anything.
+  hubRestarted Boolean @default(false)
+
+  uptimeBefore       Int?
+  bootedAtBefore     DateTime?
+  agentStartedBefore DateTime?
+  agentVersionBefore String?
+  uptimeAfter        Int?
+  bootedAtAfter      DateTime?
+  agentStartedAfter  DateTime?
+  agentVersionAfter  String?
+
+  /// `getprop sys.boot.reason`, read with one exec and only once the
+  /// classification already says the box rebooted. Null on a container, which
+  /// has no boot reason to give — the honest answer, not a missing one.
+  bootReason String?
+  /// The agent's id for the session that replaced the one that died, so an
+  /// episode names a stretch of the box's own agent.log.
+  sessionAfter String?
+
+  /// The card's and the drill-down's query: one box, one window.
+  @@index([deviceId, startedAt])
+  /// The prune's, which is fleet-wide and has no device to narrow by.
+  @@index([startedAt])
+
+  logBundles DeviceLogBundle[]
+}
+
+enum DeviceConnectionCause {
+  HUB_RESTART // the hub was down for part of it; says nothing about the box
+  REPLACED // a second socket for the same device took over
+  DEVICE_DELETED // the row was gone when it dialled in
+  TERMINATED_BY_HUB // it stopped answering our keepalive and we hung up
+  LINK_LOST // the socket went without a goodbye; the process did not restart
+  AGENT_RESTART // same boot, new agent process
+  REBOOT // the box itself restarted
+  HEARTBEAT_STALL // the socket never closed and the beats stopped
 }

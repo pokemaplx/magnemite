@@ -1,0 +1,101 @@
+---
+title: Maintenance windows
+description: Park a box while you work on it, and have the fleet agree to leave it alone.
+icon: Wrench
+---
+
+Without this, touching a box by hand means racing the thing that is watching
+it. You stop the scanner to look at something; the monitor pass reads a dead
+scanner; the box is restarted, or rebooted, underneath you. The automatic
+rollout has the same problem from the other end — it queues an install on the
+box you are holding.
+
+**Maintenance** is a window during which the box is left alone. It is on the
+device page's **⋯** menu, and it ends by itself.
+
+## What it stops
+
+|                                                        |                                                                       |
+| ------------------------------------------------------ | --------------------------------------------------------------------- |
+| Monitoring rules                                       | **skipped** — no rule reads it, no ladder climbs                      |
+| Automatic rollouts                                     | **not targeted** — it is left out of the count as well as the rollout |
+| [Install on join](/docs/fleet/configs#install-on-join) | **held** — it gets its builds when the window closes                  |
+| Agent self-updates                                     | **not sent** — a self-update drops the socket mid-repair              |
+| A rollout you aim straight at it                       | **refused**, naming the box                                           |
+| Logs, Live logs, Execute, Screenshot, Reboot           | **still work**                                                        |
+
+That last row is the point. The diagnostics are the tools somebody in
+maintenance is holding, and taking them away would be taking away the reason to
+park a box in the first place.
+
+The row above it is the one that is worth being clear about: **a rollout aimed
+at the box is refused, not queued.** Pick a parked box on the fleet table and
+press Update and you are told it is in maintenance. Selecting the whole fleet
+or a group leaves it out quietly instead, because "everything" has always meant
+the boxes that can take it — refusing a 200-box rollout over one parked box
+would be the opposite of useful.
+
+## The scanner is stopped, and started again
+
+Entering maintenance runs the group's **pre-install hook**, which is the one
+that stops the scanner. Leaving runs the **post-install hook**, which starts it.
+The group already says how, which is why nothing here invents a second answer
+— a rule and a hook that disagreed about how to stop a scanner would be two
+things to keep in step.
+
+Both halves are best-effort and say which happened:
+
+- **The group has no hook.** Nothing is stopped, and the box is parked with its
+  scanner still running. A legitimate thing to want, and a terrible thing to
+  assume, so the dialog says so.
+- **The box is offline.** Nothing runs. Parking a box you are about to go and
+  unplug is exactly the case this allows.
+- **The hook failed.** The box's own words come back as an error. The window is
+  set either way: entering maintenance is a decision that has already been
+  recorded, and failing it because a hook did not run would leave you pressing
+  a button that already worked.
+
+<Callout type="info" title="The field is set before the hook runs">
+  And the order is the point: the hook stops the scanner, and a monitor pass landing between the two
+  would read a stopped scanner on a box it still believes is in service. That is the exact restart
+  this feature exists to prevent.
+</Callout>
+
+## A window, not a switch
+
+1 hour, 4 hours, 24 hours or a week, and a week is the ceiling.
+
+It is a timestamp rather than a flag because the failure mode of a flag is a
+box that quietly stops being watched: somebody sets it, forgets, and six months
+later there is one box no rule has ever fired on. Re-applying a window is one
+click, and that click is the review the ceiling is really asking for.
+
+When it runs out the hub closes it, runs the post-install hook, and the rules
+start watching again. There is no "still broken" alert of its own, deliberately:
+if the box is still faulty the rules say so on their next pass, which is both
+sooner and more accurate than anything this feature could invent.
+
+## How it differs from quiet hours
+
+They look similar and mean opposite things.
+
+|            | Quiet hours    | Maintenance  |
+| ---------- | -------------- | ------------ |
+| The action | held           | held         |
+| The alert  | **still sent** | **silenced** |
+
+Not rebooting a box at 3am is a policy, and hiding that it needs one is not —
+so [quiet hours](/docs/fleet/monitoring#the-ladder) still tell you. Maintenance
+is the other case: you broke it, you know, and telling you is noise. Noise is
+what teaches people to ignore the channel.
+
+The [Monitoring feed](/docs/fleet/monitoring) records throughout either way.
+
+## Where it shows
+
+A badge on the device page beside the name, and one in the fleet table's status
+column — ahead of any job, because a box with a queued job and an open window
+is not going to run that job, and showing the job would say the opposite.
+
+Both start and end are written to the audit log with the window, the hook that
+was run and what it said.
