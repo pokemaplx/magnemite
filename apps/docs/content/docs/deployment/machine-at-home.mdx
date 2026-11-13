@@ -38,9 +38,24 @@ answer to the question — its maintainer's reply to "how do I run this on an M2
 is _set up a VM and run it there_
 ([redroid-doc#609](https://github.com/remote-android/redroid-doc/issues/609)).
 
-**Parallels Desktop** and **UTM** are both reported working with an Ubuntu arm64
-guest. **OrbStack is not**: its Linux machines are containers on a shared
-LinuxKit kernel, which is the same wall Docker Desktop hits.
+**Multipass**, **UTM** and **Parallels Desktop** all run an Ubuntu arm64 guest
+that works. **OrbStack is not** one of them: its Linux machines are containers on
+a shared LinuxKit kernel, the same wall Docker Desktop hits.
+
+Those Ubuntu guests run a **binderfs** kernel — `CONFIG_ANDROID_BINDER_DEVICES`
+is empty and binderfs is a module — so `modprobe binder_linux devices=…` creates
+no `/dev/binder` nodes, only binderfs. That does not block a box: a box runs
+privileged and is handed **no** device nodes, so Android mounts its own binderfs
+inside the container and boots. The bootstrap detects binderfs and accepts it, so
+there is nothing to do by hand.
+
+<Callout type="warn" title="Do not fake the nodes with mknod">
+  A binderfs device only opens through its own mount. `mknod /dev/binder` against binderfs's device
+  numbers makes a node that *exists* but cannot be opened as binder — and a privileged container
+  inherits it, so every Android service aborts with `Binder driver could not be opened. Terminating.`
+  and the box boots nothing. Leave `/dev/binder` absent on a binderfs kernel; the container makes its
+  own.
+</Callout>
 
 What the VM needs:
 
@@ -55,6 +70,48 @@ What the VM needs:
 Everything after that is the ordinary
 [provisioning](/docs/deployment/redroid-bootstrap) — same form, same script,
 same steps.
+
+## Multipass, concretely
+
+The quickest of the three — one `brew` and one `launch`:
+
+```sh
+brew install multipass
+multipass launch 24.04 --name mac-vm --cpus 4 --memory 8G --disk 24G
+```
+
+Size the disk up front: the bootstrap writes a swapfile the size of RAM and
+Multipass cannot grow a disk after `launch`, so 8 GB of RAM wants ~24 GB of disk
+for one box. Then shell in for the rest:
+
+```sh
+multipass shell mac-vm
+```
+
+**Lower the MTU before anything pulls an image.** A Multipass guest often comes
+up with an MTU its Mac network path cannot carry, and the `ghcr.io` pull then
+hangs on a TLS handshake while apt and DNS are fine:
+
+```sh
+sudo ip link set dev "$(ip route show default | awk '{print $5; exit}')" mtu 1400
+```
+
+That resets on reboot; persist it in the guest's netplan to keep it.
+
+If the hub will drive the one-click **Add machine**, it has to SSH in — and
+Multipass ships with password auth off, so either inject a key at launch with
+`--cloud-init`, or turn password auth on:
+
+```sh
+multipass exec mac-vm -- sudo sh -c 'echo "ubuntu:<password>" | chpasswd; \
+  printf "PasswordAuthentication yes\n" > /etc/ssh/sshd_config.d/99-magnemite.conf; \
+  systemctl restart ssh'
+```
+
+From here it is the ordinary [provisioning](/docs/deployment/redroid-bootstrap):
+the bootstrap installs Docker, loads binder, accepts binderfs and brings the box
+up. The only extra step a VM behind your Mac's NAT needs is getting the hub to it
+once, which the next section covers.
 
 ## Getting the hub to it, once
 
@@ -217,7 +274,7 @@ machine you buy next. See
 one behavioural consequence, which is that hiding root is Zygisk and the
 DenyList rather than Delta's MagiskHide.
 
-## Two things that bite a machine at home and not a VPS
+## Things that bite a machine at home and not a VPS
 
 - **A Mac that sleeps is a machine that disappears.** `AGENT_OFFLINE` fires on
   the same timeout a dead VPS gets, and the offline sweep cannot tell the two
@@ -229,3 +286,13 @@ DenyList rather than Delta's MagiskHide.
   per container with 2 GB held back — mean a 4 GB VM fits nothing. Give it more
   than you think, or lower both in **Settings → Tuning** and watch the sentence
   under the instance count do the arithmetic for you.
+- **The image pull can hang on a TLS handshake, and the cause is MTU.** A
+  Multipass or UTM guest often comes up with an MTU its Mac network path cannot
+  carry: small requests (DNS, apt) go through, but the large TLS handshake to
+  `ghcr.io` stalls with `net/http: TLS handshake timeout`. Lower the guest's MTU
+  — `sudo ip link set dev "$(ip route show default | awk '{print $5; exit}')" mtu 1400`
+  — then persist it in the guest's netplan so a reboot keeps it.
+- **Swap is sized to RAM, so size the disk for it.** The bootstrap writes a
+  swapfile the size of the VM's memory, on top of the OS, Docker and the ~780 MB
+  image. An 8 GB VM therefore wants **at least 24 GB** of disk for one box — and
+  Multipass cannot grow a disk after `launch`, so pick it up front.

@@ -17,7 +17,8 @@ import { RelativeTime } from "@/components/relative-time";
 import { RotomControls } from "@/components/rotom-controls";
 import { RotomMetrics } from "@/components/rotom-metrics";
 import { parseRange } from "@/lib/metrics-view";
-import { SCANNER_LABEL, SCANNER_TITLE, SCANNER_VARIANT, scannerState } from "@/lib/rotom";
+import { SCANNER_LABEL, SCANNER_TITLE, SCANNER_VARIANT, isDirectMitm, scannerState } from "@/lib/rotom";
+import { DirectStatusCard } from "@/components/direct-status-card";
 import {
   EMPTY_ROTOM_METRICS,
   EMPTY_ROTOM_TREND,
@@ -70,9 +71,22 @@ export default async function DeviceRotomPage({
       rotomRequestMs: true,
       rotomStatWorkers: true,
       rotomLastSeenAt: true,
+      group: {
+        select: {
+          mitmPackageName: true,
+          mitmLabel: true,
+          mitmConfig: true,
+        },
+      },
     },
   });
   if (!device) notFound();
+
+  const isDirect = isDirectMitm(
+    device.group?.mitmPackageName,
+    device.group?.mitmLabel,
+    device.group?.mitmConfig,
+  );
 
   // Only for a matched box: there is no history of a box Rotom never saw, and
   // the queries would be a table scan for an empty answer.
@@ -133,6 +147,15 @@ export default async function DeviceRotomPage({
               <Badge variant={SCANNER_VARIANT[state]} title={SCANNER_TITLE[state]}>
                 {SCANNER_LABEL[state]}
               </Badge>
+              {isDirect ? (
+                <Badge
+                  variant="outline"
+                  className="border-cyan-500/50 bg-cyan-500/10 text-cyan-400 font-mono text-xs"
+                  title="RPC mode: direct protocol worker"
+                >
+                  RPC mode
+                </Badge>
+              ) : null}
             </div>
             <p className="mt-1 font-mono text-xs text-muted-foreground">
               {device.serial}
@@ -150,6 +173,16 @@ export default async function DeviceRotomPage({
       </header>
 
       <DeviceShortcuts deviceId={device.id} current="rotom" hasRotom={!!device.rotomDeviceId} />
+
+      {isDirect ? (
+        <DirectStatusCard
+          deviceName={device.name}
+          workerCount={device.rotomWorkerCount}
+          workersInUse={device.rotomWorkersInUse}
+          requestRate={device.rotomRequestRate}
+          versionName={device.rotomVersion}
+        />
+      ) : null}
 
       {!device.rotomDeviceId ? (
         <Card>

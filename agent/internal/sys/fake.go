@@ -13,6 +13,7 @@ import (
 	"sync"
 	"time"
 
+	"magnemite/agent/internal/cosmog"
 	"magnemite/agent/internal/proto"
 )
 
@@ -140,6 +141,11 @@ func FakeFilesDir(statePath, serial string) string {
 	// nobody would guess when they go looking for the file.
 	return filepath.Join(filepath.Dir(statePath), serial+".files")
 }
+
+// LocalPath is where a path on a real box lands on this one. The installer
+// asks for it before unpacking Cosmog, which writes files itself rather than
+// through WriteFileAtomic.
+func (f *Fake) LocalPath(path string) string { return f.localPath(path) }
 
 func (f *Fake) localPath(path string) string {
 	flat := strings.Trim(strings.ReplaceAll(filepath.ToSlash(path), "/", "_"), "_")
@@ -325,6 +331,14 @@ func (f *Fake) PackageInfo(_ context.Context, pkg string) (proto.PackageInfo, er
 	defer f.mu.Unlock()
 	if info, ok := f.packages[pkg]; ok {
 		return info, nil
+	}
+	// Cosmog and the game beside it, read off the fake box's own directory the
+	// way the real one reads /data/local/tmp/cos.
+	switch pkg {
+	case cosmog.Package:
+		return cosmogInfo(pkg, cosmog.Version(f.localPath(cosmog.Dir))), nil
+	case cosmog.GamePackage:
+		return cosmogInfo(pkg, cosmog.GameVersion(f.localPath(cosmog.Dir))), nil
 	}
 	return proto.PackageInfo{PackageName: pkg, Installed: false}, nil
 }

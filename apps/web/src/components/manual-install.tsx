@@ -21,6 +21,7 @@ import {
   startManualInstall,
 } from "@/actions/manual";
 import type { HookMode } from "@/lib/hub";
+import { COSMOG_PACKAGE, versionFromFilename } from "@magnemite/apk";
 import { readApkInfoFromFile, type ApkInfo } from "@/lib/apk-info";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -171,6 +172,10 @@ export function ManualInstall({
   // the hub runs on the upload. Null while it is being read.
   const [info, setInfo] = useState<ApkInfo | null>(null);
   const [reading, setReading] = useState(false);
+  // Only a Cosmog bundle asks for one. An APK says its own version and nobody
+  // gets to mistype it; a Cosmog zip is a binary and a library, and which
+  // release they are is written nowhere inside it.
+  const [typedVersion, setTypedVersion] = useState("");
   const fileInput = useRef<HTMLInputElement>(null);
 
   const [uploadPct, setUploadPct] = useState<number | null>(null);
@@ -461,7 +466,11 @@ export function ManualInstall({
 
     setReading(true);
     void readApkInfoFromFile(picked)
-      .then((read) => setInfo(read))
+      .then((read) => {
+        setInfo(read);
+        // Named for its version, as `cosmog-2.1.3.zip` is: offered, not assumed.
+        if (read.cosmog) setTypedVersion(versionFromFilename(picked.name) ?? "");
+      })
       .finally(() => setReading(false));
   }
 
@@ -498,7 +507,11 @@ export function ManualInstall({
       setProbe(check.probe ?? null);
 
       setFetching(true);
-      await importBuildFromUrl({ url, packageName: packageName || undefined })
+      await importBuildFromUrl({
+        url,
+        packageName: packageName || undefined,
+        version: packageName === COSMOG_PACKAGE ? typedVersion.trim() || undefined : undefined,
+      })
         .then((result) => {
           if (result.error || !result.build) {
             setUploadError(result.error ?? "The hub did not store that build.");
@@ -540,6 +553,8 @@ export function ManualInstall({
     // stays a hint the hub falls back on when the manifest does not name one.
     const query = new URLSearchParams({ filename: file.name });
     if (packageName) query.set("packageName", packageName);
+    // The one exception: a Cosmog bundle has no manifest to read it from.
+    if (info?.cosmog && typedVersion.trim()) query.set("version", typedVersion.trim());
 
     const xhr = new XMLHttpRequest();
     xhr.open("POST", `/api/manual/upload?${query.toString()}`);
@@ -667,7 +682,8 @@ export function ManualInstall({
   }
 
   const uploading = uploadPct !== null;
-  const canUpload = Boolean(file) && !uploading && canOperate;
+  const canUpload =
+    Boolean(file) && !uploading && canOperate && (!info?.cosmog || Boolean(typedVersion.trim()));
   // The version the hub will store, since it parses the same bytes.
   const detectedVersion = info?.versionName ?? info?.versionCode ?? null;
 
@@ -921,6 +937,19 @@ export function ManualInstall({
                     disabled={!canOperate || fetching}
                   />
                 </div>
+                {packageName === COSMOG_PACKAGE ? (
+                  <div className="flex w-28 flex-col gap-1.5">
+                    <Label htmlFor="cosmog-url-version">Version</Label>
+                    <Input
+                      id="cosmog-url-version"
+                      value={typedVersion}
+                      onChange={(e) => setTypedVersion(e.target.value)}
+                      placeholder="2.1.3"
+                      className="font-mono text-xs"
+                      disabled={!canOperate || fetching}
+                    />
+                  </div>
+                ) : null}
                 <Button
                   onClick={importLink}
                   disabled={!canOperate || !url.trim() || checking || fetching}
@@ -1084,6 +1113,28 @@ export function ManualInstall({
                 <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-xs">
                   {reading ? (
                     <span className="text-muted-foreground">Reading the manifest…</span>
+                  ) : info?.cosmog ? (
+                    <>
+                      <span className="font-medium text-foreground">Cosmog bundle</span>
+                      <span className="font-mono text-muted-foreground">· {COSMOG_PACKAGE}</span>
+                      <Label htmlFor="cosmog-version" className="ml-2 text-muted-foreground">
+                        Version
+                      </Label>
+                      <Input
+                        id="cosmog-version"
+                        value={typedVersion}
+                        onChange={(e) => setTypedVersion(e.target.value)}
+                        placeholder="2.1.3"
+                        className="h-7 w-28 font-mono text-xs"
+                        disabled={!canOperate || uploading}
+                      />
+                      <span className="basis-full text-muted-foreground">
+                        The binary and its <span className="font-mono">lib/libart.so</span>,
+                        unpacked into <span className="font-mono">/data/local/tmp/cos</span> rather
+                        than installed. Nothing in the file says which release it is, so that one is
+                        yours to type.
+                      </span>
+                    </>
                   ) : detectedVersion ? (
                     <>
                       <span className="text-muted-foreground">Version</span>

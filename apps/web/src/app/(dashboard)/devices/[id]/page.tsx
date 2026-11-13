@@ -24,6 +24,8 @@ import { DeviceHeartbeat, DeviceLastSeen } from "@/components/device-last-seen";
 import { DeviceLoadCard } from "@/components/device-load-card";
 import { RelativeTime } from "@/components/relative-time";
 import { loadRecentTrend } from "@/lib/metrics";
+import { isDirectMitm } from "@/lib/rotom";
+import { DirectStatusCard } from "@/components/direct-status-card";
 import { execMitm } from "@/lib/mitm-columns";
 import { formatDuration, formatRelative } from "@/lib/format";
 
@@ -88,6 +90,11 @@ export default async function DevicePage({ params }: { params: Promise<{ id: str
   if (device.kind === "HOST") redirect(`/hosts/${device.id}`);
 
   const online = device.status === "ONLINE";
+  const isDirect = isDirectMitm(
+    device.group?.mitmPackageName,
+    device.group?.mitmLabel,
+    device.group?.mitmConfig,
+  );
   // An expired window reads as not parked, before the hub's sweep has cleared
   // the column — the window is what the field means, not the row.
   const parked = device.maintenanceUntil !== null && device.maintenanceUntil.getTime() > Date.now();
@@ -146,6 +153,15 @@ export default async function DevicePage({ params }: { params: Promise<{ id: str
             <h1 className="text-xl font-semibold tracking-tight">{device.name}</h1>
             <p className="mt-1 font-mono text-xs text-muted-foreground">{device.serial}</p>
           </div>
+          {isDirect ? (
+            <Badge
+              variant="outline"
+              className="border-cyan-500/50 bg-cyan-500/10 text-cyan-400 font-mono text-xs"
+              title="RPC mode: direct protocol worker"
+            >
+              RPC mode
+            </Badge>
+          ) : null}
           {!device.approved ? <Badge variant="warning">pending approval</Badge> : null}
           {/* The dot is green because the socket is genuinely there. This is
               the rest of the sentence: it is connected and has stopped saying
@@ -184,6 +200,16 @@ export default async function DevicePage({ params }: { params: Promise<{ id: str
       </header>
 
       <DeviceShortcuts deviceId={device.id} current="overview" hasRotom={!!device.rotomDeviceId} />
+
+      {isDirect ? (
+        <DirectStatusCard
+          deviceName={device.name}
+          workerCount={device.rotomWorkerCount}
+          workersInUse={device.rotomWorkersInUse}
+          requestRate={device.rotomRequestRate}
+          versionName={device.rotomVersion}
+        />
+      ) : null}
 
       <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-4">
         <Card>
@@ -285,11 +311,15 @@ export default async function DevicePage({ params }: { params: Promise<{ id: str
             <Field
               label="Scanner (rotom)"
               value={
-                device.rotomDeviceId
+                isDirect
                   ? device.rotomConnected
-                    ? "scanning"
-                    : "not scanning"
-                  : "not matched"
+                    ? `direct (${device.rotomWorkersInUse ?? 0}/${device.rotomWorkerCount ?? 0}w)`
+                    : "direct (not connected)"
+                  : device.rotomDeviceId
+                    ? device.rotomConnected
+                      ? "scanning"
+                      : "not scanning"
+                    : "not matched"
               }
             />
           </CardContent>

@@ -2,6 +2,7 @@ import { CAPABILITY_SCREENSHOT, hasCapability } from "@magnemite/protocol";
 import { prisma } from "@magnemite/db";
 import { requireUser } from "@/lib/session";
 import { compareVersions } from "@/lib/format";
+import { isDirectMitm } from "@/lib/rotom";
 import { execMitm, mitmColumns } from "@/lib/mitm-columns";
 import { FleetTable, type DeviceRow, type VersionOption } from "@/components/fleet-table";
 import type { EnrollingRow } from "@/components/enrolling-boxes";
@@ -37,7 +38,15 @@ export default async function FleetPage() {
       // for every one of them.
       where: { kind: "BOX" },
       include: {
-        group: { select: { id: true, name: true } },
+        group: {
+          select: {
+            id: true,
+            name: true,
+            mitmPackageName: true,
+            mitmLabel: true,
+            mitmConfig: true,
+          },
+        },
         // Which machine a container runs on -- `hostId` is that machine's own
         // Device id -- for the filter that narrows the table to one of them.
         redroidInstance: { select: { hostId: true } },
@@ -76,6 +85,11 @@ export default async function FleetPage() {
       agentVersion: device.agentVersion,
       groupId: device.group?.id ?? null,
       groupName: device.group?.name ?? null,
+      isDirect: isDirectMitm(
+        device.group?.mitmPackageName,
+        device.group?.mitmLabel,
+        device.group?.mitmConfig,
+      ),
       hostId: device.redroidInstance?.hostId ?? null,
       canScreenshot: hasCapability(device.capabilities, CAPABILITY_SCREENSHOT),
       installedVersion: installed.get(packageName)?.versionName ?? null,
@@ -96,6 +110,7 @@ export default async function FleetPage() {
             workersInUse: device.rotomWorkersInUse,
             enabled: device.rotomEnabled,
             requestRate: device.rotomRequestRate,
+            version: device.rotomVersion,
           }
         : null,
       job: job

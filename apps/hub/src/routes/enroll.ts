@@ -228,6 +228,20 @@ export async function enrollRoutes(app: FastifyInstance) {
       );
     }
 
+    // A box only reaches /api/enroll with no token of its own — on a container
+    // that means its /data is new and empty, so whatever packages the row still
+    // records are a previous life's. Clearing them is the same move as
+    // `configWorkers: null` above, and for the same reason: without it
+    // `queueJoinInstalls` reads the stale `installed: true` and skips every
+    // build the empty box actually needs. That is what a remove-and-reinstall
+    // hit — the box came back as the same row and never got its join installs.
+    if (existing && kind === "BOX") {
+      await prisma.devicePackage.updateMany({
+        where: { deviceId: device.id },
+        data: { installed: false },
+      });
+    }
+
     // What its group says every new box needs, if its group says anything.
     //
     // Here rather than on the socket's hello, because a box connects on every

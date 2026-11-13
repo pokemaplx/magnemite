@@ -118,6 +118,8 @@ export type DeviceRow = {
   /** Whether its agent knows `collect_screenshot`. */
   canScreenshot: boolean;
   installedVersion: string | null;
+  /** Whether this box runs in RPC mode (direct protocol worker). */
+  isDirect?: boolean;
   /** Installed version of each group's MITM, keyed by package name. */
   mitmVersions: Record<string, string | null>;
   freeBytes: number | null;
@@ -135,6 +137,7 @@ export type DeviceRow = {
     workersInUse: number | null;
     enabled: boolean;
     requestRate: number | null;
+    version?: string | null;
   } | null;
   job: {
     id: string;
@@ -165,13 +168,26 @@ type Filter = "all" | "online" | "offline" | "outdated" | "pending";
  */
 const HARDWARE = ":boxes";
 
-function scannerCell(rotom: DeviceRow["rotom"]) {
+function scannerCell(rotom: DeviceRow["rotom"], isDirect?: boolean) {
   const state = scannerState(rotom);
   if (!rotom || state === "unmatched") {
     return (
       <span className="text-xs text-muted-foreground" title={SCANNER_TITLE.unmatched}>
         —
       </span>
+    );
+  }
+
+  if (isDirect) {
+    return (
+      <Badge
+        variant="outline"
+        className="border-cyan-500/50 bg-cyan-500/10 text-cyan-400 font-mono"
+        title="RPC mode: direct protocol workers"
+      >
+        rpc{state === "notConnected" || state === "disabled" ? "" : workerLabel(rotom)}
+        {state === "scanning" && rotom.requestRate !== null ? ` · ${rotom.requestRate}/s` : ""}
+      </Badge>
     );
   }
 
@@ -772,7 +788,15 @@ function DeviceRowView({
       <TableCell className="text-muted-foreground">{row.groupName ?? "—"}</TableCell>
 
       <TableCell>
-        {row.installedVersion ? (
+        {row.isDirect ? (
+          <Badge
+            variant="outline"
+            className="border-cyan-500/50 bg-cyan-500/10 text-cyan-400 font-mono text-xs"
+            title="RPC mode: direct protocol worker, no game client required"
+          >
+            RPC · {row.rotom?.version ?? "Active"}
+          </Badge>
+        ) : row.installedVersion ? (
           <Badge variant={upToDate ? "success" : "warning"}>
             {upToDate ? <CheckCircle2 className="h-3 w-3" /> : null}
             {row.installedVersion}
@@ -791,7 +815,7 @@ function DeviceRowView({
         );
       })}
 
-      {showRotom ? <TableCell>{scannerCell(row.rotom)}</TableCell> : null}
+      {showRotom ? <TableCell>{scannerCell(row.rotom, row.isDirect)}</TableCell> : null}
 
       <TableCell className="min-w-44">
         {!row.approved ? (

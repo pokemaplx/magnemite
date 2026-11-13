@@ -56,7 +56,7 @@ const TEMPLATE_TOKEN = /\{\{([^{}]*)\}\}/g;
  *
  * Returns the reason it is not, or null.
  */
-export function checkConfigTemplate(template: string): string | null {
+export function checkConfigTemplate(template: string, configPath?: string | null): string | null {
   const known: readonly string[] = CONFIG_PLACEHOLDERS;
   const unknown = [...template.matchAll(TEMPLATE_TOKEN)]
     .map((match) => (match[1] as string).trim())
@@ -64,6 +64,15 @@ export function checkConfigTemplate(template: string): string | null {
   if (unknown.length > 0) {
     return `Unknown placeholder ${[...new Set(unknown)].map((n) => `{{${n}}}`).join(", ")}. Known: ${CONFIG_PLACEHOLDERS.join(", ")}.`;
   }
+
+  // The path decides the format, as it does on the hub and for the scanner
+  // itself. Only without one -- a rollout's override, checked before anybody
+  // knows which group it lands on -- is the shape of the text all there is.
+  const trimmed = template.trim();
+  const isToml = configPath
+    ? configPath.toLowerCase().endsWith(".toml")
+    : !trimmed.startsWith("{") && !trimmed.startsWith("[{");
+  if (isToml) return checkTomlTemplate(template);
 
   // A placeholder always stands in for a JSON string, and the hub escapes what
   // it substitutes so it stays one. Checking with a quoted stand-in is what
@@ -76,4 +85,59 @@ export function checkConfigTemplate(template: string): string | null {
     return `The config is not valid JSON: ${err instanceof Error ? err.message : String(err)}`;
   }
   return null;
+}
+
+/**
+ * Placeholders whose value is always a number, and so may stand outside quotes
+ * in a TOML config. Cosmog's `workers = {{device.workers}}` is the reason: the
+ * key is an integer, and `"50"` in its place is a config that does not load.
+ */
+const NUMERIC_PLACEHOLDERS: readonly string[] = ["device.workers"];
+
+/**
+ * TOML is not parsed here -- there is no parser in the bundle and the scanner
+ * is the judge of its own keys. What is checked is the one thing the hub will
+ * refuse at render: a placeholder outside quotes that is not a number. Said at
+ * Save, it is one message; at render it is one per box.
+ */
+function checkTomlTemplate(template: string): string | null {
+  const bare = [...template.matchAll(TEMPLATE_TOKEN)]
+    .filter((match) => tomlContextAt(template, match.index) === "bare")
+    .map((match) => (match[1] as string).trim())
+    .filter((name) => !NUMERIC_PLACEHOLDERS.includes(name));
+  if (bare.length > 0) {
+    return `${[...new Set(bare)].map((n) => `{{${n}}}`).join(", ")} must be inside quotes — in TOML only a number may stand outside them, like workers = {{device.workers}}.`;
+  }
+  return null;
+}
+
+/**
+ * Where in a TOML document an offset sits. The hub's `tomlContextAt` in
+ * `deviceConfig.ts` is this same function, and is the one that is tested.
+ */
+function tomlContextAt(text: string, offset: number): "bare" | "basic" | "literal" | "comment" {
+  let state: "bare" | "basic" | "literal" | "comment" = "bare";
+  let multiline = false;
+  for (let i = 0; i < offset; i++) {
+    const ch = text[i] as string;
+    if (state === "bare") {
+      if (ch === "#") state = "comment";
+      else if (ch === '"' || ch === "'") {
+        state = ch === '"' ? "basic" : "literal";
+        multiline = text.startsWith(ch.repeat(3), i);
+        if (multiline) i += 2;
+      }
+    } else if (state === "comment") {
+      if (ch === "\n") state = "bare";
+    } else {
+      const quote = state === "basic" ? '"' : "'";
+      if (state === "basic" && ch === "\\") i++;
+      else if (multiline ? text.startsWith(quote.repeat(3), i) : ch === quote) {
+        if (multiline) i += 2;
+        state = "bare";
+        multiline = false;
+      } else if (ch === "\n" && !multiline) state = "bare";
+    }
+  }
+  return state;
 }

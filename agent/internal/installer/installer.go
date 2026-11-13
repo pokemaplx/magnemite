@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"magnemite/agent/internal/apkm"
+	"magnemite/agent/internal/cosmog"
 	"magnemite/agent/internal/deviceconfig"
 	"magnemite/agent/internal/proto"
 	"magnemite/agent/internal/sys"
@@ -135,6 +136,12 @@ func (i *Installer) Run(ctx context.Context, job proto.InstallJob, rep Reporter)
 		return fail(err)
 	}
 
+	// Cosmog is not an app, and neither is the game on a box that runs it:
+	// from here on those two have nothing in common with a pm session.
+	if job.Kind != "" {
+		return i.runCosmog(ctx, job, bundlePath, rep)
+	}
+
 	// --- 5. extract ------------------------------------------------------
 	rep.Progress(proto.StateExtracting, 0, "reading bundle")
 	info := i.Sys.DeviceInfo(ctx)
@@ -246,18 +253,13 @@ func (i *Installer) Run(ctx context.Context, job proto.InstallJob, rep Reporter)
 	// Here rather than in the post-install hook, and here rather than after
 	// Run returns: the deferred hook is what starts the scanner again, and a
 	// scanner started before its config is in place reads the previous one.
-	if job.Config != nil {
-		rep.Progress(proto.StateVerifying, 90, "writing config")
-		res, cerr := deviceconfig.Apply(i.Sys, *job.Config, i.AgentConfigPath)
-		if cerr != nil {
-			// A configured app is the point of installing this one, so a
-			// config that did not land fails the job rather than leaving a
-			// scanner quietly running on someone else's settings. The bundle
-			// is kept for the retry, so this costs an attempt and not a
-			// second 170 MB download.
-			return Result{InstallMode: mode, DataWiped: dataWiped, Err: cerr}
-		}
-		rep.Log(proto.LevelInfo, fmt.Sprintf("wrote %s (sha256 %s)", job.Config.Path, res.SHA256[:12]))
+	if cerr := i.writeConfig(job, rep); cerr != nil {
+		// A configured app is the point of installing this one, so a config
+		// that did not land fails the job rather than leaving a scanner
+		// quietly running on someone else's settings. The bundle is kept for
+		// the retry, so this costs an attempt and not a second 170 MB
+		// download.
+		return Result{InstallMode: mode, DataWiped: dataWiped, Err: cerr}
 	}
 
 	// The bundle has done its job; on a 8 GB box 170 MB is worth reclaiming.
@@ -270,6 +272,88 @@ func (i *Installer) Run(ctx context.Context, job proto.InstallJob, rep Reporter)
 		InstalledVersion:     installed.VersionName,
 		InstalledVersionCode: installed.VersionCode,
 	}
+}
+
+// writeConfig writes the config a job carries, if it carries one.
+func (i *Installer) writeConfig(job proto.InstallJob, rep Reporter) error {
+	if job.Config == nil {
+		return nil
+	}
+	rep.Progress(proto.StateVerifying, 90, "writing config")
+	res, err := deviceconfig.Apply(i.Sys, *job.Config, i.AgentConfigPath)
+	if err != nil {
+		return err
+	}
+	rep.Log(proto.LevelInfo, fmt.Sprintf("wrote %s (sha256 %s)", job.Config.Path, res.SHA256[:12]))
+	return nil
+}
+
+// --- cosmog ----------------------------------------------------------------
+
+// cosmogDir is where Cosmog lives on this box. The fake fleet has no
+// /data/local/tmp, and says where its own stand-in is.
+func (i *Installer) cosmogDir() string {
+	if mapper, ok := i.Sys.(interface{ LocalPath(string) string }); ok {
+		return mapper.LocalPath(cosmog.Dir)
+	}
+	return cosmog.Dir
+}
+
+// runCosmog is the install for the two jobs that are not APKs: Cosmog itself,
+// and the game on a box that runs it. Run has already checked the space, run
+// the pre-install hook, deferred the post-install one and downloaded and
+// checksummed the artifact, all of which are the same for both.
+//
+// What is different is everything after: no pm session, no uid and so no root
+// to re-grant -- Cosmog is started as root by the hook -- and "installed" is
+// files in a directory, which the package cosmog owns.
+func (i *Installer) runCosmog(ctx context.Context, job proto.InstallJob, bundlePath string, rep Reporter) Result {
+	dir := i.cosmogDir()
+	rep.Progress(proto.StateExtracting, 0, "reading bundle")
+
+	var err error
+	switch job.Kind {
+	case proto.InstallKindCosmog:
+		var files []string
+		files, err = cosmog.InstallBundle(bundlePath, dir, job.Version)
+		if err == nil {
+			rep.Log(proto.LevelInfo, fmt.Sprintf("unpacked into %s: %s", cosmog.Dir, strings.Join(files, ", ")))
+		}
+	case proto.InstallKindCosmogGame:
+		err = cosmog.InstallGame(bundlePath, dir, i.Sys.DeviceInfo(ctx).Abi, job.Version)
+		if err == nil {
+			rep.Log(proto.LevelInfo, fmt.Sprintf(
+				"gave Cosmog the game: %s/files and lib/libNianticLabsPlugin.so, nothing installed", cosmog.Dir))
+		}
+	default:
+		// A kind this build has never heard of. Installing it as an APK is the
+		// one thing it certainly does not mean.
+		return fail(fmt.Errorf("this agent does not know install kind %q — update the agent", job.Kind))
+	}
+	if err != nil {
+		return fail(err)
+	}
+	rep.Progress(proto.StateInstalling, 100, "installed")
+
+	// Read back off the directory, by the same route the heartbeat reports it.
+	rep.Progress(proto.StateVerifying, 0, "checking installed version")
+	info, verr := i.Sys.PackageInfo(ctx, job.PackageName)
+	if verr != nil {
+		return Result{InstallMode: proto.InstallModeInPlace, Err: verr}
+	}
+	if !info.Installed || info.VersionName != job.Version {
+		return Result{InstallMode: proto.InstallModeInPlace, Err: fmt.Errorf(
+			"expected %s %s under %s after unpacking, found %q",
+			job.PackageName, job.Version, cosmog.Dir, info.VersionName)}
+	}
+
+	// Before the deferred post-install hook, which is what starts Cosmog.
+	if cerr := i.writeConfig(job, rep); cerr != nil {
+		return Result{InstallMode: proto.InstallModeInPlace, Err: cerr}
+	}
+
+	os.Remove(bundlePath)
+	return Result{OK: true, InstallMode: proto.InstallModeInPlace, InstalledVersion: info.VersionName}
 }
 
 // --- system_server ---------------------------------------------------------

@@ -114,21 +114,34 @@ in needs no module at all.
 ### binder — the outcome, not the step
 
 Redroid's own documentation disagrees with itself about whether a modern kernel
-needs the module, so what gets verified is the end state — and the end state is
-two things, not one: that `/dev/binder`, `/dev/hwbinder` and `/dev/vndbinder`
-exist, **and that something other than root can open them**.
+needs the module, so what gets verified is the end state — and it comes in two
+shapes.
 
-`modprobe` creates them `0600 root:root`. Android runs its services as uid 1000,
-1013 and friends, and a privileged container inherits the mode — so every one of
-them aborts with `Binder driver could not be opened. Terminating.` and the
-container never finishes booting. So this step also sets the mode for now and
-writes `/etc/udev/rules.d/99-magnemite-binder.rules` to set it on every boot
-after, and the agent's own unit chmods them once more before it starts anything,
-because the agent is what brings containers back after a reboot.
+**A kernel with static `/dev/binder` nodes** — bare metal and most VPSes, where
+`CONFIG_ANDROID_BINDER_DEVICES` is set. `modprobe` creates them `0600
+root:root`; Android runs its services as uid 1000, 1013 and friends and a
+privileged container inherits the mode, so every one of them would abort with
+`Binder driver could not be opened. Terminating.` and the container never finish
+booting. So this step sets the mode for now, writes
+`/etc/udev/rules.d/99-magnemite-binder.rules` to set it on every boot after, and
+the agent's own unit chmods them once more before it starts anything.
 
-Binderfs alone is deliberately no longer accepted: the rendered compose hands a
-container device nodes, so a kernel that offers only binderfs would provision
-cleanly and boot nothing.
+**A binderfs kernel** — every Ubuntu generic one, so every Multipass or UTM VM on
+a Mac, where `CONFIG_ANDROID_BINDER_DEVICES` is empty and binderfs is a module.
+`modprobe binder_linux devices=…` makes no nodes here, only binderfs, and that is
+accepted: a box is handed **no** device nodes and runs privileged, so Android
+mounts its own binderfs inside the container and boots. The step confirms
+binderfs is present in `/proc/filesystems` and moves on — there is nothing to
+chmod. The one kernel that fails this step is the one with neither the nodes nor
+binderfs.
+
+<Callout type="error" title="Never fake the nodes with mknod on a binderfs host">
+  A binderfs device only opens through its own mount, so a `/dev/binder` made with `mknod` against
+  its device numbers *exists* but cannot be opened as binder. A privileged container inherits it and
+  tries to use it anyway, so every service aborts with `Binder driver could not be opened` and the
+  box boots nothing — the same silence as a missing module, reached a different way. Leave
+  `/dev/binder` absent on a binderfs kernel; the container makes its own.
+</Callout>
 
 <Callout type="warn" title="What this failure looks like, since it looks like nothing">
   docker reports the container **Up**. `docker logs` is empty, because Android logs to logcat rather

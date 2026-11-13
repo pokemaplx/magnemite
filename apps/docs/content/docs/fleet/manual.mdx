@@ -36,6 +36,12 @@ from; nothing to do on your side.
 
 Manifest's `versionName` is used for the app version.
 
+A **Cosmog bundle** is the one thing here that is not an APK: a `.zip` holding
+the binary and `lib/libart.so`. It is recognised by those two entries, filed
+under `com.sy1vi3.cosmog`, and asks you for its version, since nothing in the
+file says it. What deploying it does is in
+[MITM configs](/docs/fleet/configs#installing-it).
+
 Two ways to hand it over, and what ends up stored is identical either way:
 
 |                   | Where the bytes go        | Use it when                                           |

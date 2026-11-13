@@ -22,11 +22,136 @@ data**.
 | **Config JSON**      | The file's contents, with placeholders.                                                             |
 | **Install on join**  | Builds every box joining this group is given, before anybody asks. Empty by default.                |
 
-The **Fill from** buttons put in the real shapes for Aegis, Atlas, GoCheats
-and Cosmog, paths and key sets. **Aegis (Redroid)** and **Cosmog (Redroid)** are
-the same two for a group of containers, with `"workers": "{{device.workers}}"`
+The **Fill from** buttons put in the real shapes for Aegis, Atlas, GoCheats,
+Cosmog, and Lunala, paths and key sets. **Aegis (Redroid)** and **Cosmog (Redroid)**
+are the container equivalents, with `"workers": "{{device.workers}}"`
 instead of a fixed number, so each container gets the count its machine was
 scaled with.
+
+Groups support both **Agent modes** (traditional methods) and **Direct Mode / RPC mode** (direct protocol workers such as Lunala and standalone RPC daemons).
+
+## Direct Mode (RPC mode) & Dual Format Support
+
+In addition to traditional scanners that inject into the Android game process, Magnemite natively supports **Direct Mode** (also known as **RPC mode**).
+
+### What is Direct Mode?
+- **Protocol-level workers**: Engines in Direct Mode establish direct WebSocket connections to Rotom without running or requiring the Pokémon GO game application.
+- **Low footprint & high density**: Because there is no 3D graphics rendering or heavy Android app lifecycle, machines can host many more concurrent workers.
+- **Dedicated fleet monitoring**: Magnemite automatically recognizes Direct Mode devices (by package name or RPC group label), displaying a dedicated `RPC` badge in the fleet table and exposing the Direct Status Card on device details instead of reporting the game app as stopped.
+
+### JSON & TOML Configuration
+Magnemite groups support both **JSON** and **TOML** configuration templates:
+- **JSON (`.json`)**: Used by standard scanners and JSON-based RPC daemons.
+- **TOML (`.toml`)**: Natively parsed and rendered for TOML-configured engines such as **Lunala** (`/app/config.toml`).
+
+The format is the **config file path's** to say: a path ending in `.toml` is TOML, anything else is JSON.
+
+The placeholders are the same in both, with one difference. JSON has every
+placeholder inside a string. TOML is typed, so a **number** may stand outside
+quotes — `workers = {{device.workers}}` — and anything else outside them is
+refused at Save. Inside `"…"` a value is escaped, so a box named
+`Kitchen "spare"` cannot end its own string and add a key.
+
+### Cosmog
+
+Cosmog 2 is the odd one, and the **Cosmog** preset is
+[aconf](https://github.com/TechG3n/aconf)'s `cosmog_config.toml` key for key:
+
+```toml
+[rotom]
+rotom_worker_endpoint = "ws://YOUR_ROTOM_URL:7070/"
+rotom_device_endpoint = "ws://YOUR_ROTOM_URL:7070/control"
+rotom_secret = "YOUR_ROTOM_SECRET"
+use_compression = true
+
+[general]
+device_name = "{{device.name}}"
+workers = 50
+klefki_token = "YOUR_KLEFKI_TOKEN"
+```
+
+What is different from Aegis and GoCheats:
+
+- **TOML in its own directory**, `/data/local/tmp/cos/config.toml`, beside the
+  binary. The directory is created if it is not there.
+- **It is not an app.** Cosmog is a binary named `com.nianticlabs.pokemongo`
+  run out of `/data/local/tmp/cos`, with no package installed, so
+  `am force-stop` and a launcher do nothing to it. The preset therefore fills
+  the group's **hooks** too — aconf's own stop and start:
+
+  ```sh
+  pkill -9 -f 'com\.nianticlabs\.pokemong[o]' || true
+  cd /data/local/tmp/cos && setsid nohup ./com.nianticlabs.pokemongo >/dev/null 2>&1 &
+  ```
+
+  They are what an install and **Rewrite config** stop and start it with. The
+  `[o]` keeps `pkill` from matching the shell that runs it.
+
+#### Installing it
+
+Cosmog is filed under the package **`com.sy1vi3.cosmog`**. No such package is
+ever installed; the name is what a version, a rollout and the MITM column are
+keyed on, and the agent answers for it from `cos.version` instead of asking
+`pm`.
+
+**The bundle** is the zip as it is published — the binary at its root and
+`lib/libart.so` beside it. Upload it, or paste its link, on
+[Manual deploy](/docs/fleet/manual). The hub recognises it by those two entries
+and refuses a zip missing either: the binary does not start without the libart
+it was built against, so the pair travels as one artifact with one checksum.
+Nothing inside says which release it is, so the **version is typed** — or read
+off a name like `cosmog-2.1.3.zip`.
+
+Deploying it unpacks the zip into `/data/local/tmp/cos`, each file written
+beside its destination and renamed over it, so a Cosmog that is still running
+is replaced rather than half-overwritten. Whatever else the zip holds comes
+along; a `config.toml` in it never does. Then the group's config is written and
+the post-install hook starts it.
+
+**The game** is the other half. Cosmog does not run Pokémon GO; it loads the
+game's `libNianticLabsPlugin.so` and reads its APKs off disk. So on a box whose
+group's MITM is Cosmog, deploying an ordinary Pokémon GO build **installs
+nothing**. The same `.apkm` every other group installs is unpacked instead:
+
+| From the bundle                                   | To                                            |
+| ------------------------------------------------- | --------------------------------------------- |
+| `base.apk`                                        | `cos/files/base.apk`                          |
+| `split_config.arm64_v8a.apk`                      | `cos/files/split_config.arm64_v8a.apk`        |
+| `lib/arm64-v8a/libNianticLabsPlugin.so` in that split | `cos/lib/libNianticLabsPlugin.so`         |
+
+That is aconf's `pogo_lib`, without unzipping a split by hand. The box then
+reports that build as its Pokémon GO version, so the Fleet table shows which
+game Cosmog is loading and a rollout skips a box already on it.
+
+Put both in the group's [Install on join](#install-on-join) — the game, then
+Cosmog — and a new box builds itself: the game's files first, then the binary,
+its config, and the start.
+
+Three things to know:
+
+- **It needs an agent that knows how.** One that predates this would `pm
+  install` the game onto a Cosmog box, so a job for an older agent waits,
+  saying so, until the agent has updated.
+- **An installed Pokémon GO is left alone.** aconf uninstalls the app from a
+  Cosmog box; Magnemite does not delete an app's data on its own. The stop hook
+  above does kill it, since it matches by the same name, so remove it yourself
+  if the box still has one.
+- **Zygisk and the denylist are not touched.** aconf switches both on in Magisk
+  on first install. That is box setup, not Cosmog's files, and stays yours.
+
+A Lunala group template is the same idea in a container:
+
+```toml
+[rotom]
+rotom_worker_endpoint = "ws://YOUR_ROTOM_URL:7072"
+rotom_device_endpoint = "ws://YOUR_ROTOM_URL:7072/control"
+rotom_secret = "YOUR_ROTOM_SECRET"
+
+[general]
+device_name = "{{device.name}}"
+workers = 1
+auth_token = "YOUR_KLEFKI_AUTH_TOKEN"
+```
 
 ## Install on join
 

@@ -25,6 +25,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"magnemite/agent/internal/cosmog"
 	"magnemite/agent/internal/proto"
 )
 
@@ -1145,13 +1146,23 @@ var (
 func (a *Android) PackageInfo(ctx context.Context, pkg string) (proto.PackageInfo, error) {
 	info := proto.PackageInfo{PackageName: pkg}
 
-	out, err := a.Exec(ctx, "dumpsys", "package", pkg)
-	if err != nil || strings.TrimSpace(out) == "" {
-		// dumpsys prints nothing useful for a package that is not installed.
-		info.Installed = false
-		return info, nil
+	// Cosmog is no package, so `dumpsys` has nothing to say about it and the
+	// answer is on disk instead.
+	if pkg == cosmog.Package {
+		return cosmogInfo(pkg, cosmog.Version(cosmog.Dir)), nil
 	}
-	if !strings.Contains(out, "Package [") {
+
+	out, err := a.Exec(ctx, "dumpsys", "package", pkg)
+	if err != nil || strings.TrimSpace(out) == "" || !strings.Contains(out, "Package [") {
+		// dumpsys prints nothing useful for a package that is not installed.
+		//
+		// The game on a Cosmog box is exactly that -- not installed, and meant
+		// not to be -- while its library and APKs sit beside Cosmog. Reporting
+		// those as the game's version is what lets a rollout see the box is
+		// already on a build, and the fleet table show which one.
+		if pkg == cosmog.GamePackage {
+			return cosmogInfo(pkg, cosmog.GameVersion(cosmog.Dir)), nil
+		}
 		info.Installed = false
 		return info, nil
 	}
@@ -1166,6 +1177,12 @@ func (a *Android) PackageInfo(ctx context.Context, pkg string) (proto.PackageInf
 		info.VersionCode = m[1]
 	}
 	return info, nil
+}
+
+// cosmogInfo turns a version read off Cosmog's directory into what a package
+// query answers. Empty is "not installed", the same as anywhere else.
+func cosmogInfo(pkg, version string) proto.PackageInfo {
+	return proto.PackageInfo{PackageName: pkg, VersionName: version, Installed: version != ""}
 }
 
 func (a *Android) DeviceInfo(ctx context.Context) proto.DeviceInfo {

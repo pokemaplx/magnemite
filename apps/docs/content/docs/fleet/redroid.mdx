@@ -38,19 +38,26 @@ does what `customize.sh` did at flash time.
   matches the ABI exactly, refusing to install the wrong native libraries. An
   x86_64 Redroid needs ARM translation and a different split policy; it is not
   a supported target.
-- **The binder kernel module**, with the device names Android expects — **and
-  the devices openable by somebody other than root**:
+- **The binder kernel module** — how it appears depends on the kernel:
+  - **Static nodes** (bare metal, most VPSes, where `CONFIG_ANDROID_BINDER_DEVICES`
+    is set): `modprobe` creates `/dev/binder`, `/dev/hwbinder` and
+    `/dev/vndbinder`, and they must be **openable by somebody other than root**.
+  - **binderfs** (every Ubuntu generic kernel, so every Multipass or UTM VM on a
+    Mac, where `CONFIG_ANDROID_BINDER_DEVICES` is empty): `modprobe` makes no
+    nodes, only binderfs — and that is fine. A box runs privileged and is handed
+    no device nodes, so Android mounts its own binderfs inside the container.
+    Nothing to chmod. See [a machine at home](/docs/deployment/machine-at-home).
 
 ```sh
 sudo modprobe binder_linux devices="binder,hwbinder,vndbinder"
-sudo chmod 0666 /dev/binder /dev/hwbinder /dev/vndbinder
-# kernels older than 5.18 also want:
-sudo modprobe ashmem_linux
+# static-node kernels only (Android's services run as uid 1000+, not root):
+sudo chmod 0666 /dev/binder /dev/hwbinder /dev/vndbinder 2>/dev/null || true
 ```
 
-<Callout type="warn" title="The chmod is not optional, and skipping it looks like something else">
-  modprobe creates these `0600 root:root`, and Android runs its services as uid 1000, 1013 and
-  friends — a privileged container inherits the mode, so every one of them aborts on the open with
+<Callout type="warn" title="On a static-node kernel the chmod is not optional, and skipping it looks like something else">
+  On a kernel with static nodes, modprobe creates these `0600 root:root`, and Android runs its
+  services as uid 1000, 1013 and friends — a privileged container inherits the mode, so every one of
+  them aborts on the open with
   `Binder driver could not be opened. Terminating.` What you see is a container that docker reports
   as **Up**, with empty `docker logs` (Android logs to logcat, not stdout), idling at a few percent
   CPU and never reaching `sys.boot_completed` — which from the dashboard is a box that is running

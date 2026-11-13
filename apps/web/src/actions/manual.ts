@@ -145,6 +145,8 @@ export type ImportBuildResult = {
 export async function importBuildFromUrl(input: {
   url: string;
   packageName?: string;
+  /** Only for a Cosmog bundle, which has no manifest to say it. */
+  version?: string;
 }): Promise<ImportBuildResult> {
   const user = await requireOperator();
 
@@ -156,6 +158,7 @@ export async function importBuildFromUrl(input: {
     build = await hub.importBuildFromUrl({
       url,
       packageName: input.packageName?.trim() || undefined,
+      version: input.version?.trim() || undefined,
     });
   } catch (err) {
     return { error: err instanceof Error ? err.message : String(err) };

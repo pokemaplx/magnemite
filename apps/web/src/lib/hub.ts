@@ -305,8 +305,12 @@ export const hub = {
    * browser and every proxy between it and here — which is what makes this the
    * way past a 413 on a large bundle.
    */
-  importBuildFromUrl: (input: { url: string; packageName?: string; filename?: string }) =>
-    call<StoredBuild>("/internal/uploads/from-url", input),
+  importBuildFromUrl: (input: {
+    url: string;
+    packageName?: string;
+    version?: string;
+    filename?: string;
+  }) => call<StoredBuild>("/internal/uploads/from-url", input),
   /** Integration probes for the Status page. `force` skips the hub's cache. */
   health: (force = false) => call<HubHealth>("/internal/health", { force }),
 

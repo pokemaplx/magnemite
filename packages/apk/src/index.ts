@@ -25,7 +25,61 @@ export type ApkInfo = {
   packageName: string | null;
   versionName: string | null;
   versionCode: string | null;
+  /**
+   * Set when the file is not an APK at all but a Cosmog bundle. It has no
+   * manifest, so the package is the one below and the version is nobody's to
+   * read: `versionName` is whatever the file's own name says, or null.
+   */
+  cosmog?: boolean;
 };
+
+/**
+ * What Cosmog is filed under.
+ *
+ * Cosmog 2 installs no package: it is a binary named after the game, run out
+ * of `/data/local/tmp/cos`. But a version, a rollout, a group's MITM and the
+ * fleet's version column are all keyed on a package name, so it gets one --
+ * and the agent answers for it by reading `cos.version` instead of asking
+ * `pm`. The agent's `cosmog.Package` is this same string.
+ */
+export const COSMOG_PACKAGE = "com.sy1vi3.cosmog";
+
+/** The game, which on a Cosmog box is a library and two APKs, not an app. */
+export const GAME_PACKAGE = "com.nianticlabs.pokemongo";
+
+/** What a Cosmog bundle is recognised by: the binary, and the ART it loads. */
+export const COSMOG_BINARY = "com.nianticlabs.pokemongo";
+export const COSMOG_LIBART = "lib/libart.so";
+
+/**
+ * Is this zip a Cosmog bundle?
+ *
+ * The shape sy1vi3 publishes and aconf's `bundles.sh` unpacks: the binary at
+ * the root and `lib/libart.so` beside it. Both, because the binary without its
+ * libart does not start, and a bundle missing one is better refused at upload
+ * than discovered on forty boxes. A single wrapping directory is allowed --
+ * zipping a folder rather than its contents is the commonest way to make one.
+ */
+export function isCosmogBundle(entries: Pick<ZipEntry, "name">[]): boolean {
+  return cosmogPrefix(entries) !== null;
+}
+
+/** The directory a Cosmog bundle's files sit under: "" or "something/". Null when it is not one. */
+export function cosmogPrefix(entries: Pick<ZipEntry, "name">[]): string | null {
+  const names = new Set(entries.map((e) => e.name));
+  for (const name of names) {
+    if (name !== COSMOG_BINARY && !name.endsWith(`/${COSMOG_BINARY}`)) continue;
+    const prefix = name.slice(0, name.length - COSMOG_BINARY.length);
+    if (prefix.split("/").length > 2) continue;
+    if (names.has(prefix + COSMOG_LIBART)) return prefix;
+  }
+  return null;
+}
+
+/** `2.1.3` out of `cosmog-2.1.3.zip`. Null from `cosmog2.zip`, which says nothing. */
+export function versionFromFilename(filename: string): string | null {
+  return filename.match(/(\d+\.\d+\.\d+(?:[.-][0-9A-Za-z]+)*?)(?:\.[A-Za-z]+)?$/)?.[1] ?? null;
+}
 
 /** Random access to a file, however the host happens to hold it. */
 export type ByteReader = {
@@ -328,6 +382,9 @@ function pickManifestSource(entries: ZipEntry[]): { manifest?: ZipEntry; apk?: Z
 export async function readApkInfo(reader: ByteReader, inflateRaw: InflateRaw): Promise<ApkInfo> {
   try {
     const entries = await readCentralDirectory(reader);
+    if (isCosmogBundle(entries)) {
+      return { packageName: COSMOG_PACKAGE, versionName: null, versionCode: null, cosmog: true };
+    }
     const { manifest, apk } = pickManifestSource(entries);
 
     if (manifest) return parseManifest(await readEntry(reader, manifest, inflateRaw));

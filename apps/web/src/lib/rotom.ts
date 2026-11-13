@@ -76,3 +76,39 @@ export function workerLabel(rotom: RotomView): string {
   if (rotom.workersInUse === null) return ` · ${rotom.workers}w`;
   return ` · ${rotom.workersInUse}/${rotom.workers}w`;
 }
+
+/**
+ * Detects whether a device, group, or MITM configuration is operating in RPC mode
+ * (direct protocol worker without game client interaction).
+ */
+export function isRpcMode(
+  packageName?: string | null,
+  label?: string | null,
+  config?: string | null,
+): boolean {
+  if (
+    packageName === "com.pokemaplx.zoroark.direct" ||
+    packageName === "lunala" ||
+    packageName === "org.cosmog.lunala"
+  ) {
+    return true;
+  }
+  if (label && (/rpc/i.test(label) || /direct/i.test(label) || /lunala/i.test(label))) return true;
+  if (
+    config &&
+    (config.includes('"backend": "direct"') ||
+      config.includes('"backend":"direct"') ||
+      config.includes('backend = "direct"') ||
+      config.includes('"backend": "rpc"') ||
+      config.includes('"backend":"rpc"') ||
+      config.includes('backend = "rpc"') ||
+      config.includes('rotom_worker_endpoint') ||
+      config.includes('[rotom]'))
+  ) {
+    return true;
+  }
+  return false;
+}
+
+/** Backward compatibility alias. */
+export const isDirectMitm = isRpcMode;

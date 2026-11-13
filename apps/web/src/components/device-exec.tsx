@@ -70,6 +70,153 @@ const SUGGESTIONS: { label: string; command: string; hint: string }[] = [
   },
 ];
 
+function getSuggestionsForMitm(
+  mitm: ExecMitm | null,
+): { label: string; command: string; hint: string }[] {
+  const isLunala =
+    mitm?.packageName === "org.cosmog.lunala" ||
+    mitm?.packageName === "lunala" ||
+    (mitm?.label && /lunala/i.test(mitm.label));
+  const isDirect =
+    mitm?.packageName === "com.pokemaplx.zoroark.direct" ||
+    (mitm?.label && (/rpc/i.test(mitm.label) || /direct/i.test(mitm.label)));
+  const isZoroark =
+    mitm?.packageName === "com.pokemaplx.zoroark" || (mitm?.label && /zoroark/i.test(mitm.label));
+
+  // After Lunala, whose package is `org.cosmog.lunala` and is a container
+  // rather than a binary on the box.
+  const isCosmog =
+    !isLunala &&
+    (mitm?.packageName === "com.sy1vi3.cosmog" ||
+      mitm?.configPath?.endsWith("/cos/config.toml") ||
+      (mitm?.label ? /cosmog/i.test(mitm.label) : false));
+
+  if (isCosmog) {
+    // Cosmog 2 is a binary named after the game, run from its own directory,
+    // so none of the `am` commands apply. `[o]` stops pkill and pgrep matching
+    // the shell that carries the pattern in its own command line.
+    const dir = (mitm?.configPath ?? "/data/local/tmp/cos/config.toml").replace(/\/[^/]*$/, "");
+    return [
+      {
+        label: "Stop Cosmog",
+        command: "pkill -9 -f 'com\\.nianticlabs\\.pokemong[o]' || true",
+        hint: "Kills the Cosmog binary and every worker under it.",
+      },
+      {
+        label: "Start Cosmog",
+        command: `cd ${shellQuote(dir)} && setsid nohup ./com.nianticlabs.pokemongo >/dev/null 2>&1 &`,
+        hint: "After a stop. Detached, so it outlives this command.",
+      },
+      {
+        label: "Is Cosmog running?",
+        command: "pgrep -fl 'com\\.nianticlabs\\.pokemong[o]' || echo 'not running'",
+        hint: "Lists the Cosmog processes, if any.",
+      },
+      {
+        label: "Cosmog versions",
+        command: `cd ${shellQuote(dir)} && echo "cosmog $(cat cos.version)"; echo "game $(cat pogo.version)"; ls -la . lib files`,
+        hint: "What is unpacked there: the binary, libart.so, and the game's library and APKs.",
+      },
+      {
+        label: "Tail Cosmog log",
+        command: `tail -n 60 ${shellQuote(`${dir}/cosmog.log`)}`,
+        hint: "Needs log_to_file = true in the config.",
+      },
+    ];
+  }
+
+  if (isLunala) {
+    return [
+      {
+        label: "Restart Lunala",
+        command: "docker restart lunala",
+        hint: "Restarts the Lunala docker container.",
+      },
+      {
+        label: "Tail Lunala logs",
+        command: "docker logs --tail 60 lunala",
+        hint: "Inspects the last 60 lines of container output.",
+      },
+      {
+        label: "Check Lunala container",
+        command: "docker ps --filter name=lunala",
+        hint: "Checks whether the Lunala container is running.",
+      },
+    ];
+  }
+
+  if (isDirect) {
+    return [
+      {
+        label: "Start RPC daemon",
+        command:
+          "cd /data/local/tmp/zoroark && nohup ./zoroarkd -config zoroark.json > zoroark.log 2>&1 &",
+        hint: "Starts the standalone MITM daemon in RPC mode.",
+      },
+      {
+        label: "Stop RPC daemon",
+        command: "pkill -9 zoroarkd",
+        hint: "Kills the running daemon process.",
+      },
+      {
+        label: "Check RPC health",
+        command: "curl -s http://127.0.0.1:9090/healthz || echo 'Health probe failed'",
+        hint: "Checks the Prometheus HTTP health status on port 9090.",
+      },
+      {
+        label: "Hot-reload config",
+        command: "curl -s -X POST http://127.0.0.1:9090/-/reload",
+        hint: "Reloads zoroark.json and dynamically resizes workers without restarting the process.",
+      },
+      {
+        label: "Resize workers (+/-)",
+        command: "curl -s -X POST 'http://127.0.0.1:9090/-/reload?workers=50'",
+        hint: "Dynamically adjusts active worker count (e.g. ?workers=50) with zero downtime.",
+      },
+      {
+        label: "Tail daemon logs",
+        command: "tail -n 60 /data/local/tmp/zoroark/zoroark.log",
+        hint: "Reads the last 60 lines of the daemon log.",
+      },
+    ];
+  }
+
+  if (isZoroark) {
+    return [
+      {
+        label: "Stop Pokémon GO",
+        command: "am force-stop com.nianticlabs.pokemongo",
+        hint: "Kills the game process.",
+      },
+      {
+        label: "Stop Zoroark",
+        command: "am force-stop com.pokemaplx.zoroark; pkill -9 zoroarkd",
+        hint: "Stops both the Zoroark companion app and the daemon.",
+      },
+      {
+        label: "Start Zoroark Agent",
+        command:
+          "monkey -p com.pokemaplx.zoroark -c android.intent.category.LAUNCHER 1; sleep 2; " +
+          "am start-foreground-service -a com.pokemaplx.zoroark.ACTION_START com.pokemaplx.zoroark/.service.ZoroarkService",
+        hint: "Brings Zoroark to the foreground and starts the supervisor service.",
+      },
+      {
+        label: "Restart Zoroark",
+        command:
+          "am start-foreground-service -a com.pokemaplx.zoroark.ACTION_RESTART com.pokemaplx.zoroark/.service.ZoroarkService",
+        hint: "Triggers internal watchdog restart without relaunching app activity.",
+      },
+      {
+        label: "Tail Zoroark logs",
+        command: "tail -n 60 /data/local/tmp/zoroark/zoroark.log",
+        hint: "Reads the last 60 lines of the daemon log.",
+      },
+    ];
+  }
+
+  return SUGGESTIONS;
+}
+
 type Result = { output: string; failed: boolean; message: string } | null;
 
 /** Single quotes, with any in the value closed, escaped and reopened. */
@@ -99,9 +246,10 @@ export function DeviceExec({
   const [view, setView] = useState<"command" | "config">("command");
 
   const configPath = mitm?.configPath ?? null;
+  const mitmBaseSuggestions = getSuggestionsForMitm(mitm);
   // The group's own config, read where its MITM reads it -- first in the row,
   // because on a box whose scanner is misbehaving it is the first thing worth
-  // looking at. Built from the group, so a Cosmog site gets Cosmog's path.
+  // looking at. Built from the group, so a Cosmog or Zoroark site gets its own path.
   const suggestions =
     mitm && configPath
       ? [
@@ -110,9 +258,9 @@ export function DeviceExec({
             command: `cat ${shellQuote(configPath)}`,
             hint: "Prints the config file as it is on the box right now.",
           },
-          ...SUGGESTIONS,
+          ...mitmBaseSuggestions,
         ]
-      : SUGGESTIONS;
+      : mitmBaseSuggestions;
 
   function run(toRun: string) {
     const trimmed = toRun.trim();

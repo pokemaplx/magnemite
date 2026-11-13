@@ -1,5 +1,5 @@
 import path from "node:path";
-import type { InstallJob } from "@magnemite/protocol";
+import { CAPABILITY_INSTALL_COSMOG, hasCapability, type InstallJob } from "@magnemite/protocol";
 import {
   getRedroidSettings,
   prisma,
@@ -12,6 +12,7 @@ import { log } from "../log.js";
 import { getConnection, sendTo } from "../registry.js";
 import { agentUpdateInFlight } from "./agentRelease.js";
 import { hasWriteConfig, renderConfig } from "./deviceConfig.js";
+import { installKind } from "./installKind.js";
 import { ACTIVE_STATES, logJobEvent, recomputeRollout, requeueStalled } from "./jobs.js";
 import { sweepExpiredMaintenance, notInMaintenance } from "./maintenance.js";
 import { pruneMetrics } from "./metrics.js";
@@ -232,8 +233,30 @@ async function dispatchQueued(maxConcurrentJobs: number) {
       continue;
     }
 
+    // Cosmog is not an app, and on a box that runs it the game is not one
+    // either: see `installKind`. An agent that predates the field would read
+    // the job as an APK, and `pm install` the game onto a box that is not
+    // meant to have it. So the job waits, queued, the way one for an offline
+    // box does: the agent update that is already on its way is what releases
+    // it, and failing it instead would burn nothing -- an attempt is only
+    // counted at dispatch -- and so retry for ever. Said once per job, not
+    // once per pass.
+    const kind = installKind(target.packageName, job.device.group?.mitmPackageName ?? null);
+    if (kind && !hasCapability(job.device.capabilities, CAPABILITY_INSTALL_COSMOG)) {
+      if (!toldAgentTooOld.has(job.id)) {
+        toldAgentTooOld.add(job.id);
+        await logJobEvent(
+          job.id,
+          "waiting: this box's agent is too old to install Cosmog, and takes an agent update first",
+          { level: "WARN" },
+        );
+      }
+      continue;
+    }
+
     const message: InstallJob = {
       type: "install_job",
+      kind,
       jobId: job.id,
       packageName: target.packageName,
       url: artifactUrl(version.artifactPath),
@@ -364,3 +387,6 @@ async function dispatchQueued(maxConcurrentJobs: number) {
     await recomputeRollout(rollout.id);
   }
 }
+
+/** Jobs already told their box's agent cannot install Cosmog. Lost on a restart, which costs one more line. */
+const toldAgentTooOld = new Set<string>();

@@ -71,8 +71,8 @@ export type GroupRow = {
  *
  * These are the MITMs this fleet actually runs, and their config keys are not
  * guessable — `rotomUrl` on one is `rdmUrl` on the next, GoCheats uses
- * snake_case and a plain `config.json`, and Cosmog wants two endpoints where
- * the others want one. Getting a key wrong is a scanner that starts and does
+ * snake_case and a plain `config.json`, and Cosmog wants TOML, two endpoints
+ * where the others want one, and hooks of its own because it is not an app. Getting a key wrong is a scanner that starts and does
  * nothing.
  */
 const PRESETS = [
@@ -123,32 +123,55 @@ const PRESETS = [
   {
     id: "cosmog",
     label: "Cosmog",
+    // Nothing on the box answers to this name -- Cosmog 2 installs no package
+    // -- so it is only what the column and the Execute buttons go by.
     packageName: "com.sy1vi3.cosmog",
-    configPath: "/data/local/tmp/cosmog.json",
-    // Two endpoints, not one: the worker socket and the control socket are
-    // separate in Cosmog, and the control one is what Rotom's restart, reboot
-    // and disconnect actions travel down. A config with only the first gives a
-    // box that scans and cannot be told anything.
+    // TOML, in a directory of its own beside the binary: aconf's
+    // cosmog_config.toml, key for key. Two endpoints, not one -- the control
+    // socket is what Rotom's restart and disconnect travel down, and a config
+    // with only the worker one gives a box that scans and cannot be told
+    // anything.
     //
-    // `device_id` is what Rotom registers the box under, so it is the string
-    // Magnemite matches on — see the matching rules in the Rotom docs. Setting
-    // it to anything but the device name is how a box ends up scanning fine
-    // with an empty Scanner column.
-    config: `{
-  "device_id": "{{device.name}}",
-  "rotom_worker_endpoint": "wss://YOUR_ROTOM_URL:7070",
-  "rotom_device_endpoint": "wss://YOUR_ROTOM_URL:7070/control",
-  "rotom_secret": "YOUR_ROTOM_SECRET",
-  "token": "YOUR_COSMOG_TOKEN",
-  "public_ip": "{{device.publicIp}}",
-  "use_local_safetynet": true,
-  "workers": 8,
-  "injection_delay_ms": 5000,
-  "pogo_heartbeat_timeout_ms": 30000,
-  "concurrent_login_override": 0,
-  "worker_spawn_delay_override": 12500,
-  "disable_attest_delay": false
-}`,
+    // `device_name` is what Rotom registers the box under, so it is the string
+    // Magnemite matches on. Anything but the device name is how a box ends up
+    // scanning fine with an empty Scanner column.
+    configPath: "/data/local/tmp/cos/config.toml",
+    // Cosmog 2 is not an app. It is a binary named after the game, run out of
+    // /data/local/tmp/cos, so there is no package to force-stop and no
+    // launcher to start: these are aconf's own two commands. `[o]` keeps the
+    // pattern from matching the shell that runs it, which holds the pattern in
+    // its own command line and would otherwise be the first thing killed.
+    preInstallHook: "pkill -9 -f 'com\\.nianticlabs\\.pokemong[o]' || true",
+    postInstallHook:
+      "cd /data/local/tmp/cos && setsid nohup ./com.nianticlabs.pokemongo >/dev/null 2>&1 &",
+    config: `[rotom]
+rotom_worker_endpoint = "ws://YOUR_ROTOM_URL:7070/"
+rotom_device_endpoint = "ws://YOUR_ROTOM_URL:7070/control"
+rotom_secret = "YOUR_ROTOM_SECRET"
+use_compression = true
+
+[general]
+device_name = "{{device.name}}"
+workers = 50
+klefki_token = "YOUR_KLEFKI_TOKEN"
+
+[log]
+level = "info"
+use_colors = true
+log_to_file = true
+max_size = 10
+max_backups = 10
+max_age = 30
+compress = true
+
+[tuning]
+worker_spawn_delay_ms = 500
+
+[advanced]
+dns_server = "1.1.1.1:53"
+dont_drop_perms = false
+no_sandbox = true
+panic_on_unknown_request = true`,
   },
   // The same two, for a group of Redroid containers. A container's worker
   // count is its machine's to say -- set where the machine is scaled -- so it
@@ -177,22 +200,202 @@ const PRESETS = [
     id: "cosmog-redroid",
     label: "Cosmog (Redroid)",
     packageName: "com.sy1vi3.cosmog",
-    configPath: "/data/local/tmp/cosmog.json",
+    configPath: "/data/local/tmp/cos/config.toml",
+    // Cosmog 2 is not an app. It is a binary named after the game, run out of
+    // /data/local/tmp/cos, so there is no package to force-stop and no
+    // launcher to start: these are aconf's own two commands. `[o]` keeps the
+    // pattern from matching the shell that runs it, which holds the pattern in
+    // its own command line and would otherwise be the first thing killed.
+    preInstallHook: "pkill -9 -f 'com\\.nianticlabs\\.pokemong[o]' || true",
+    postInstallHook:
+      "cd /data/local/tmp/cos && setsid nohup ./com.nianticlabs.pokemongo >/dev/null 2>&1 &",
+    // Not in quotes, unlike the JSON one above: TOML's `workers` is an
+    // integer, and a number is the one thing a placeholder may be outside them.
+    config: `[rotom]
+rotom_worker_endpoint = "ws://YOUR_ROTOM_URL:7070/"
+rotom_device_endpoint = "ws://YOUR_ROTOM_URL:7070/control"
+rotom_secret = "YOUR_ROTOM_SECRET"
+use_compression = true
+
+[general]
+device_name = "{{device.name}}"
+workers = {{device.workers}}
+klefki_token = "YOUR_KLEFKI_TOKEN"
+
+[log]
+level = "info"
+use_colors = true
+log_to_file = true
+max_size = 10
+max_backups = 10
+max_age = 30
+compress = true
+
+[tuning]
+worker_spawn_delay_ms = 500
+
+[advanced]
+dns_server = "1.1.1.1:53"
+dont_drop_perms = false
+no_sandbox = true
+panic_on_unknown_request = true`,
+  },
+  // Zoroark & Lunala presets:
+  // - Agent modes: in-game injection, traditional methods.
+  // - RPC modes: direct protocol workers with Rotom integration.
+  {
+    id: "zoroark-agent",
+    label: "Zoroark (Agent Default)",
+    packageName: "com.pokemaplx.zoroark",
+    configPath: "/data/local/tmp/zoroark/zoroark.json",
     config: `{
-  "device_id": "{{device.name}}",
-  "rotom_worker_endpoint": "wss://YOUR_ROTOM_URL:7070",
-  "rotom_device_endpoint": "wss://YOUR_ROTOM_URL:7070/control",
-  "rotom_secret": "YOUR_ROTOM_SECRET",
-  "token": "YOUR_COSMOG_TOKEN",
-  "public_ip": "{{device.publicIp}}",
-  "use_local_safetynet": true,
-  "workers": "{{device.workers}}",
-  "injection_delay_ms": 5000,
-  "pogo_heartbeat_timeout_ms": 30000,
-  "concurrent_login_override": 0,
-  "worker_spawn_delay_override": 12500,
-  "disable_attest_delay": false
+  "rotom": {
+    "address": "YOUR_ROTOM_URL:7070",
+    "secret": "YOUR_ROTOM_SECRET",
+    "device_name": "{{device.name}}",
+    "workers": 1,
+    "origin": "zoroark"
+  },
+  "executor": {
+    "backend": "agent",
+    "agent": {
+      "socket": "/data/local/tmp/zoroark-%d.sock"
+    }
+  }
 }`,
+  },
+  {
+    id: "zoroark-zygisk",
+    label: "Zoroark (Agent Zygisk)",
+    packageName: "com.pokemaplx.zoroark",
+    configPath: "/data/local/tmp/zoroark/zoroark.json",
+    config: `{
+  "rotom": {
+    "address": "YOUR_ROTOM_URL:7070",
+    "secret": "YOUR_ROTOM_SECRET",
+    "device_name": "{{device.name}}",
+    "workers": 1,
+    "origin": "zoroark"
+  },
+  "executor": {
+    "backend": "agent_zygisk",
+    "agent": {
+      "socket": "/data/local/tmp/zoroark-%d.sock"
+    }
+  }
+}`,
+  },
+  {
+    id: "zoroark-gadget",
+    label: "Zoroark (Agent Gadget)",
+    packageName: "com.pokemaplx.zoroark",
+    configPath: "/data/local/tmp/zoroark/zoroark.json",
+    config: `{
+  "rotom": {
+    "address": "YOUR_ROTOM_URL:7070",
+    "secret": "YOUR_ROTOM_SECRET",
+    "device_name": "{{device.name}}",
+    "workers": 1,
+    "origin": "zoroark"
+  },
+  "executor": {
+    "backend": "agent_gadget",
+    "agent": {
+      "socket": "/data/local/tmp/zoroark-%d.sock"
+    }
+  }
+}`,
+  },
+  {
+    id: "zoroark-headless",
+    label: "Zoroark (Headless)",
+    packageName: "com.pokemaplx.zoroark",
+    configPath: "/data/local/tmp/zoroark/zoroark.json",
+    config: `{
+  "rotom": {
+    "address": "YOUR_ROTOM_URL:7070",
+    "secret": "YOUR_ROTOM_SECRET",
+    "device_name": "{{device.name}}",
+    "workers": 1,
+    "origin": "zoroark"
+  },
+  "executor": {
+    "backend": "headless",
+    "headless": {
+      "socket": "/data/local/tmp/zoroark-headless-%d.sock"
+    }
+  }
+}`,
+  },
+  {
+    id: "zoroark-agent-redroid",
+    label: "Zoroark (Agent Redroid)",
+    packageName: "com.pokemaplx.zoroark",
+    configPath: "/data/local/tmp/zoroark/zoroark.json",
+    config: `{
+  "rotom": {
+    "address": "YOUR_ROTOM_URL:7070",
+    "secret": "YOUR_ROTOM_SECRET",
+    "device_name": "{{device.name}}",
+    "workers": "{{device.workers}}",
+    "origin": "zoroark"
+  },
+  "executor": {
+    "backend": "agent",
+    "agent": {
+      "socket": "/data/local/tmp/zoroark-%d.sock"
+    }
+  }
+}`,
+  },
+  {
+    id: "zoroark-rpc",
+    label: "Zoroark (RPC Mode)",
+    packageName: "com.pokemaplx.zoroark",
+    configPath: "/data/local/tmp/zoroark/zoroark.json",
+    config: `{
+  "rotom": {
+    "address": "YOUR_ROTOM_URL:7070",
+    "secret": "YOUR_ROTOM_SECRET",
+    "device_name": "{{device.name}}",
+    "workers": 50,
+    "origin": "zoroark"
+  },
+  "executor": {
+    "backend": "direct",
+    "direct": {
+      "mode": "standalone",
+      "device_profile": "auto",
+      "bundle_file": "version-bundle.json",
+      "proxy_url": "",
+      "proxy_health": {
+        "enabled": true,
+        "quarantine_duration": "10m",
+        "failure_threshold": 3
+      },
+      "timing_guard": {
+        "enabled": true,
+        "min_delay": "150ms",
+        "max_delay": "400ms"
+      }
+    }
+  }
+}`,
+  },
+  {
+    id: "lunala-rpc",
+    label: "Lunala (RPC Mode)",
+    packageName: "org.cosmog.lunala",
+    configPath: "/app/config.toml",
+    config: `[rotom]
+rotom_worker_endpoint = "ws://YOUR_ROTOM_URL:7072"
+rotom_device_endpoint = "ws://YOUR_ROTOM_URL:7072/control"
+rotom_secret = "YOUR_ROTOM_SECRET"
+
+[general]
+device_name = "{{device.name}}"
+workers = 1
+auth_token = "YOUR_KLEFKI_AUTH_TOKEN"`,
   },
 ] as const;
 
@@ -257,11 +460,19 @@ function GroupForm({
   const [mitmPackageName, setMitmPackageName] = useState(group.mitmPackageName ?? "");
   const [mitmConfigPath, setMitmConfigPath] = useState(group.mitmConfigPath ?? "");
   const [mitmConfig, setMitmConfig] = useState(group.mitmConfig ?? "");
+  const [preInstallHook, setPreInstallHook] = useState(group.preInstallHook ?? "");
+  const [postInstallHook, setPostInstallHook] = useState(group.postInstallHook ?? "");
 
   function applyPreset(preset: (typeof PRESETS)[number]) {
     setMitmPackageName(preset.packageName);
     setMitmConfigPath(preset.configPath);
     setMitmConfig(preset.config);
+    // Only a preset that brings hooks touches them: Aegis is stopped and
+    // started by the defaults, so filling from it leaves a site's own alone.
+    if ("preInstallHook" in preset) {
+      setPreInstallHook(preset.preInstallHook);
+      setPostInstallHook(preset.postInstallHook);
+    }
   }
 
   return (
@@ -309,7 +520,8 @@ function GroupForm({
           <Textarea
             id={`pre-${group.id}`}
             name="preInstallHook"
-            defaultValue={group.preInstallHook ?? ""}
+            value={preInstallHook}
+            onChange={(e) => setPreInstallHook(e.target.value)}
             placeholder="am force-stop com.nianticlabs.pokemongo"
             disabled={disabled}
           />
@@ -319,7 +531,8 @@ function GroupForm({
           <Textarea
             id={`post-${group.id}`}
             name="postInstallHook"
-            defaultValue={group.postInstallHook ?? ""}
+            value={postInstallHook}
+            onChange={(e) => setPostInstallHook(e.target.value)}
             placeholder="monkey -p com.nianticlabs.pokemongo 1"
             disabled={disabled}
           />
@@ -416,7 +629,7 @@ function GroupForm({
         </div>
 
         <div className="flex flex-col gap-2">
-          <Label htmlFor={`mitm-config-${group.id}`}>Config JSON</Label>
+          <Label htmlFor={`mitm-config-${group.id}`}>Config (JSON or TOML)</Label>
           {disabled && group.hasMitmConfig ? (
             <p className="rounded-md border border-border bg-subtle px-3 py-2 text-xs text-muted-foreground">
               A config is set. It holds the credentials the scanner authenticates with, so only

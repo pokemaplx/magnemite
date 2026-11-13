@@ -78,6 +78,13 @@ message of that name was removed: it says the agent can write a config file at
 all, and renaming it would make every already-deployed agent look incapable until
 it updated.
 
+`install_cosmog` says the agent reads `install_job.kind`. Absent, a job is an
+APK through a `pm` session. `cosmog` is a Cosmog bundle unpacked into
+`/data/local/tmp/cos`, and `cosmog_game` is the game's own bundle on a box whose
+MITM is Cosmog — its APKs and `libNianticLabsPlugin.so` laid out beside Cosmog,
+nothing installed. The hub holds such a job back from an agent that does not
+claim it: one that ignores the field would install the game as an app.
+
 Comparing `agentVersion` instead would look equivalent and is not: it reads a
 backported build as too old, and what that costs is a message sent to a box that
 drops it in silence. An agent that sends no list is simply not asked.

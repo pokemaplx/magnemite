@@ -668,6 +668,21 @@ export const installJobSchema = z.object({
    * outright by an agent old enough not to know the field.
    */
   config: deviceConfigFileSchema.nullish(),
+  /**
+   * What "install" means for this job. Absent is an APK through a `pm`
+   * session, which is every job there was before Cosmog.
+   *
+   * - `cosmog`: the artifact is a Cosmog bundle -- the binary and
+   *   `lib/libart.so` -- unpacked into `/data/local/tmp/cos`.
+   * - `cosmog_game`: the artifact is the game's own bundle, on a box whose
+   *   MITM is Cosmog. Nothing is installed: its APKs go to `cos/files` and
+   *   `libNianticLabsPlugin.so` to `cos/lib`, which is all Cosmog wants of it.
+   *
+   * Only ever sent to an agent that claims `CAPABILITY_INSTALL_COSMOG`: one
+   * that does not know the field would `pm install` the game onto a box that
+   * is not supposed to have it.
+   */
+  kind: z.enum(["cosmog", "cosmog_game"]).nullish(),
   /** Seconds before the agent gives up on the whole job. */
   timeoutSeconds: z.number().int().positive().default(3600),
 });
@@ -811,6 +826,12 @@ export const CAPABILITY_BOX_ADB = "box_adb";
  * and wait out the timeout to learn nothing.
  */
 export const CAPABILITY_PUSH_CONFIG = "push_config";
+
+/**
+ * The agent knows `install_job.kind`: it can unpack a Cosmog bundle and feed
+ * Cosmog the game's library instead of installing either through `pm`.
+ */
+export const CAPABILITY_INSTALL_COSMOG = "install_cosmog";
 
 /**
  * Does this box's `hello.capabilities` claim one?

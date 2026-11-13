@@ -388,6 +388,11 @@ const (
 	// rewritten on a running box, between the group's hooks, with nothing
 	// installed.
 	CapabilityPushConfig = "push_config"
+
+	// CapabilityInstallCosmog says this build reads InstallJob.Kind. The hub
+	// holds a Cosmog job back from a box that does not claim it: an agent that
+	// ignores the field would pm-install the game onto a Cosmog box.
+	CapabilityInstallCosmog = "install_cosmog"
 )
 
 // AgentCapabilities is what this binary claims it can do.
@@ -398,7 +403,9 @@ const (
 // have the hub send it work it cannot do, and the switch in handle() has no
 // default branch -- so the hub would wait for a reply that never comes.
 func AgentCapabilities(boxAdb bool) []string {
-	caps := []string{CapabilityWriteConfig, CapabilityScreenshot, CapabilityPushConfig}
+	caps := []string{
+		CapabilityWriteConfig, CapabilityScreenshot, CapabilityPushConfig, CapabilityInstallCosmog,
+	}
 	if boxAdb {
 		caps = append(caps, CapabilityBoxAdb)
 	}
@@ -587,9 +594,22 @@ type InstallJob struct {
 	// Written once the install verifies and before the post-install hook, so
 	// the hook that starts the scanner never starts it against the previous
 	// fleet's config. Nil for every app that is not this box's group MITM.
-	Config         *ConfigFile `json:"config,omitempty"`
-	TimeoutSeconds int         `json:"timeoutSeconds"`
+	Config *ConfigFile `json:"config,omitempty"`
+	// What "install" means. Empty is an APK through a pm session; the two
+	// others are Cosmog, which is not an app -- see InstallKindCosmog.
+	Kind           string `json:"kind,omitempty"`
+	TimeoutSeconds int    `json:"timeoutSeconds"`
 }
+
+const (
+	// InstallKindCosmog: the artifact is a Cosmog bundle, unpacked into
+	// /data/local/tmp/cos rather than installed.
+	InstallKindCosmog = "cosmog"
+	// InstallKindCosmogGame: the artifact is the game's bundle on a box whose
+	// MITM is Cosmog, which wants its APKs and one library on disk and the
+	// app itself not installed at all.
+	InstallKindCosmogGame = "cosmog_game"
+)
 
 type CancelJob struct {
 	Type  string `json:"type"`

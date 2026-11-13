@@ -148,9 +148,10 @@ export type RenderOutcome =
  *   this fires often on a fresh fleet — saying which box and which field is
  *   what keeps that from reading as broken.
  *
- * The value is JSON-escaped on the way in. A config is JSON — the dashboard
- * refuses to save a template that is not — and every placeholder it can save
- * therefore sits inside a string literal, while the values are free-form
+ * The value is JSON-escaped on the way in. A JSON config's placeholders all
+ * sit inside string literals — the dashboard refuses to save one where they do
+ * not — and a TOML one (Cosmog, Lunala) is escaped by where each placeholder
+ * stands, see `encodeForToml`. Either way the values are free-form
  * operator text: a box renamed `Kitchen "spare"` would otherwise render a file
  * that does not parse, and one named `x", "rotomUrl": "http://elsewhere` would
  * render a file that parses and points the scanner somewhere else.
@@ -159,11 +160,13 @@ export function renderTemplate(
   template: string,
   device: DeviceForConfig,
   defaults: ConfigDefaults,
+  format: ConfigFormat = "json",
 ): { ok: true; text: string } | { ok: false; reason: string } {
   const unknown: string[] = [];
   const empty: string[] = [];
+  const unsafe: string[] = [];
 
-  const text = template.replace(TOKEN, (whole, raw: string) => {
+  const text = template.replace(TOKEN, (whole, raw: string, offset: number) => {
     const name = raw.trim();
     // `Object.hasOwn`, not a truthy lookup: a bare index finds `constructor`
     // and `toString` on Object.prototype, which rendered `[object Object]`
@@ -176,6 +179,14 @@ export function renderTemplate(
     if (value === null || value === "") {
       empty.push(name);
       return whole;
+    }
+    if (format === "toml") {
+      const encoded = encodeForToml(value, tomlContextAt(template, offset));
+      if (encoded === null) {
+        unsafe.push(name);
+        return whole;
+      }
+      return encoded;
     }
     return escapeForJsonString(value);
   });
@@ -194,7 +205,93 @@ export function renderTemplate(
       reason: `${empty.map((n) => `{{${n}}}`).join(", ")} is empty on ${device.name}`,
     };
   }
+  if (unsafe.length > 0) {
+    return {
+      ok: false,
+      reason:
+        `${unsafe.map((n) => `{{${n}}}`).join(", ")} cannot be written where the TOML has it on ` +
+        `${device.name} — outside quotes a value must be a number, and inside '…' it may not ` +
+        `hold a quote. Put the placeholder inside "…"`,
+    };
+  }
   return { ok: true, text };
+}
+
+/**
+ * Which file format a config path means.
+ *
+ * By the path and nothing else: it is what the scanner goes by too. Cosmog
+ * reads `/data/local/tmp/cos/config.toml` as TOML whatever is in it, and
+ * guessing from the contents is how a JSON typo becomes "must be TOML then".
+ */
+export type ConfigFormat = "json" | "toml";
+
+export function configFormat(path: string | null | undefined): ConfigFormat {
+  return path?.toLowerCase().endsWith(".toml") ? "toml" : "json";
+}
+
+/**
+ * Where in a TOML document an offset sits.
+ *
+ * JSON never needed this: the dashboard only saves a template whose
+ * placeholders are all inside string literals, so one escape fits every token.
+ * TOML is typed, and Cosmog's `workers = 50` is an integer — written as
+ * `workers = "50"` it does not parse as a config at all. So a placeholder may
+ * stand outside quotes there, and how a value is written depends on which of
+ * the four places it landed in.
+ *
+ * Not a TOML parser: it only follows quotes and comments, which is everything
+ * that decides the escape. An unterminated single-line string ends at its
+ * newline, as it would for the scanner reading the file.
+ */
+type TomlContext = "bare" | "basic" | "literal" | "comment";
+
+export function tomlContextAt(text: string, offset: number): TomlContext {
+  let state: TomlContext = "bare";
+  let multiline = false;
+  for (let i = 0; i < offset; i++) {
+    const ch = text[i];
+    if (state === "bare") {
+      if (ch === "#") state = "comment";
+      else if (ch === '"' || ch === "'") {
+        state = ch === '"' ? "basic" : "literal";
+        multiline = text.startsWith(ch.repeat(3), i);
+        if (multiline) i += 2;
+      }
+    } else if (state === "comment") {
+      if (ch === "\n") state = "bare";
+    } else {
+      const quote = state === "basic" ? '"' : "'";
+      if (state === "basic" && ch === "\\") i++;
+      else if (multiline ? text.startsWith(quote.repeat(3), i) : ch === quote) {
+        if (multiline) i += 2;
+        state = "bare";
+        multiline = false;
+      } else if (ch === "\n" && !multiline) state = "bare";
+    }
+  }
+  return state;
+}
+
+/** What may stand outside quotes: a TOML integer, float or boolean. */
+const TOML_BARE = /^(?:[+-]?\d+(?:\.\d+)?|true|false)$/;
+
+/**
+ * One value, written for the place it lands in. Null when it cannot be written
+ * there without changing what the file means.
+ *
+ * - In `"…"` and in a comment: the JSON escape. Every sequence JSON.stringify
+ *   emits is one TOML's basic string accepts, and none of them is a raw
+ *   newline, so a comment stays one line.
+ * - In `'…'`: nothing is escapable, so a value with a quote or a control
+ *   character is refused.
+ * - Outside quotes: a number or a boolean, or refused. A box named
+ *   `8\nrotom_secret = "x"` must not be able to add a key.
+ */
+function encodeForToml(value: string, context: TomlContext): string | null {
+  if (context === "basic" || context === "comment") return escapeForJsonString(value);
+  if (context === "literal") return /['\u0000-\u001f\u007f]/.test(value) ? null : value;
+  return TOML_BARE.test(value) ? value : null;
 }
 
 /**
@@ -240,22 +337,25 @@ export function renderConfig(
   const template = override ?? group?.mitmConfig;
   if (!group?.mitmConfigPath || !template) return null;
 
-  const rendered = renderTemplate(template, device, defaults);
+  const format = configFormat(group.mitmConfigPath);
+  const rendered = renderTemplate(template, device, defaults, format);
   if (!rendered.ok) return rendered;
 
   // The template was checked at save and the values are escaped above, so this
   // should not fire. It is here for the templates that never went through the
   // form — a seed, a psql edit, a restored backup — which would otherwise ship
   // a file the scanner cannot read and be reported as written.
-  try {
-    JSON.parse(rendered.text);
-  } catch (err) {
-    return {
-      ok: false,
-      reason: `the rendered config is not valid JSON on ${device.name}: ${
-        err instanceof Error ? err.message : String(err)
-      }`,
-    };
+  if (format === "json") {
+    try {
+      JSON.parse(rendered.text);
+    } catch (err) {
+      return {
+        ok: false,
+        reason: `the rendered config is not valid JSON on ${device.name}: ${
+          err instanceof Error ? err.message : String(err)
+        }`,
+      };
+    }
   }
 
   return {

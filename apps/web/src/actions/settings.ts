@@ -371,7 +371,7 @@ export async function updateGroup(_prev: ActionState, formData: FormData): Promi
     if (bad) return { error: bad };
   }
   if (mitmConfig) {
-    const bad = checkConfigTemplate(mitmConfig);
+    const bad = checkConfigTemplate(mitmConfig, mitmConfigPath);
     if (bad) return { error: bad };
   }
 

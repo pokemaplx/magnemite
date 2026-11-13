@@ -8,6 +8,7 @@ import { prisma } from "@magnemite/db";
 import { bus } from "../bus.js";
 import { env } from "../env.js";
 import { log } from "../log.js";
+import { COSMOG_PACKAGE, versionFromFilename } from "@magnemite/apk";
 import { readApkInfo } from "./apkInfo.js";
 import { artifactFilename, ensureArtifactDir } from "./artifacts.js";
 import { wrapAsBundle } from "./zip.js";
@@ -276,7 +277,20 @@ export async function storeUpload(input: UploadInput): Promise<UploadResult> {
   // choice the file cannot express.
   const manifest = await readApkInfo(incoming);
 
-  const packageName = typedPackage || (manifest.packageName ?? "");
+  // A Cosmog bundle is not an APK and has no manifest to ask. What it is can
+  // be read off its entries, so the package is not the operator's to get
+  // wrong; its version is in no file inside it, so that one they do type --
+  // or name the file for, the way `cosmog-2.1.3.zip` does.
+  const cosmog = manifest.cosmog === true;
+  if (cosmog && typedPackage && typedPackage !== COSMOG_PACKAGE) {
+    await fs.rm(incoming, { force: true });
+    throw new Error(
+      `this file is a Cosmog bundle, not a build of ${typedPackage} — choose ${COSMOG_PACKAGE} for it`,
+    );
+  }
+  if (cosmog) manifest.versionName = versionFromFilename(input.filename);
+
+  const packageName = cosmog ? COSMOG_PACKAGE : typedPackage || (manifest.packageName ?? "");
   // versionName is what people call a version, but it is optional in the
   // manifest — a build that only declares versionCode is still a build, and
   // the number it does have beats making the operator go and find one.
@@ -296,7 +310,9 @@ export async function storeUpload(input: UploadInput): Promise<UploadResult> {
   if (!version) {
     await fs.rm(incoming, { force: true });
     throw new Error(
-      "could not read a version out of this file — its manifest declares neither a versionName nor a versionCode",
+      cosmog
+        ? `a Cosmog bundle does not say which version it is — choose ${COSMOG_PACKAGE} as the package and type its version, or name the file for it (cosmog-2.1.3.zip)`
+        : "could not read a version out of this file — its manifest declares neither a versionName nor a versionCode",
     );
   }
 
@@ -321,7 +337,9 @@ export async function storeUpload(input: UploadInput): Promise<UploadResult> {
       update: {},
       create: {
         packageName,
-        displayName: input.displayName?.trim() || packageName.split(".").pop() || packageName,
+        displayName:
+          input.displayName?.trim() ||
+          (cosmog ? "Cosmog" : packageName.split(".").pop() || packageName),
         manual: true,
         arch,
         // Nothing polls a manual target and nothing auto-updates it; uploads
